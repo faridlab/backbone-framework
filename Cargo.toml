@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = [
+    "backbone-auth",
+    "backbone-authorization",
+    "backbone-cache",
+    "backbone-core",
+    "backbone-email",
+    "backbone-graphql",
+    "backbone-health",
+    "backbone-jobs",
+    "backbone-messaging",
+    "backbone-observability",
+    "backbone-orm",
+    "backbone-queue",
+    "backbone-rate-limit",
+    "backbone-search",
+    "backbone-storage",
+]
+
+# Each member crate keeps its own dependency declarations. There is intentionally
+# no [workspace.dependencies] table — every crate was self-describing in
+# monorepo-backbone (no workspace inheritance), so we preserve that property
+# during extraction. Lift-and-shift discipline: the source files inside each
+# member directory are byte-for-byte unchanged from monorepo-backbone.
