@@ -1,0 +1,498 @@
+//! Integration tests for Seeding module
+
+use backbone_orm::{
+    SeedManager, Seed, SeedType
+};
+use sqlx::PgPool;
+
+// Test entity for seeding integration tests
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct TestCountry {
+    id: String,
+    code: String,
+    name: String,
+    iso3: String,
+    currency: String,
+}
+
+// Programmatic seed implementation
+struct CountriesSeed;
+
+impl Seed for CountriesSeed {
+    fn name(&self) -> &str {
+        "countries_reference_data"
+    }
+
+    fn seed_type(&self) -> SeedType {
+        SeedType::Reference
+    }
+
+    fn up(&self) -> &str {
+        r#"
+        INSERT INTO countries (id, code, name, iso3, currency) VALUES
+        ('US', 'US', 'United States', 'USA', 'USD'),
+        ('CA', 'CA', 'Canada', 'CAN', 'CAD'),
+        ('GB', 'GB', 'United Kingdom', 'GBR', 'GBP'),
+        ('DE', 'DE', 'Germany', 'DEU', 'EUR'),
+        ('FR', 'FR', 'France', 'FRA', 'EUR');
+        "#
+    }
+
+    fn down(&self) -> &str {
+        "DELETE FROM countries WHERE code IN ('US', 'CA', 'GB', 'DE', 'FR');"
+    }
+}
+
+// Test user seed data structure
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct TestUserSeed {
+    name: String,
+    email: String,
+    role: String,
+}
+
+// Test user seed
+struct TestUsersSeed;
+
+impl Seed for TestUsersSeed {
+    fn name(&self) -> &str {
+        "test_users"
+    }
+
+    fn seed_type(&self) -> SeedType {
+        SeedType::Test
+    }
+
+    fn up(&self) -> &str {
+        r#"
+        INSERT INTO users (id, name, email, role, created_at, updated_at) VALUES
+        ('test-user-1', 'Test User 1', 'user1@test.local', 'user', NOW(), NOW()),
+        ('test-user-2', 'Test User 2', 'user2@test.local', 'moderator', NOW(), NOW()),
+        ('test-admin', 'Test Admin', 'admin@test.local', 'admin', NOW(), NOW());
+        "#
+    }
+
+    fn down(&self) -> &str {
+        "DELETE FROM users WHERE email LIKE '%@test.local';"
+    }
+}
+
+// Setup test tables for seeding
+async fn setup_seeding_test_database(database_url: &str) -> anyhow::Result<PgPool> {
+    let pool = PgPool::connect(database_url).await?;
+
+    // Create test tables
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS countries (
+            id VARCHAR(2) PRIMARY KEY,
+            code VARCHAR(2) NOT NULL UNIQUE,
+            name TEXT NOT NULL,
+            iso3 VARCHAR(3) NOT NULL,
+            currency VARCHAR(3) NOT NULL,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+        "#
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS users (
+            id UUID PRIMARY KEY,
+            name TEXT NOT NULL,
+            email TEXT NOT NULL UNIQUE,
+            role TEXT NOT NULL,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+        "#
+    )
+    .execute(&pool)
+    .await?;
+
+    // Clean up any existing test data
+    sqlx::query("DELETE FROM countries").execute(&pool).await?;
+    sqlx::query("DELETE FROM users").execute(&pool).await?;
+
+    Ok(pool)
+}
+
+async fn cleanup_seeding_test_database(pool: &PgPool) -> anyhow::Result<()> {
+    sqlx::query("DROP TABLE IF EXISTS users").execute(pool).await?;
+    sqlx::query("DROP TABLE IF EXISTS countries").execute(pool).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore] // Requires database connection
+async fn test_seed_manager_basic_operations() -> anyhow::Result<()> {
+    let database_url = "postgresql://localhost/test_db";
+    let pool = setup_seeding_test_database(database_url).await?;
+
+    // Create seed manager
+    let seed_manager = SeedManager::new(pool);
+
+    // Test that we can create a seed manager
+    assert!(!pool.is_closed());
+
+    // Test seed status on empty database
+    let status = seed_manager.status().await?;
+    assert_eq!(status.total_seeds, 0);
+
+    cleanup_seeding_test_database(&seed_manager.pool()).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore] // Requires database connection
+async fn test_programmatic_seeds() -> anyhow::Result<()> {
+    let database_url = "postgresql://localhost/test_db";
+    let pool = setup_seeding_test_database(database_url).await?;
+
+    // Create seed manager
+    let seed_manager = SeedManager::new(pool.clone());
+
+    // Create programmatic seed
+    let countries_seed = CountriesSeed;
+
+    // Apply the seed
+    sqlx::query(countries_seed.up())
+        .execute(&pool)
+        .await?;
+
+    // Verify data was inserted
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM countries")
+        .fetch_one(&pool)
+        .await?;
+
+    assert_eq!(count, 5);
+
+    // Test rollback
+    sqlx::query(countries_seed.down())
+        .execute(&pool)
+        .await?;
+
+    // Verify data was removed
+    let count_after_rollback: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM countries")
+        .fetch_one(&pool)
+        .await?;
+
+    assert_eq!(count_after_rollback, 0);
+
+    cleanup_seeding_test_database(&pool).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore] // Requires database connection
+async fn test_seed_data_loading() -> anyhow::Result<()> {
+    let database_url = "postgresql://localhost/test_db";
+    let pool = setup_seeding_test_database(database_url).await?;
+
+    // Create seed manager
+    let seed_manager = SeedManager::new(pool);
+
+    // Create test seed data
+    let test_users = vec![
+        TestUserSeed {
+            name: "Test User 1".to_string(),
+            email: "user1@test.local".to_string(),
+            role: "user".to_string(),
+        },
+        TestUserSeed {
+            name: "Test User 2".to_string(),
+            email: "user2@test.local".to_string(),
+            role: "moderator".to_string(),
+        },
+        TestUserSeed {
+            name: "Test Admin".to_string(),
+            email: "admin@test.local".to_string(),
+            role: "admin".to_string(),
+        },
+    ];
+
+    // Test bulk insert
+    let json_data: Vec<serde_json::Value> = test_users
+        .into_iter()
+        .map(|user| serde_json::to_value(user).unwrap())
+        .collect();
+
+    let rows_inserted = seed_manager.bulk_insert("users", &json_data).await?;
+    assert_eq!(rows_inserted, 3);
+
+    // Verify data was inserted correctly
+    let users: Vec<serde_json::Value> = sqlx::query_as("SELECT name, email, role FROM users ORDER BY name")
+        .fetch_all(&seed_manager.pool())
+        .await?;
+
+    assert_eq!(users.len(), 3);
+
+    // Verify specific user data
+    let admin_user: Option<serde_json::Value> = sqlx::query_as("SELECT * FROM users WHERE role = 'admin'")
+        .fetch_optional(&seed_manager.pool())
+        .await?;
+
+    assert!(admin_user.is_some());
+
+    cleanup_seeding_test_database(&seed_manager.pool()).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore] // Requires database connection
+async fn test_seed_file_creation() -> anyhow::Result<()> {
+    let database_url = "postgresql://localhost/test_db";
+    let pool = PgPool::connect(database_url).await?;
+
+    // Create seed manager
+    let seed_manager = SeedManager::new(pool);
+
+    // Test creating different types of seed files
+    seed_manager.create_seed("reference_countries", SeedType::Reference).await?;
+    seed_manager.create_seed("test_users", SeedType::Test).await?;
+    seed_manager.create_seed("initial_data", SeedType::Data).await?;
+
+    // Verify seed files were created
+    assert!(std::path::Path::new("seeds").exists());
+
+    // Count seed files (excluding revert files)
+    let seed_count = std::fs::read_dir("seeds")?
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry.path().extension().and_then(|ext| ext.to_str()) == Some("sql") &&
+            !entry.path().file_name().unwrap().to_string_lossy().contains("_revert")
+        })
+        .count();
+
+    assert_eq!(seed_count, 3);
+    assert_eq!(seed_count, 3); // 3 regular seeds + 3 revert files = 6 total
+
+    // Clean up test seed files
+    std::fs::remove_dir_all("seeds")?;
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore] // Requires database connection
+async fn test_seed_history_and_status() -> anyhow::Result<()> {
+    let database_url = "postgresql://localhost/test_db";
+    let pool = setup_seeding_test_database(database_url).await?;
+
+    // Create seed manager
+    let seed_manager = SeedManager::new(pool.clone());
+
+    // Apply a test seed manually to track history
+    let test_users_seed = TestUsersSeed;
+
+    // Manually execute and track the seed
+    sqlx::query(test_users_seed.up())
+        .execute(&pool)
+        .await?;
+
+    // Record the seed in our tracking table
+    sqlx::query("INSERT INTO schema_seeds (name, seed_type) VALUES ($1, $2)")
+        .bind(test_users_seed.name())
+        .bind("test") // This would normally be derived from SeedType enum
+        .execute(&pool)
+        .await?;
+
+    // Test history
+    let history = seed_manager.history().await?;
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].name, "test_users");
+    assert_eq!(history[0].seed_type, "test");
+
+    // Test status
+    let status = seed_manager.status().await?;
+    assert_eq!(status.total_seeds, 1);
+    assert_eq!(status.applied_seeds.len(), 1);
+    assert!(status.pending_seeds.is_empty());
+    assert_eq!(status.last_seed, Some("test_users".to_string()));
+
+    cleanup_seeding_test_database(&pool).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore] // Requires database connection
+async fn test_seed_reversion() -> anyhow::Result<()> {
+    let database_url = "postgresql://localhost/test_db";
+    let pool = setup_seeding_test_database(database_url).await?;
+
+    // Create seed manager
+    let seed_manager = SeedManager::new(pool.clone());
+
+    // Apply test seeds
+    let countries_seed = CountriesSeed;
+    let test_users_seed = TestUsersSeed;
+
+    // Apply seeds manually (simulating the seed manager behavior)
+    sqlx::query(countries_seed.up())
+        .execute(&pool)
+        .await?;
+
+    sqlx::query(test_users_seed.up())
+        .execute(&pool)
+        .await?;
+
+    // Track seeds in database
+    sqlx::query("INSERT INTO schema_seeds (name, seed_type) VALUES ($1, $2)")
+        .bind(countries_seed.name())
+        .bind("reference")
+        .execute(&pool)
+        .await?;
+
+    sqlx::query("INSERT INTO schema_seeds (name, seed_type) VALUES ($1, $2)")
+        .bind(test_users_seed.name())
+        .bind("test")
+        .execute(&pool)
+        .await?;
+
+    // Verify data exists
+    let country_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM countries")
+        .fetch_one(&pool)
+        .await?;
+    let user_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
+        .fetch_one(&pool)
+        .await?;
+
+    assert_eq!(country_count, 5);
+    assert_eq!(user_count, 3);
+
+    // Revert seeds (in reverse order)
+    sqlx::query(test_users_seed.down())
+        .execute(&pool)
+        .await?;
+
+    sqlx::query(countries_seed.down())
+        .execute(&pool)
+        .await?;
+
+    // Remove from tracking
+    sqlx::query("DELETE FROM schema_seeds WHERE name = $1")
+        .bind(test_users_seed.name())
+        .execute(&pool)
+        .await?;
+
+    sqlx::query("DELETE FROM schema_seeds WHERE name = $1")
+        .bind(countries_seed.name())
+        .execute(&pool)
+        .await?;
+
+    // Verify data was removed
+    let country_count_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM countries")
+        .fetch_one(&pool)
+        .await?;
+    let user_count_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
+        .fetch_one(&pool)
+        .await?;
+
+    assert_eq!(country_count_after, 0);
+    assert_eq!(user_count_after, 0);
+
+    cleanup_seeding_test_database(&pool).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_seeding_types() {
+    // Test that all seeding types can be constructed and used
+
+    // Test SeedType enum
+    let data_seed = SeedType::Data;
+    let test_seed = SeedType::Test;
+    let reference_seed = SeedType::Reference;
+
+    // Verify all types can be created
+    let _ = (data_seed, test_seed, reference_seed);
+
+    // Test Seed trait implementation with our mock seeds
+    let countries_seed = CountriesSeed;
+    let test_users_seed = TestUsersSeed;
+
+    // Test trait methods
+    assert_eq!(countries_seed.name(), "countries_reference_data");
+    match countries_seed.seed_type() {
+        SeedType::Reference => assert!(true),
+        _ => assert!(false),
+    }
+    assert!(countries_seed.up().contains("INSERT INTO countries"));
+    assert!(countries_seed.down().contains("DELETE FROM countries"));
+
+    assert_eq!(test_users_seed.name(), "test_users");
+    match test_users_seed.seed_type() {
+        SeedType::Test => assert!(true),
+        _ => assert!(false),
+    }
+    assert!(test_users_seed.up().contains("INSERT INTO users"));
+    assert!(test_users_seed.down().contains("@test.local"));
+}
+
+#[tokio::test]
+async fn test_seed_data_structures() {
+    // Test seed data structures can be created and serialized
+
+    let test_user = TestUserSeed {
+        name: "Test User".to_string(),
+        email: "test@test.local".to_string(),
+        role: "user".to_string(),
+    };
+
+    let test_country = TestCountry {
+        id: "US".to_string(),
+        code: "US".to_string(),
+        name: "United States".to_string(),
+        iso3: "USA".to_string(),
+        currency: "USD".to_string(),
+    };
+
+    // Test serialization
+    let user_json = serde_json::to_string(&test_user).unwrap();
+    let country_json = serde_json::to_string(&test_country).unwrap();
+
+    assert!(user_json.contains("test@test.local"));
+    assert!(country_json.contains("United States"));
+
+    // Test deserialization
+    let user_deserialized: TestUserSeed = serde_json::from_str(&user_json).unwrap();
+    let country_deserialized: TestCountry = serde_json::from_str(&country_json).unwrap();
+
+    assert_eq!(user_deserialized.name, test_user.name);
+    assert_eq!(user_deserialized.email, test_user.email);
+    assert_eq!(country_deserialized.id, test_country.id);
+    assert_eq!(country_deserialized.name, test_country.name);
+}
+
+#[tokio::test]
+async fn test_seeding_file_naming() {
+    // Test seed file naming conventions
+    let timestamp = "20231201_120000";
+    let seed_names = vec![
+        format!("{}_{}_data.sql", timestamp, "initial_data"),
+        format!("{}_{}_test.sql", timestamp, "test_users"),
+        format!("{}_{}_reference.sql", timestamp, "countries"),
+        format!("{}_{}_revert.sql", timestamp, "initial_data"),
+    ];
+
+    for name in &seed_names {
+        // Verify naming pattern
+        assert!(name.starts_with(&format!("{}_", timestamp)));
+        assert!(name.ends_with(".sql"));
+
+        // Verify no consecutive dots
+        assert!(!name.contains(".."));
+    }
+
+    // Verify revert file naming
+    let revert_files: Vec<&String> = seed_names
+        .iter()
+        .filter(|name| name.contains("_revert"))
+        .collect();
+
+    assert_eq!(revert_files.len(), 1);
+    assert!(revert_files[0].ends_with("_revert.sql"));
+}

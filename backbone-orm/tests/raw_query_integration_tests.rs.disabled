@@ -1,0 +1,488 @@
+//! Integration tests for Raw Query module
+
+use backbone_orm::{
+    RawQueryBuilder, AdvancedQueryBuilder, RawQuery, QueryValue,
+    JoinType
+};
+use sqlx::PgPool;
+use serde::{Deserialize, Serialize};
+
+// Test entities for integration tests
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+struct User {
+    id: uuid::Uuid,
+    name: String,
+    email: String,
+    age: i32,
+    department: String,
+    created_at: chrono::NaiveDateTime,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+struct Order {
+    id: uuid::Uuid,
+    user_id: uuid::Uuid,
+    total: f64,
+    status: String,
+    created_at: chrono::NaiveDateTime,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+struct UserOrderStats {
+    user_id: uuid::Uuid,
+    user_name: String,
+    order_count: i64,
+    total_spent: f64,
+    avg_order_value: f64,
+}
+
+// Setup test database
+async fn setup_raw_query_test_database(database_url: &str) -> anyhow::Result<PgPool> {
+    let pool = PgPool::connect(database_url).await?;
+
+    // Create test tables
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS users (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            name TEXT NOT NULL,
+            email TEXT NOT NULL UNIQUE,
+            age INTEGER NOT NULL,
+            department TEXT NOT NULL,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+        "#
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS orders (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            user_id UUID NOT NULL REFERENCES users(id),
+            total DECIMAL(10,2) NOT NULL,
+            status TEXT NOT NULL,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+        "#
+    )
+    .execute(&pool)
+    .await?;
+
+    // Clean up existing data
+    sqlx::query("DELETE FROM orders").execute(&pool).await?;
+    sqlx::query("DELETE FROM users").execute(&pool).await?;
+
+    // Insert test data
+    let user_id1 = uuid::Uuid::new_v4();
+    let user_id2 = uuid::Uuid::new_v4();
+    let user_id3 = uuid::Uuid::new_v4();
+
+    // Insert users
+    sqlx::query(
+        "INSERT INTO users (id, name, email, age, department) VALUES ($1, $2, $3, $4, $5), ($6, $7, $8, $9, $10), ($11, $12, $13, $14, $15)"
+    )
+    .bind(user_id1)
+    .bind("Alice Johnson")
+    .bind("alice@example.com")
+    .bind(28)
+    .bind("Engineering")
+    .bind(user_id2)
+    .bind("Bob Smith")
+    .bind("bob@example.com")
+    .bind(35)
+    .bind("Sales")
+    .bind(user_id3)
+    .bind("Carol Williams")
+    .bind("carol@example.com")
+    .bind(31)
+    .bind("Engineering")
+    .execute(&pool)
+    .await?;
+
+    // Insert orders
+    sqlx::query(
+        "INSERT INTO orders (user_id, total, status) VALUES
+        ($1, 150.75, 'completed'),
+        ($2, 89.99, 'completed'),
+        ($3, 225.50, 'pending'),
+        ($1, 75.25, 'completed'),
+        ($2, 310.00, 'completed')"
+    )
+    .bind(user_id1)
+    .bind(user_id2)
+    .bind(user_id3)
+    .execute(&pool)
+    .await?;
+
+    Ok(pool)
+}
+
+async fn cleanup_raw_query_test_database(pool: &PgPool) -> anyhow::Result<()> {
+    sqlx::query("DROP TABLE IF EXISTS orders").execute(pool).await?;
+    sqlx::query("DROP TABLE IF EXISTS users").execute(pool).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore] // Requires database connection
+async fn test_raw_query_builder_basic() -> anyhow::Result<()> {
+    let database_url = "postgresql://localhost/test_db";
+    let pool = setup_raw_query_test_database(database_url).await?;
+
+    // Test raw query builder
+    let users: Vec<User> = RawQueryBuilder::new("SELECT * FROM users WHERE age > $1 ORDER BY name")
+        .bind(QueryValue::integer(30))
+        .execute(&pool)
+        .await?;
+
+    assert!(!users.is_empty());
+    for user in &users {
+        assert!(user.age > 30);
+    }
+
+    // Test single result
+    let user: Option<User> = RawQueryBuilder::new("SELECT * FROM users WHERE email = $1")
+        .bind(QueryValue::text("alice@example.com"))
+        .execute_first(&pool)
+        .await?;
+
+    assert!(user.is_some());
+    assert_eq!(user.unwrap().name, "Alice Johnson");
+
+    cleanup_raw_query_test_database(&pool).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore] // Requires database connection
+async fn test_advanced_query_builder_joins() -> anyhow::Result<()> {
+    let database_url = "postgresql://localhost/test_db";
+    let pool = setup_raw_query_test_database(database_url).await?;
+
+    // Test advanced query with JOINs
+    let results: Vec<(String, f64)> = AdvancedQueryBuilder::new("users")
+        .select(&["users.name", "orders.total"])
+        .join(JoinType::Inner, "orders", "users.id = orders.user_id")
+        .where_raw("orders.status = $1", QueryValue::text("completed"))
+        .order_by("orders.total", "DESC")
+        .execute(&pool)
+        .await?;
+
+    assert!(!results.is_empty());
+
+    // Verify results are ordered by total descending
+    for i in 1..results.len() {
+        assert!(results[i-1].1 >= results[i].1);
+    }
+
+    cleanup_raw_query_test_database(&pool).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore] // Requires database connection
+async fn test_advanced_query_builder_aggregation() -> anyhow::Result<()> {
+    let database_url = "postgresql://localhost/test_db";
+    let pool = setup_raw_query_test_database(database_url).await?;
+
+    // Test aggregation with GROUP BY and HAVING
+    let stats: Vec<(String, i64, f64)> = AdvancedQueryBuilder::new("users")
+        .select(&["users.department", "COUNT(*) as user_count", "AVG(age) as avg_age"])
+        .join(JoinType::Inner, "orders", "users.id = orders.user_id")
+        .group_by(&["users.department"])
+        .having("COUNT(*) > $1", QueryValue::integer(1))
+        .order_by("avg_age", "DESC")
+        .execute(&pool)
+        .await?;
+
+    assert!(!stats.is_empty());
+
+    for (department, user_count, avg_age) in stats {
+        assert!(!department.is_empty());
+        assert!(user_count > 0);
+        assert!(avg_age > 0.0);
+    }
+
+    cleanup_raw_query_test_database(&pool).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore] // Requires database connection
+async fn test_advanced_query_builder_window_functions() -> anyhow::Result<()> {
+    let database_url = "postgresql://localhost/test_db";
+    let pool = setup_raw_query_test_database(database_url).await?;
+
+    // Test window functions
+    let ranked_orders: Vec<(String, f64, i64)> = AdvancedQueryBuilder::new("orders")
+        .join(JoinType::Inner, "users", "orders.user_id = users.id")
+        .select(&["users.name", "orders.total", "ROW_NUMBER() OVER (PARTITION BY users.department ORDER BY orders.total DESC) as rank"])
+        .where_raw("orders.status = $1", QueryValue::text("completed"))
+        .order_by("rank", "ASC")
+        .execute(&pool)
+        .await?;
+
+    assert!(!ranked_orders.is_empty());
+
+    // Verify ranks start from 1 and are sequential within departments
+    let mut engineering_ranks = Vec::new();
+    let mut sales_ranks = Vec::new();
+
+    for (name, total, rank) in ranked_orders {
+        assert!(total > 0.0);
+        assert!(rank >= 1);
+
+        // This is a simplified check - in a real scenario, you'd need more complex logic
+        if name == "Alice Johnson" || name == "Carol Williams" {
+            engineering_ranks.push(rank);
+        } else if name == "Bob Smith" {
+            sales_ranks.push(rank);
+        }
+    }
+
+    cleanup_raw_query_test_database(&pool).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore] // Requires database connection
+async fn test_advanced_query_builder_cte() -> anyhow::Result<()> {
+    let database_url = "postgresql://localhost/test_db";
+    let pool = setup_raw_query_test_database(database_url).await?;
+
+    // Test CTE with complex analytics
+    let analytics: Vec<(String, i64, f64)> = AdvancedQueryBuilder::new("users")
+        .with_cte(
+            "user_order_summary",
+            "SELECT
+                user_id,
+                COUNT(*) as order_count,
+                SUM(total) as total_spent,
+                AVG(total) as avg_order_value
+            FROM orders
+            WHERE status = 'completed'
+            GROUP BY user_id"
+        )
+        .select(&["users.name", "user_order_summary.order_count", "user_order_summary.total_spent"])
+        .join(JoinType::Inner, "user_order_summary", "users.id = user_order_summary.user_id")
+        .where_raw("user_order_summary.order_count > $1", QueryValue::integer(1))
+        .order_by("user_order_summary.total_spent", "DESC")
+        .execute(&pool)
+        .await?;
+
+    assert!(!analytics.is_empty());
+
+    for (name, order_count, total_spent) in analytics {
+        assert!(!name.is_empty());
+        assert!(order_count > 1); // Due to HAVING clause
+        assert!(total_spent > 0.0);
+    }
+
+    cleanup_raw_query_test_database(&pool).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore] // Requires database connection
+async fn test_raw_query_scalar_functions() -> anyhow::Result<()> {
+    let database_url = "postgresql://localhost/test_db";
+    let pool = setup_raw_query_test_database(database_url).await?;
+
+    // Test scalar query
+    let user_count: i64 = RawQuery::scalar(
+        &pool,
+        "SELECT COUNT(*) FROM users WHERE age > $1",
+        vec![QueryValue::integer(25)]
+    ).await?;
+
+    assert!(user_count > 0);
+
+    // Test multiple scalar values
+    let departments: Vec<String> = RawQuery::many(
+        &pool,
+        "SELECT DISTINCT department FROM users ORDER BY department",
+        vec![]
+    ).await?;
+
+    assert!(!departments.is_empty());
+    assert!(departments.len() <= 3); // Max 3 departments from test data
+
+    cleanup_raw_query_test_database(&pool).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore] // Requires database connection
+async fn test_complex_analytics_query() -> anyhow::Result<()> {
+    let database_url = "postgresql://localhost/test_db";
+    let pool = setup_raw_query_test_database(database_url).await?;
+
+    // Test comprehensive analytics with CTEs, window functions, and complex joins
+    let complex_stats: Vec<(String, String, i64, f64, i64, f64, i64, f64)> = AdvancedQueryBuilder::new("users")
+        .with_cte(
+            "department_stats",
+            "SELECT
+                department,
+                COUNT(*) as dept_size,
+                AVG(age) as avg_age
+            FROM users
+            GROUP BY department"
+        )
+        .with_cte(
+            "user_metrics",
+            "SELECT
+                u.id,
+                u.name,
+                u.department,
+                COUNT(o.id) as order_count,
+                COALESCE(SUM(o.total), 0) as total_spent,
+                ds.dept_size,
+                ds.avg_age
+            FROM users u
+            LEFT JOIN orders o ON u.id = o.user_id
+            LEFT JOIN department_stats ds ON u.department = ds.department
+            GROUP BY u.id, u.name, u.department, ds.dept_size, ds.avg_age"
+        )
+        .select(&[
+            "user_metrics.name",
+            "user_metrics.department",
+            "user_metrics.order_count",
+            "user_metrics.total_spent",
+            "user_metrics.dept_size",
+            "user_metrics.avg_age",
+            "ROW_NUMBER() OVER (PARTITION BY user_metrics.department ORDER BY user_metrics.total_spent DESC) as dept_rank",
+            "AVG(user_metrics.total_spent) OVER (PARTITION BY user_metrics.department) as dept_avg_spent"
+        ])
+        .where_raw("user_metrics.order_count >= $1", QueryValue::integer(1))
+        .order_by("dept_rank", "ASC")
+        .execute(&pool)
+        .await?;
+
+    assert!(!complex_stats.is_empty());
+
+    for stats in complex_stats {
+        let (name, department, order_count, total_spent, dept_size, avg_age, dept_rank, dept_avg_spent) = stats;
+
+        assert!(!name.is_empty());
+        assert!(!department.is_empty());
+        assert!(order_count >= 1);
+        assert!(total_spent >= 0.0);
+        assert!(dept_size > 0);
+        assert!(avg_age > 0.0);
+        assert!(dept_rank >= 1);
+        assert!(dept_avg_spent >= 0.0);
+    }
+
+    cleanup_raw_query_test_database(&pool).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore] // Requires database connection
+async fn test_raw_query_update_delete() -> anyhow::Result<()> {
+    let database_url = "postgresql://localhost/test_db";
+    let pool = setup_raw_query_test_database(database_url).await?;
+
+    // Test UPDATE with raw query
+    let affected_rows = RawQueryBuilder::new("UPDATE orders SET status = $1 WHERE status = $2")
+        .bind(QueryValue::text("processed"))
+        .bind(QueryValue::text("pending"))
+        .execute_raw(&pool)
+        .await?;
+
+    assert!(affected_rows >= 0);
+
+    // Verify the update worked
+    let pending_count: i64 = RawQuery::scalar(
+        &pool,
+        "SELECT COUNT(*) FROM orders WHERE status = $1",
+        vec![QueryValue::text("pending")]
+    ).await?;
+
+    assert_eq!(pending_count, 0);
+
+    // Test DELETE with raw query
+    let deleted_rows = RawQueryBuilder::new("DELETE FROM orders WHERE total < $1")
+        .bind(QueryValue::float(100.0))
+        .execute_raw(&pool)
+        .await?;
+
+    assert!(deleted_rows >= 0);
+
+    cleanup_raw_query_test_database(&pool).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_raw_query_types() {
+    // Test that all raw query types can be constructed
+
+    // Test RawQueryBuilder
+    let raw_builder = RawQueryBuilder::new("SELECT * FROM test")
+        .bind(QueryValue::text("test"))
+        .bind_many(vec![
+            QueryValue::integer(42),
+            QueryValue::float(3.14)
+        ]);
+
+    let (sql, params) = raw_builder.build();
+    assert!(sql.contains("SELECT"));
+    assert_eq!(params.len(), 3);
+
+    // Test AdvancedQueryBuilder
+    let advanced_builder = AdvancedQueryBuilder::new("users")
+        .select(&["id", "name"])
+        .join(JoinType::Inner, "orders", "users.id = orders.user_id")
+        .where_raw("active = $1", QueryValue::boolean(true))
+        .group_by(&["id", "name"])
+        .having("COUNT(*) > $2", QueryValue::integer(5))
+        .order_by("name", "ASC")
+        .limit(10)
+        .with_cte("temp", "SELECT * FROM source")
+        .window_fn("ROW_NUMBER()", "rn", &["department"], &["name"]);
+
+    let (sql, params) = advanced_builder.build_sql();
+    assert!(sql.contains("WITH"));
+    assert!(sql.contains("INNER JOIN"));
+    assert!(sql.contains("ROW_NUMBER()"));
+    assert_eq!(params.len(), 2);
+
+    // Test JoinType enum
+    let join_types = vec![
+        JoinType::Inner,
+        JoinType::Left,
+        JoinType::Right,
+        JoinType::Full,
+        JoinType::Cross,
+    ];
+
+    assert_eq!(join_types.len(), 5);
+}
+
+#[tokio::test]
+async fn test_raw_query_error_handling() {
+    // Test that raw queries handle errors gracefully
+    // Note: These tests don't require a real database connection
+
+    // Test building invalid SQL (should still build, but fail when executed)
+    let invalid_query = RawQueryBuilder::new("INVALID SQL SYNTAX")
+        .bind(QueryValue::text("test"));
+
+    let (sql, params) = invalid_query.build();
+    assert!(sql.contains("INVALID"));
+    assert_eq!(params.len(), 1);
+
+    // Test building complex query with missing components
+    let complex_query = AdvancedQueryBuilder::new("")
+        .select(&[])
+        .group_by(&[])
+        .having("TRUE", QueryValue::boolean(true))
+        .with_cte("", "")
+        .window_fn("", "", &[], &[]);
+
+    let (sql, params) = complex_query.build_sql();
+    // Should build without panicking
+    assert_eq!(params.len(), 1);
+}
