@@ -1,0 +1,43 @@
+[package]
+name = "backbone-email"
+version = "2.0.0"
+edition = "2021"
+description = "Backbone Framework Email Module - SMTP support"
+
+[dependencies]
+# Core dependencies
+tokio = { version = "1.0", features = ["full"] }
+anyhow = "1.0"
+thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Async trait
+async-trait = "0.1"
+
+# Email sending (pool disabled to avoid connection reuse issues)
+lettre = { version = "0.11", features = ["tracing", "smtp-transport", "native-tls", "builder"] }
+
+
+# Template rendering
+handlebars = "4.5"
+
+# UUID
+uuid = { version = "1.0", features = ["v4"] }
+
+# Timestamp
+chrono = { version = "0.4", features = ["serde"] }
+
+# Logging
+tracing = "0.1"
+
+# Base64 encoding
+base64 = "0.22"
+
+[features]
+default = ["smtp"]
+smtp = []
+
+[dev-dependencies]
+tempfile = "3.0"
+tokio-test = "0.4"
