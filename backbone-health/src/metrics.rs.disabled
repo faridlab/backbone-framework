@@ -1,0 +1,399 @@
+//! Health check metrics collection
+
+use chrono::{DateTime, Utc};
+use serde::{Serialize, Deserialize};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use std::time::Duration;
+
+/// Metrics collector for health checks
+#[derive(Debug)]
+pub struct MetricsCollector {
+    metrics: Arc<RwLock<HealthMetrics>>,
+}
+
+impl MetricsCollector {
+    /// Create a new metrics collector
+    pub fn new() -> Self {
+        Self {
+            metrics: Arc::new(RwLock::new(HealthMetrics::new())),
+        }
+    }
+
+    /// Record a component health check
+    pub async fn record_component_check(&self, component_name: &str, status: &super::ComponentStatus) {
+        let mut metrics = self.metrics.write().await;
+        metrics.record_component_check(component_name, status);
+    }
+
+    /// Get a snapshot of current metrics
+    pub async fn snapshot(&self) -> MetricsSnapshot {
+        let metrics = self.metrics.read().await;
+        metrics.snapshot()
+    }
+
+    /// Reset all metrics
+    pub async fn reset(&self) {
+        let mut metrics = self.metrics.write().await;
+        metrics.reset();
+    }
+}
+
+/// Complete health check metrics
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthMetrics {
+    /// Total number of health checks performed
+    pub total_checks: u64,
+
+    /// Number of successful checks
+    pub successful_checks: u64,
+
+    /// Number of failed checks
+    pub failed_checks: u64,
+
+    /// Number of degraded checks
+    pub degraded_checks: u64,
+
+    /// Total response time across all checks
+    pub total_response_time: Duration,
+
+    /// Minimum response time
+    pub min_response_time: Duration,
+
+    /// Maximum response time
+    pub max_response_time: Duration,
+
+    /// Average response time
+    pub average_response_time: Duration,
+
+    /// Per-component metrics
+    pub component_metrics: HashMap<String, ComponentMetrics>,
+
+    /// Timestamp when metrics collection started
+    pub started_at: DateTime<Utc>,
+
+    /// Last updated timestamp
+    pub last_updated: DateTime<Utc>,
+}
+
+impl HealthMetrics {
+    /// Create new health metrics
+    pub fn new() -> Self {
+        Self {
+            total_checks: 0,
+            successful_checks: 0,
+            failed_checks: 0,
+            degraded_checks: 0,
+            total_response_time: Duration::from_millis(0),
+            min_response_time: Duration::MAX,
+            max_response_time: Duration::from_millis(0),
+            average_response_time: Duration::from_millis(0),
+            component_metrics: HashMap::new(),
+            started_at: Utc::now(),
+            last_updated: Utc::now(),
+        }
+    }
+
+    /// Record a component health check
+    pub fn record_component_check(&mut self, component_name: &str, status: &super::ComponentStatus) {
+        self.total_checks += 1;
+        self.last_updated = Utc::now();
+
+        // Update overall metrics based on component status
+        match status.status {
+            super::HealthStatus::Healthy => self.successful_checks += 1,
+            super::HealthStatus::Unhealthy => self.failed_checks += 1,
+            super::HealthStatus::Degraded => self.degraded_checks += 1,
+        }
+
+        // Update response time metrics
+        self.total_response_time += status.response_time;
+        self.min_response_time = self.min_response_time.min(status.response_time);
+        self.max_response_time = self.max_response_time.max(status.response_time);
+
+        if self.total_checks > 0 {
+            self.average_response_time = self.total_response_time / self.total_checks as u32;
+        }
+
+        // Update component-specific metrics
+        let component_metrics = self.component_metrics
+            .entry(component_name.to_string())
+            .or_insert_with(ComponentMetrics::new);
+
+        component_metrics.record_check(status);
+    }
+
+    /// Get a snapshot of current metrics
+    pub fn snapshot(&self) -> MetricsSnapshot {
+        MetricsSnapshot {
+            overall: OverallMetrics {
+                total_checks: self.total_checks,
+                successful_checks: self.successful_checks,
+                failed_checks: self.failed_checks,
+                degraded_checks: self.degraded_checks,
+                success_rate: if self.total_checks > 0 {
+                    (self.successful_checks as f64 / self.total_checks as f64) * 100.0
+                } else {
+                    0.0
+                },
+                failure_rate: if self.total_checks > 0 {
+                    (self.failed_checks as f64 / self.total_checks as f64) * 100.0
+                } else {
+                    0.0
+                },
+                degraded_rate: if self.total_checks > 0 {
+                    (self.degraded_checks as f64 / self.total_checks as f64) * 100.0
+                } else {
+                    0.0
+                },
+                total_response_time: self.total_response_time,
+                min_response_time: self.min_response_time,
+                max_response_time: self.max_response_time,
+                average_response_time: self.average_response_time,
+            },
+            component_metrics: self.component_metrics.clone(),
+            started_at: self.started_at,
+            last_updated: self.last_updated,
+        }
+    }
+
+    /// Reset all metrics
+    pub fn reset(&mut self) {
+        *self = Self::new();
+    }
+}
+
+/// Overall health metrics summary
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OverallMetrics {
+    /// Total number of health checks performed
+    pub total_checks: u64,
+
+    /// Number of successful checks
+    pub successful_checks: u64,
+
+    /// Number of failed checks
+    pub failed_checks: u64,
+
+    /// Number of degraded checks
+    pub degraded_checks: u64,
+
+    /// Success rate percentage
+    pub success_rate: f64,
+
+    /// Failure rate percentage
+    pub failure_rate: f64,
+
+    /// Degraded rate percentage
+    pub degraded_rate: f64,
+
+    /// Total response time across all checks
+    pub total_response_time: Duration,
+
+    /// Minimum response time
+    pub min_response_time: Duration,
+
+    /// Maximum response time
+    pub max_response_time: Duration,
+
+    /// Average response time
+    pub average_response_time: Duration,
+}
+
+/// Per-component metrics
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComponentMetrics {
+    /// Name of the component
+    pub name: String,
+
+    /// Total checks for this component
+    pub total_checks: u64,
+
+    /// Successful checks
+    pub successful_checks: u64,
+
+    /// Failed checks
+    pub failed_checks: u64,
+
+    /// Degraded checks
+    pub degraded_checks: u64,
+
+    /// Success rate percentage
+    pub success_rate: f64,
+
+    /// Average response time
+    pub average_response_time: Duration,
+
+    /// Min response time
+    pub min_response_time: Duration,
+
+    /// Max response time
+    pub max_response_time: Duration,
+
+    /// Last check status
+    pub last_status: super::HealthStatus,
+
+    /// Last check timestamp
+    pub last_checked: DateTime<Utc>,
+
+    /// Consecutive failures
+    pub consecutive_failures: usize,
+
+    /// Uptime percentage (time when component was healthy)
+    pub uptime_percentage: f64,
+}
+
+impl ComponentMetrics {
+    /// Create new component metrics
+    pub fn new() -> Self {
+        Self {
+            name: String::new(),
+            total_checks: 0,
+            successful_checks: 0,
+            failed_checks: 0,
+            degraded_checks: 0,
+            success_rate: 0.0,
+            average_response_time: Duration::from_millis(0),
+            min_response_time: Duration::MAX,
+            max_response_time: Duration::from_millis(0),
+            last_status: super::HealthStatus::Healthy,
+            last_checked: Utc::now(),
+            consecutive_failures: 0,
+            uptime_percentage: 0.0,
+        }
+    }
+
+    /// Record a health check for this component
+    pub fn record_check(&mut self, status: &super::ComponentStatus) {
+        if self.name.is_empty() {
+            self.name = status.name.clone();
+        }
+
+        self.total_checks += 1;
+        self.last_status = status.status.clone();
+        self.last_checked = status.last_checked;
+        self.consecutive_failures = status.consecutive_failures;
+
+        match status.status {
+            super::HealthStatus::Healthy => self.successful_checks += 1,
+            super::HealthStatus::Unhealthy => self.failed_checks += 1,
+            super::HealthStatus::Degraded => self.degraded_checks += 1,
+        }
+
+        // Update response time metrics
+        self.average_response_time = Duration::from_nanos(
+            ((self.average_response_time.as_nanos() as u64 * (self.total_checks - 1) + status.response_time.as_nanos() as u64) / self.total_checks)
+        );
+        self.min_response_time = self.min_response_time.min(status.response_time);
+        self.max_response_time = self.max_response_time.max(status.response_time);
+
+        // Calculate success rate
+        self.success_rate = if self.total_checks > 0 {
+            (self.successful_checks as f64 / self.total_checks as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        // Simple uptime calculation based on success rate
+        self.uptime_percentage = self.success_rate;
+    }
+}
+
+/// Metrics snapshot for serialization
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricsSnapshot {
+    /// Overall metrics
+    pub overall: OverallMetrics,
+
+    /// Component-specific metrics
+    pub component_metrics: HashMap<String, ComponentMetrics>,
+
+    /// Timestamp when metrics collection started
+    pub started_at: DateTime<Utc>,
+
+    /// Last updated timestamp
+    pub last_updated: DateTime<Utc>,
+}
+
+/// Metrics format for Prometheus
+#[derive(Debug, Clone)]
+pub struct PrometheusMetrics {
+    /// Formatted metrics string
+    pub metrics: String,
+}
+
+impl PrometheusMetrics {
+    /// Convert metrics snapshot to Prometheus format
+    pub fn from_snapshot(snapshot: &MetricsSnapshot) -> Self {
+        let mut metrics = String::new();
+
+        // Overall metrics
+        metrics.push_str("# HELP health_checks_total Total number of health checks\n");
+        metrics.push_str("# TYPE health_checks_total counter\n");
+        metrics.push_str(&format!("health_checks_total {}\n", snapshot.overall.total_checks));
+
+        metrics.push_str("# HELP health_checks_successful_total Number of successful health checks\n");
+        metrics.push_str("# TYPE health_checks_successful_total counter\n");
+        metrics.push_str(&format!("health_checks_successful_total {}\n", snapshot.overall.successful_checks));
+
+        metrics.push_str("# HELP health_checks_failed_total Number of failed health checks\n");
+        metrics.push_str("# TYPE health_checks_failed_total counter\n");
+        metrics.push_str(&format!("health_checks_failed_total {}\n", snapshot.overall.failed_checks));
+
+        metrics.push_str("# HELP health_checks_degraded_total Number of degraded health checks\n");
+        metrics.push_str("# TYPE health_checks_degraded_total counter\n");
+        metrics.push_str(&format!("health_checks_degraded_total {}\n", snapshot.overall.degraded_checks));
+
+        // Response time metrics
+        metrics.push_str("# HELP health_check_response_time_seconds Response time of health checks\n");
+        metrics.push_str("# TYPE health_check_response_time_seconds histogram\n");
+        metrics.push_str(&format!("health_check_response_time_seconds_sum {}\n",
+            snapshot.overall.total_response_time.as_secs_f64()));
+        metrics.push_str(&format!("health_check_response_time_seconds_count {}\n",
+            snapshot.overall.total_checks));
+
+        metrics.push_str("# HELP health_check_response_time_seconds_max Maximum response time\n");
+        metrics.push_str("# TYPE health_check_response_time_seconds_max gauge\n");
+        metrics.push_str(&format!("health_check_response_time_seconds_max {}\n",
+            snapshot.overall.max_response_time.as_secs_f64()));
+
+        // Component-specific metrics
+        for (component_name, component_metrics) in &snapshot.component_metrics {
+            let sanitized_name = component_name.replace(['.', '-', ' '], "_");
+
+            metrics.push_str(&format!("# HELP health_check_component_success_rate Success rate for component {}\n", component_name));
+            metrics.push_str(&format!("# TYPE health_check_component_success_rate gauge\n"));
+            metrics.push_str(&format!("health_check_component_success_rate{{component=\"{}\"}} {}\n",
+                component_name, component_metrics.success_rate));
+
+            metrics.push_str(&format!("# HELP health_check_component_uptime_percentage Uptime percentage for component {}\n", component_name));
+            metrics.push_str(&format!("# TYPE health_check_component_uptime_percentage gauge\n"));
+            metrics.push_str(&format!("health_check_component_uptime_percentage{{component=\"{}\"}} {}\n",
+                component_name, component_metrics.uptime_percentage));
+
+            metrics.push_str(&format!("# HELP health_check_component_response_time_seconds Response time for component {}\n", component_name));
+            metrics.push_str(&format!("# TYPE health_check_component_response_time_seconds gauge\n"));
+            metrics.push_str(&format!("health_check_component_response_time_seconds{{component=\"{}\"}} {}\n",
+                component_name, component_metrics.average_response_time.as_secs_f64()));
+
+            // Component status (0=unhealthy, 1=degraded, 2=healthy)
+            let status_value = match component_metrics.last_status {
+                super::HealthStatus::Unhealthy => 0,
+                super::HealthStatus::Degraded => 1,
+                super::HealthStatus::Healthy => 2,
+            };
+            metrics.push_str(&format!("# HELP health_check_component_status Current status of component {}\n", component_name));
+            metrics.push_str(&format!("# TYPE health_check_component_status gauge\n"));
+            metrics.push_str(&format!("health_check_component_status{{component=\"{}\"}} {}\n",
+                component_name, status_value));
+        }
+
+        Self { metrics }
+    }
+
+    /// Get the metrics as a string
+    pub fn as_string(&self) -> &str {
+        &self.metrics
+    }
+}

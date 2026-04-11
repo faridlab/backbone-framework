@@ -1,0 +1,286 @@
+//! HTTP endpoints for health checks
+
+use super::*;
+use axum::{
+    extract::State,
+    http::StatusCode,
+    response::{Json, Response},
+    routing::get,
+    Router,
+};
+use std::sync::Arc;
+
+/// Health check endpoint handler
+pub struct HealthEndpoints {
+    checker: Arc<HealthChecker>,
+    config: EndpointConfig,
+}
+
+impl HealthEndpoints {
+    /// Create new health endpoints
+    pub fn new(checker: HealthChecker) -> Self {
+        Self {
+            checker: Arc::new(checker),
+            config: EndpointConfig::default(),
+        }
+    }
+
+    /// Create health endpoints with custom configuration
+    pub fn with_config(checker: HealthChecker, config: EndpointConfig) -> Self {
+        Self {
+            checker: Arc::new(checker),
+            config,
+        }
+    }
+
+    /// Build the router with all health endpoints
+    pub fn router(&self) -> Router<Arc<HealthChecker>> {
+        Router::new()
+            .route(self.config.health_path, get(health_handler))
+            .route(self.config.readiness_path, get(readiness_handler))
+            .route(self.config.liveness_path, get(liveness_handler))
+            .route(self.config.metrics_path, get(metrics_handler))
+            .route("/health/detailed", get(detailed_health_handler))
+            .with_state(Arc::clone(&self.checker))
+    }
+
+    /// Get the router without state (for manual integration)
+    pub fn routes(&self) -> Router {
+        let checker = Arc::clone(&self.checker);
+        self.router().with_state(checker)
+    }
+}
+
+/// Configuration for health endpoints
+#[derive(Debug, Clone)]
+pub struct EndpointConfig {
+    /// Path for basic health check
+    pub health_path: &'static str,
+
+    /// Path for readiness check
+    pub readiness_path: &'static str,
+
+    /// Path for liveness check
+    pub liveness_path: &'static str,
+
+    /// Path for metrics
+    pub metrics_path: &'static str,
+
+    /// Whether to include CORS headers
+    pub enable_cors: bool,
+
+    /// Custom headers to add to responses
+    pub custom_headers: Vec<(&'static str, &'static str)>,
+}
+
+impl Default for EndpointConfig {
+    fn default() -> Self {
+        Self {
+            health_path: DEFAULT_HEALTH_PATH,
+            readiness_path: DEFAULT_READINESS_PATH,
+            liveness_path: DEFAULT_LIVENESS_PATH,
+            metrics_path: DEFAULT_METRICS_PATH,
+            enable_cors: true,
+            custom_headers: vec![],
+        }
+    }
+}
+
+/// Basic health check handler
+async fn health_handler(
+    State(checker): State<Arc<HealthChecker>>,
+) -> Result<Json<SimpleHealthResponse>, StatusCode> {
+    let status = checker.health_status().await;
+    let status_code = match status.status {
+        HealthStatus::Healthy => StatusCode::OK,
+        HealthStatus::Degraded => StatusCode::OK, // Degraded is still OK for basic health
+        HealthStatus::Unhealthy => StatusCode::SERVICE_UNAVAILABLE,
+    };
+
+    Ok((status_code, Json(status)).into())
+}
+
+/// Readiness check handler (Kubernetes-style)
+async fn readiness_handler(
+    State(checker): State<Arc<HealthChecker>>,
+) -> Result<Json<SimpleHealthResponse>, StatusCode> {
+    let readiness = checker.readiness().await;
+    let status_code = match readiness.status {
+        HealthStatus::Healthy => StatusCode::OK,
+        HealthStatus::Degraded => StatusCode::SERVICE_UNAVAILABLE,
+        HealthStatus::Unhealthy => StatusCode::SERVICE_UNAVAILABLE,
+    };
+
+    Ok((status_code, Json(readiness)).into())
+}
+
+/// Liveness check handler (Kubernetes-style)
+async fn liveness_handler(
+    State(checker): State<Arc<HealthChecker>>,
+) -> Result<Json<SimpleHealthResponse>, StatusCode> {
+    let liveness = checker.liveness(None).await;
+    let status_code = match liveness.status {
+        HealthStatus::Healthy => StatusCode::OK,
+        HealthStatus::Degraded => StatusCode::OK,
+        HealthStatus::Unhealthy => StatusCode::SERVICE_UNAVAILABLE,
+    };
+
+    Ok((status_code, Json(liveness)).into())
+}
+
+/// Metrics handler
+async fn metrics_handler(
+    State(checker): State<Arc<HealthChecker>>,
+) -> Result<String, StatusCode> {
+    if let Some(metrics) = checker.metrics().await {
+        let prometheus_metrics = PrometheusMetrics::from_snapshot(&metrics);
+        Ok(prometheus_metrics.as_string().to_string())
+    } else {
+        Err(StatusCode::NOT_FOUND)
+    }
+}
+
+/// Detailed health report handler
+async fn detailed_health_handler(
+    State(checker): State<Arc<HealthChecker>>,
+) -> Result<Json<HealthReport>, StatusCode> {
+    let report = checker.health_report().await;
+    let status_code = match report.status {
+        HealthStatus::Healthy => StatusCode::OK,
+        HealthStatus::Degraded => StatusCode::OK,
+        HealthStatus::Unhealthy => StatusCode::SERVICE_UNAVAILABLE,
+    };
+
+    Ok((status_code, Json(report)).into())
+}
+
+/// Utility function to create health endpoints router easily
+pub fn create_health_router(checker: HealthChecker) -> Router {
+    HealthEndpoints::new(checker).router()
+}
+
+/// Utility function to create health endpoints with custom paths
+pub fn create_health_router_with_config(
+    checker: HealthChecker,
+    config: EndpointConfig,
+) -> Router {
+    HealthEndpoints::with_config(checker, config).router()
+}
+
+/// Extension trait for Router to easily add health endpoints
+pub trait RouterExt {
+    /// Add health endpoints to the router
+    fn health_routes(self, checker: HealthChecker) -> Self
+    where
+        Self: Sized,
+    {
+        self.merge(create_health_router(checker))
+    }
+
+    /// Add health endpoints with custom configuration
+    fn health_routes_with_config(self, checker: HealthChecker, config: EndpointConfig) -> Self
+    where
+        Self: Sized,
+    {
+        self.merge(create_health_router_with_config(checker, config))
+    }
+}
+
+impl RouterExt for Router<Arc<HealthChecker>> {}
+
+/// Middleware to add CORS headers to health responses
+pub fn cors_middleware() -> Router {
+    use tower_http::cors::{Any, CorsLayer};
+
+    Router::new().layer(
+        CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(Any)
+            .allow_headers(Any)
+    )
+}
+
+/// Response wrapper with additional headers
+#[derive(Debug, Clone)]
+pub struct HealthResponse<T> {
+    pub data: T,
+    pub headers: Vec<(&'static str, String)>,
+}
+
+impl<T> HealthResponse<T> {
+    /// Create a new health response with custom headers
+    pub fn new(data: T) -> Self {
+        Self {
+            data,
+            headers: vec![],
+        }
+    }
+
+    /// Add a custom header
+    pub fn header(mut self, key: &'static str, value: String) -> Self {
+        self.headers.push((key, value));
+        self
+    }
+}
+
+/// Convert health response to axum response
+impl<T: serde::Serialize> axum::response::IntoResponse for HealthResponse<T> {
+    fn into_response(self) -> Response {
+        use axum::response::{IntoResponse, Json};
+        use axum::http::{header, HeaderValue, StatusCode};
+
+        let mut response = Json(self.data).into_response();
+
+        for (key, value) in self.headers {
+            if let (Ok(header_name), Ok(header_value)) = (
+                header::HeaderName::from_bytes(key.as_bytes()),
+                HeaderValue::from_str(&value),
+            ) {
+                response.headers_mut().insert(header_name, header_value);
+            }
+        }
+
+        response
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::components::MockHealthCheck;
+
+    #[tokio::test]
+    async fn test_health_endpoints_creation() {
+        let checker = HealthChecker::new(HealthConfig::default());
+        let endpoints = HealthEndpoints::new(checker);
+
+        // Verify router creation doesn't panic
+        let router = endpoints.router();
+        assert!(true); // If we get here, router creation succeeded
+    }
+
+    #[tokio::test]
+    async fn test_health_handler_response() {
+        let mut checker = HealthChecker::new(HealthConfig::default());
+
+        // Add a mock component
+        let mock_check = MockHealthCheck::healthy("test".to_string());
+        checker.add_component("test".to_string(), Box::new(mock_check)).await.unwrap();
+
+        let checker_state = Arc::new(checker);
+
+        // Test health handler
+        let result = health_handler(State(checker_state)).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_endpoint_config_defaults() {
+        let config = EndpointConfig::default();
+        assert_eq!(config.health_path, "/health");
+        assert_eq!(config.readiness_path, "/ready");
+        assert_eq!(config.liveness_path, "/live");
+        assert_eq!(config.metrics_path, "/metrics");
+        assert!(config.enable_cors);
+    }
+}

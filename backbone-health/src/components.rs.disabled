@@ -1,0 +1,415 @@
+//! Health check components for various services
+
+use async_trait::async_trait;
+use std::time::Duration;
+use super::{HealthResult, HealthError, ComponentStatus, HealthConfig};
+
+/// Trait for health check components
+#[async_trait]
+pub trait HealthCheck: Send + Sync {
+    /// Perform the health check
+    async fn check(&self) -> HealthResult<ComponentStatus>;
+
+    /// Get the name of this component
+    fn name(&self) -> &str;
+
+    /// Get the timeout for this check (optional, overrides global timeout)
+    fn timeout(&self) -> Option<Duration> {
+        None
+    }
+}
+
+/// A mock health check that always returns healthy
+#[derive(Debug)]
+pub struct MockHealthCheck {
+    name: String,
+    response_time: Duration,
+    always_healthy: bool,
+}
+
+impl MockHealthCheck {
+    /// Create a new mock health check
+    pub fn new(name: String, response_time: Duration, always_healthy: bool) -> Self {
+        Self {
+            name,
+            response_time,
+            always_healthy,
+        }
+    }
+
+    /// Create a healthy mock check
+    pub fn healthy(name: String) -> Self {
+        Self::new(name, Duration::from_millis(10), true)
+    }
+
+    /// Create an unhealthy mock check
+    pub fn unhealthy(name: String) -> Self {
+        Self::new(name, Duration::from_millis(50), false)
+    }
+}
+
+#[async_trait]
+impl HealthCheck for MockHealthCheck {
+    async fn check(&self) -> HealthResult<ComponentStatus> {
+        tokio::time::sleep(self.response_time).await;
+
+        let mut status = ComponentStatus::new(self.name.clone());
+
+        if self.always_healthy {
+            status.record_success(self.response_time);
+        } else {
+            status.record_failure("Mock component is unhealthy".to_string(), self.response_time);
+        }
+
+        Ok(status)
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+/// HTTP endpoint health check
+#[cfg(feature = "http")]
+#[derive(Debug)]
+pub struct HttpHealthCheck {
+    name: String,
+    url: String,
+    expected_status: u16,
+    timeout: Duration,
+}
+
+#[cfg(feature = "http")]
+impl HttpHealthCheck {
+    /// Create a new HTTP health check
+    pub fn new(name: String, url: String) -> Self {
+        Self {
+            name,
+            url,
+            expected_status: 200,
+            timeout: Duration::from_secs(5),
+        }
+    }
+
+    /// Set the expected HTTP status code
+    pub fn expected_status(mut self, status: u16) -> Self {
+        self.expected_status = status;
+        self
+    }
+
+    /// Set the timeout for the HTTP request
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+}
+
+#[cfg(feature = "http")]
+#[async_trait]
+impl HealthCheck for HttpHealthCheck {
+    async fn check(&self) -> HealthResult<ComponentStatus> {
+        let start = std::time::Instant::now();
+
+        let client = reqwest::Client::builder()
+            .timeout(self.timeout)
+            .build()
+            .map_err(|e| HealthError::Internal(format!("Failed to create HTTP client: {}", e)))?;
+
+        let response = tokio::time::timeout(
+            self.timeout,
+            client.get(&self.url).send()
+        ).await
+        .map_err(|_| HealthError::Timeout(format!("HTTP request to {} timed out", self.url)))?
+        .map_err(|e| HealthError::ServiceUnavailable(format!("HTTP request failed: {}", e)))?;
+
+        let response_time = start.elapsed();
+        let mut status = ComponentStatus::new(self.name.clone());
+
+        if response.status().as_u16() == self.expected_status {
+            status.record_success(response_time);
+        } else {
+            status.record_failure(
+                format!("Unexpected status code: {}", response.status()),
+                response_time
+            );
+        }
+
+        status.add_metadata("url".to_string(), self.url.clone());
+        status.add_metadata("status_code".to_string(), response.status().as_u16().to_string());
+
+        Ok(status)
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn timeout(&self) -> Option<Duration> {
+        Some(self.timeout)
+    }
+}
+
+/// Database health check (when sqlx feature is enabled)
+#[cfg(feature = "database")]
+#[derive(Debug)]
+pub struct DatabaseHealthCheck {
+    name: String,
+    pool: sqlx::PgPool,
+}
+
+#[cfg(feature = "database")]
+impl DatabaseHealthCheck {
+    /// Create a new database health check
+    pub fn new(name: String, pool: sqlx::PgPool) -> Self {
+        Self { name, pool }
+    }
+}
+
+#[cfg(feature = "database")]
+#[async_trait]
+impl HealthCheck for DatabaseHealthCheck {
+    async fn check(&self) -> HealthResult<ComponentStatus> {
+        let start = std::time::Instant::now();
+
+        // Simple database connectivity check
+        let result = sqlx::query_scalar::<_, i64>("SELECT 1")
+            .fetch_one(&self.pool)
+            .await;
+
+        let response_time = start.elapsed();
+        let mut status = ComponentStatus::new(self.name.clone());
+
+        match result {
+            Ok(_) => {
+                status.record_success(response_time);
+
+                // Add database metadata
+                if let Ok(version) = sqlx::query_scalar::<_, String>("SHOW server_version")
+                    .fetch_one(&self.pool)
+                    .await
+                {
+                    status.add_metadata("database_version".to_string(), version);
+                }
+
+                if let Ok(count) = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM pg_stat_activity")
+                    .fetch_one(&self.pool)
+                    .await
+                {
+                    status.add_metadata("active_connections".to_string(), count.to_string());
+                }
+            }
+            Err(e) => {
+                status.record_failure(
+                    format!("Database connection failed: {}", e),
+                    response_time
+                );
+            }
+        }
+
+        Ok(status)
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+/// Redis cache health check
+#[cfg(feature = "redis")]
+#[derive(Debug)]
+pub struct RedisHealthCheck {
+    name: String,
+    connection_string: String,
+}
+
+impl RedisHealthCheck {
+    /// Create a new Redis health check
+    pub fn new(name: String, connection_string: String) -> Self {
+        Self { name, connection_string }
+    }
+}
+
+#[async_trait]
+impl HealthCheck for RedisHealthCheck {
+    async fn check(&self) -> HealthResult<ComponentStatus> {
+        let start = std::time::Instant::now();
+
+        // Redis connection check
+        let client = redis::Client::open(self.connection_string.as_str())
+            .map_err(|e| HealthError::Internal(format!("Failed to create Redis client: {}", e)))?;
+
+        let mut conn = client.get_connection()
+            .map_err(|e| HealthError::ServiceUnavailable(format!("Redis connection failed: {}", e)))?;
+
+        // Simple PING command
+        let _: String = redis::cmd("PING")
+            .query(&mut conn)
+            .map_err(|e| HealthError::ServiceUnavailable(format!("Redis PING failed: {}", e)))?;
+
+        let response_time = start.elapsed();
+        let mut status = ComponentStatus::new(self.name.clone());
+        status.record_success(response_time);
+
+        // Add Redis metadata
+        if let Ok(info) = redis::cmd("INFO").query::<String>(&mut conn) {
+            status.add_metadata("redis_info".to_string(), "available".to_string());
+        }
+
+        Ok(status)
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+/// File system health check
+#[derive(Debug)]
+pub struct FileSystemHealthCheck {
+    name: String,
+    path: String,
+    check_writable: bool,
+}
+
+impl FileSystemHealthCheck {
+    /// Create a new file system health check
+    pub fn new(name: String, path: String) -> Self {
+        Self {
+            name,
+            path,
+            check_writable: true,
+        }
+    }
+
+    /// Whether to check if the path is writable
+    pub fn check_writable(mut self, check_writable: bool) -> Self {
+        self.check_writable = check_writable;
+        self
+    }
+}
+
+#[async_trait]
+impl HealthCheck for FileSystemHealthCheck {
+    async fn check(&self) -> HealthResult<ComponentStatus> {
+        let start = std::time::Instant::now();
+        let mut status = ComponentStatus::new(self.name.clone());
+
+        // Check if path exists
+        let path = std::path::Path::new(&self.path);
+
+        if !path.exists() {
+            status.record_failure(
+                format!("Path does not exist: {}", self.path),
+                start.elapsed()
+            );
+            return Ok(status);
+        }
+
+        // Check if readable
+        if std::fs::read_dir(path).is_err() {
+            status.record_failure(
+                format!("Path is not readable: {}", self.path),
+                start.elapsed()
+            );
+            return Ok(status);
+        }
+
+        // Check if writable (if requested)
+        if self.check_writable {
+            let test_file = path.join(".health_check_tmp");
+            if let Ok(_) = std::fs::write(&test_file, "test") {
+                let _ = std::fs::remove_file(&test_file);
+            } else {
+                status.record_failure(
+                    format!("Path is not writable: {}", self.path),
+                    start.elapsed()
+                );
+                return Ok(status);
+            }
+        }
+
+        // Get disk space information
+        if let Ok(metadata) = std::fs::metadata(path) {
+            status.add_metadata("path_type".to_string(),
+                if metadata.is_dir() { "directory" } else { "file" }.to_string());
+        }
+
+        if let Ok(space) = get_disk_space(path) {
+            status.add_metadata("total_space".to_string(), space.total.to_string());
+            status.add_metadata("available_space".to_string(), space.available.to_string());
+            status.add_metadata("used_space".to_string(), space.used.to_string());
+            status.add_metadata("usage_percentage".to_string(),
+                format!("{:.2}", (space.used as f64 / space.total as f64) * 100.0));
+        }
+
+        status.record_success(start.elapsed());
+        Ok(status)
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+/// Disk space information
+#[derive(Debug)]
+struct DiskSpace {
+    total: u64,
+    available: u64,
+    used: u64,
+}
+
+/// Get disk space information for a path
+fn get_disk_space(path: &std::path::Path) -> std::io::Result<DiskSpace> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let stat = std::fs::metadata(path)?;
+        let total = stat.blocks() * 512; // Convert from 512-byte blocks
+        let available = stat.avail() * 512;
+        let used = total - available;
+        Ok(DiskSpace { total, available, used })
+    }
+
+    #[cfg(not(unix))]
+    {
+        // For non-Unix systems, return a placeholder
+        Ok(DiskSpace {
+            total: 0,
+            available: 0,
+            used: 0,
+        })
+    }
+}
+
+/// Custom health check from a closure
+#[derive(Debug)]
+pub struct CustomHealthCheck {
+    name: String,
+    check_fn: Box<dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = HealthResult<ComponentStatus>> + Send>> + Send + Sync>,
+}
+
+impl CustomHealthCheck {
+    /// Create a new custom health check
+    pub fn new<F, Fut>(name: String, check_fn: F) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = HealthResult<ComponentStatus>> + Send + 'static,
+    {
+        Self {
+            name,
+            check_fn: Box::new(move || Box::pin(check_fn())),
+        }
+    }
+}
+
+#[async_trait]
+impl HealthCheck for CustomHealthCheck {
+    async fn check(&self) -> HealthResult<ComponentStatus> {
+        (self.check_fn)().await
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
