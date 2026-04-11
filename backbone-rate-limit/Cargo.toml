@@ -1,0 +1,38 @@
+[package]
+name = "backbone-rate-limit"
+version = "2.0.0"
+edition = "2021"
+description = "Backbone Framework Rate Limiting Module - Rate limiting middleware for Axum"
+
+[dependencies]
+# Core dependencies
+tokio = { version = "1.0", features = ["full"] }
+anyhow = "1.0"
+thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+async-trait = "0.1"
+
+# Web Framework
+axum = { version = "0.7", features = ["json"] }
+tower = { version = "0.4", features = ["full"] }
+tower-http = { version = "0.5", features = ["trace", "cors"] }
+futures = "0.3"
+
+# Time and UUID
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.0", features = ["v4"] }
+
+# Logging
+tracing = "0.1"
+
+# Optional Redis support
+redis = { version = "0.24", features = ["tokio-comp", "connection-manager"], optional = true }
+
+[features]
+default = []
+redis = ["dep:redis"]
+
+[dev-dependencies]
+tokio-test = "0.4"
+tower-test = "0.4"
