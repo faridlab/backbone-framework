@@ -1,0 +1,54 @@
+[package]
+name = "backbone-search-examples"
+version = "2.0.0"
+edition = "2021"
+description = "Examples for backbone-search crate"
+publish = false
+
+[dependencies]
+# Core dependencies
+backbone-search = { path = "../crates/backbone-search" }
+tokio = { version = "1.0", features = ["full"] }
+anyhow = "1.0"
+thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Async trait
+async-trait = "0.1"
+
+# HTTP client
+reqwest = { version = "0.11", features = ["json"] }
+
+# UUID
+uuid = { version = "1.0", features = ["v4"] }
+
+# Timestamp
+chrono = { version = "0.4", features = ["serde"] }
+
+# Logging and tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Collections
+std-collections = "0.1"
+
+[[bin]]
+name = "basic_usage"
+path = "basic_usage.rs"
+
+[[bin]]
+name = "advanced_search"
+path = "advanced_search.rs"
+
+[[bin]]
+name = "elasticsearch_setup"
+path = "elasticsearch_setup.rs"
+
+[[bin]]
+name = "algolia_setup"
+path = "algolia_setup.rs"
+
+[[bin]]
+name = "testing_examples"
+path = "testing_examples.rs"

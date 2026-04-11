@@ -1,0 +1,10 @@
+[package]
+name = "backbone-graphql"
+version = "0.1.0"
+edition = "2021"
+description = "GraphQL runtime support for the Backbone Framework"
+
+[dependencies]
+async-graphql = "7"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
