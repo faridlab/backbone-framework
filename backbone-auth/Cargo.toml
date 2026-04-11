@@ -1,0 +1,41 @@
+[package]
+name = "backbone-auth"
+version = "2.0.0"
+edition = "2021"
+description = "Backbone Framework Auth - Authentication and authorization system"
+
+[dependencies]
+# Core dependencies
+tokio = { version = "1.0", features = ["full"] }
+async-trait = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+uuid = { version = "1.0", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Authentication
+jsonwebtoken = "9.0"
+argon2 = "0.5"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Logging
+tracing = "0.1"
+
+# Crypto
+ring = "0.17"
+sha2 = "0.10"
+
+# Random number generation
+rand = "0.8"
+
+# Validation
+regex = "1.0"
+
+# Email validation
+email_address = "0.2"
+
+# Secret memory protection
+zeroize = { version = "1", features = ["zeroize_derive"] }
