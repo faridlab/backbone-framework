@@ -1,0 +1,85 @@
+[package]
+name = "backbone-storage"
+version = "2.0.0"
+edition = "2021"
+description = "Backbone Framework Storage Module - Local file system support"
+
+[dependencies]
+# Core dependencies
+tokio = { version = "1.0", features = ["full"] }
+anyhow = "1.0"
+thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Async trait
+async-trait = "0.1"
+
+
+# Local file system
+tokio-fs = "0.1"
+
+# HTTP client
+reqwest = { version = "0.11", features = ["json", "multipart"] }
+
+# Bytes handling
+bytes = "1.0"
+
+# UUID
+uuid = { version = "1.0", features = ["v4", "v5"] }
+
+# Timestamp
+chrono = { version = "0.4", features = ["serde"] }
+
+# Logging
+tracing = "0.1"
+
+# URL encoding
+url = "2.5"
+
+# File operations
+mime_guess = "2.0"
+base64 = "0.22"
+
+# Compression (primary dependencies)
+flate2 = { version = "1.0", features = ["zlib"] }
+
+# Streams
+futures = "0.3"
+
+# Cryptographic hashes
+sha2 = "0.10"         # SHA256 for file hashing
+
+# Image processing
+image = { version = "0.25", features = ["jpeg", "png", "webp", "avif"] }
+imageproc = "0.25"
+kamadak-exif = "0.5"
+
+# Additional compression formats
+zip = "2.2"           # ZIP archive compression
+brotli = "6.0"        # Brotli compression
+lz4_flex = "0.11"    # LZ4 compression
+snap = "1.1"         # Snappy compression
+
+# Security and virus scanning
+goblin = "0.9"        # Binary file parsing and analysis
+object = "0.36"       # Object file parsing
+regex = "1.10"        # Pattern matching for signatures
+
+# AWS S3 SDK (optional, feature-gated)
+aws-sdk-s3 = { version = "1", optional = true }
+aws-config = { version = "1", features = ["behavior-version-latest"], optional = true }
+aws-credential-types = { version = "1", optional = true }
+
+[features]
+default = ["local"]
+local = []
+s3 = ["aws-sdk-s3", "aws-config", "aws-credential-types"]
+compression = []
+security = []
+full = ["local", "compression", "security"]
+
+[dev-dependencies]
+tempfile = "3.0"
+tokio-test = "0.4"
+tracing-subscriber = "0.3"

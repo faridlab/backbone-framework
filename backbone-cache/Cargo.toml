@@ -1,0 +1,38 @@
+[package]
+name = "backbone-cache"
+version = "2.0.0"
+edition = "2021"
+description = "Backbone Framework Cache Module - Redis and Memory caching support"
+
+[dependencies]
+# Core dependencies
+tokio = { version = "1.0", features = ["full"] }
+anyhow = "1.0"
+thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Redis support
+redis = { version = "0.24", features = ["tokio-comp", "connection-manager"] }
+
+# Async trait
+async-trait = "0.1"
+
+# UUID for cache keys
+uuid = { version = "1.0", features = ["v4"] }
+
+# Timestamp
+chrono = { version = "0.4", features = ["serde"] }
+
+# Logging
+tracing = "0.1"
+
+[dev-dependencies]
+tempfile = "3.0"
+tokio-test = "0.4"
+
+# Examples temporarily excluded due to compilation issues
+# [[example]]
+# name = "basic_usage"
+# path = "examples/basic_usage.rs"
+# required-features = []
