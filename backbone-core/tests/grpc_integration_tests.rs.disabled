@@ -1,0 +1,319 @@
+use backbone_core::grpc::*;
+use backbone_core::entity::*;
+use serde::{Serialize, Deserialize};
+use uuid::Uuid;
+use std::collections::HashMap;
+
+// Test entity for integration testing
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TestGrpcEntity {
+    id: Uuid,
+    name: String,
+    created_at: chrono::DateTime<chrono::Utc>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+    deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl Entity for TestGrpcEntity {
+    fn id(&self) -> &Uuid {
+        &self.id
+    }
+
+    fn created_at(&self) -> chrono::DateTime<chrono::Utc> {
+        self.created_at
+    }
+
+    fn updated_at(&self) -> chrono::DateTime<chrono::Utc> {
+        self.updated_at
+    }
+
+    fn deleted_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.deleted_at
+    }
+}
+
+// Mock gRPC service for testing
+struct MockGrpcService;
+
+impl BackboneGrpcService<TestGrpcEntity> for MockGrpcService {
+    fn list(&self, _request: GrpcListRequest) -> Result<GrpcResponse<GrpcListResponse<TestGrpcEntity>>> {
+        let response = GrpcListResponse {
+            items: vec![],
+            total: 0,
+            page: 1,
+            limit: 20,
+            total_pages: 0,
+        };
+        Ok(GrpcResponse::success(response))
+    }
+
+    fn create(&self, _request: TestGrpcEntity) -> Result<GrpcResponse<TestGrpcEntity>> {
+        let entity = TestGrpcEntity {
+            id: Uuid::new_v4(),
+            name: "Test Entity".to_string(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            deleted_at: None,
+        };
+        Ok(GrpcResponse::success(entity))
+    }
+
+    fn get_by_id(&self, request: Uuid) -> Result<GrpcResponse<TestGrpcEntity>> {
+        let entity = TestGrpcEntity {
+            id: request,
+            name: "Test Entity".to_string(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            deleted_at: None,
+        };
+        Ok(GrpcResponse::success(entity))
+    }
+
+    fn update(&self, _request: TestGrpcEntity) -> Result<GrpcResponse<TestGrpcEntity>> {
+        let entity = TestGrpcEntity {
+            id: Uuid::new_v4(),
+            name: "Updated Entity".to_string(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            deleted_at: None,
+        };
+        Ok(GrpcResponse::success(entity))
+    }
+
+    fn partial_update(&self, _request: GrpcPartialUpdateRequest) -> Result<GrpcResponse<TestGrpcEntity>> {
+        let entity = TestGrpcEntity {
+            id: Uuid::new_v4(),
+            name: "Partially Updated".to_string(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            deleted_at: None,
+        };
+        Ok(GrpcResponse::success(entity))
+    }
+
+    fn soft_delete(&self, _request: Uuid) -> Result<GrpcResponse<()>> {
+        Ok(GrpcResponse::success(()))
+    }
+
+    fn bulk_create(&self, _request: GrpcBulkCreateRequest<TestGrpcEntity>) -> Result<GrpcResponse<GrpcBulkResponse<TestGrpcEntity>>> {
+        let response = GrpcBulkResponse {
+            items: vec![],
+            total: 0,
+            failed: 0,
+            errors: vec![],
+        };
+        Ok(GrpcResponse::success(response))
+    }
+
+    fn upsert(&self, _request: GrpcUpsertRequest<TestGrpcEntity>) -> Result<GrpcResponse<TestGrpcEntity>> {
+        let entity = TestGrpcEntity {
+            id: Uuid::new_v4(),
+            name: "Upserted Entity".to_string(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            deleted_at: None,
+        };
+        Ok(GrpcResponse::success(entity))
+    }
+
+    fn list_deleted(&self, _request: GrpcListRequest) -> Result<GrpcResponse<GrpcListResponse<TestGrpcEntity>>> {
+        let response = GrpcListResponse {
+            items: vec![],
+            total: 0,
+            page: 1,
+            limit: 20,
+            total_pages: 0,
+        };
+        Ok(GrpcResponse::success(response))
+    }
+
+    fn restore(&self, _request: Uuid) -> Result<GrpcResponse<TestGrpcEntity>> {
+        let entity = TestGrpcEntity {
+            id: _request,
+            name: "Restored Entity".to_string(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            deleted_at: None,
+        };
+        Ok(GrpcResponse::success(entity))
+    }
+
+    fn empty_trash(&self, _request: ()) -> Result<GrpcResponse<()>> {
+        Ok(GrpcResponse::success(()))
+    }
+}
+
+#[test]
+fn test_grpc_response_success() {
+    let data = "test data";
+    let response = GrpcResponse::success(data);
+
+    assert_eq!(response.success, true);
+    assert_eq!(response.data, Some("test data"));
+    assert_eq!(response.error, None);
+}
+
+#[test]
+fn test_grpc_response_error() {
+    let response = GrpcResponse::<String>::error("Error message".to_string());
+
+    assert_eq!(response.success, false);
+    assert_eq!(response.data, None);
+    assert_eq!(response.error, Some("Error message".to_string()));
+}
+
+#[test]
+fn test_grpc_config_default() {
+    let config = GrpcConfig::default();
+
+    assert_eq!(config.host, "127.0.0.1");
+    assert_eq!(config.port, 50051);
+    assert_eq!(config.max_message_size, 4 * 1024 * 1024);
+}
+
+#[test]
+fn test_grpc_list_response() {
+    let response: GrpcListResponse<String> = GrpcListResponse {
+        items: vec![],
+        total: 100,
+        page: 2,
+        limit: 20,
+        total_pages: 5,
+    };
+
+    assert_eq!(response.total, 100);
+    assert_eq!(response.page, 2);
+    assert_eq!(response.limit, 20);
+    assert_eq!(response.total_pages, 5);
+}
+
+#[test]
+fn test_grpc_bulk_response() {
+    let response: GrpcBulkResponse<String> = GrpcBulkResponse {
+        items: vec![],
+        total: 10,
+        failed: 2,
+        errors: vec!["Error 1".to_string(), "Error 2".to_string()],
+    };
+
+    assert_eq!(response.total, 10);
+    assert_eq!(response.failed, 2);
+    assert_eq!(response.errors.len(), 2);
+}
+
+#[test]
+fn test_mock_grpc_service_all_endpoints() {
+    let service = MockGrpcService;
+    let test_id = Uuid::new_v4();
+
+    // Test all 11 endpoints
+    let list_result = service.list(GrpcListRequest {
+        page: 1,
+        limit: 20,
+        sort_by: None,
+        sort_order: None,
+        filters: None,
+    });
+    assert!(list_result.is_ok());
+
+    let create_result = service.create(TestGrpcEntity {
+        id: Uuid::new_v4(),
+        name: "Test".to_string(),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        deleted_at: None,
+    });
+    assert!(create_result.is_ok());
+
+    let get_result = service.get_by_id(test_id);
+    assert!(get_result.is_ok());
+
+    let update_result = service.update(TestGrpcEntity {
+        id: test_id,
+        name: "Updated".to_string(),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        deleted_at: None,
+    });
+    assert!(update_result.is_ok());
+
+    let partial_update_result = service.partial_update(GrpcPartialUpdateRequest {
+        id: test_id,
+        fields: HashMap::new(),
+    });
+    assert!(partial_update_result.is_ok());
+
+    let delete_result = service.soft_delete(test_id);
+    assert!(delete_result.is_ok());
+
+    let bulk_result = service.bulk_create(GrpcBulkCreateRequest { items: vec![] });
+    assert!(bulk_result.is_ok());
+
+    let upsert_result = service.upsert(GrpcUpsertRequest {
+        entity: TestGrpcEntity {
+            id: Uuid::new_v4(),
+            name: "Test".to_string(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            deleted_at: None,
+        },
+        create_if_not_exists: true,
+    });
+    assert!(upsert_result.is_ok());
+
+    let list_deleted_result = service.list_deleted(GrpcListRequest {
+        page: 1,
+        limit: 20,
+        sort_by: None,
+        sort_order: None,
+        filters: None,
+    });
+    assert!(list_deleted_result.is_ok());
+
+    let restore_result = service.restore(test_id);
+    assert!(restore_result.is_ok());
+
+    let empty_trash_result = service.empty_trash(());
+    assert!(empty_trash_result.is_ok());
+}
+
+#[test]
+fn test_grpc_request_structures() {
+    // Test GrpcListRequest
+    let list_request = GrpcListRequest {
+        page: 1,
+        limit: 50,
+        sort_by: Some("name".to_string()),
+        sort_order: Some("desc".to_string()),
+        filters: Some(HashMap::from([("status".to_string(), "active".to_string())])),
+    };
+    assert_eq!(list_request.page, 1);
+    assert_eq!(list_request.limit, 50);
+    assert_eq!(list_request.sort_by, Some("name".to_string()));
+
+    // Test GrpcBulkCreateRequest
+    let bulk_request: GrpcBulkCreateRequest<String> = GrpcBulkCreateRequest {
+        items: vec![],
+    };
+    assert_eq!(bulk_request.items.len(), 0);
+
+    // Test GrpcUpsertRequest
+    let upsert_request = GrpcUpsertRequest {
+        entity: TestGrpcEntity {
+            id: Uuid::new_v4(),
+            name: "Test".to_string(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            deleted_at: None,
+        },
+        create_if_not_exists: false,
+    };
+    assert_eq!(upsert_request.create_if_not_exists, false);
+
+    // Test GrpcPartialUpdateRequest
+    let partial_request = GrpcPartialUpdateRequest {
+        id: Uuid::new_v4(),
+        fields: HashMap::from([("name".to_string(), "Updated".to_string())]),
+    };
+    assert_eq!(partial_request.fields.len(), 1);
+}
