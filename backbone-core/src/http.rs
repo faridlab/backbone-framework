@@ -357,7 +357,11 @@ where
         }
     }
 
-    /// Create Axum router with all 16 Backbone endpoints
+    /// Create Axum router with all 16 Backbone endpoints (reads + writes).
+    ///
+    /// Equivalent to `read_routes(...).merge(write_routes(...))`. Use the
+    /// split variants when reads and writes need different middleware
+    /// (e.g., public reads + authenticated writes).
     ///
     /// # Routes Created
     /// 1. `GET {base_path}` - List with pagination
@@ -380,118 +384,170 @@ where
     where
         S: Clone,
     {
+        Self::read_routes(service.clone(), base_path)
+            .merge(Self::write_routes(service, base_path))
+    }
+
+    /// Create Axum router with only the read (GET) endpoints.
+    ///
+    /// Safe to expose publicly (e.g., for reference data like countries or
+    /// categories) without auth middleware. Pair with `write_routes` under
+    /// an auth layer when mutations must be restricted.
+    ///
+    /// # Routes Created
+    /// - `GET {base_path}` - List with pagination
+    /// - `GET {base_path}/:id` - Get by ID
+    /// - `GET {base_path}/trash` - List deleted (with filters)
+    /// - `GET {base_path}/:id/deleted` - Get deleted by ID
+    /// - `GET {base_path}/count` - Count active entities
+    /// - `GET {base_path}/trash/count` - Count deleted entities
+    pub fn read_routes(service: Arc<S>, base_path: &str) -> axum::Router<()>
+    where
+        S: Clone,
+    {
         use axum::{
             extract::{Path, Query},
-            routing::{delete, get, patch, post, put},
-            Json, Router,
+            routing::get,
+            Router,
         };
 
         let handler = Arc::new(Self::new(service));
 
         Router::new()
-            // 1. GET /collection - List
+            // GET /collection - List
             .route(base_path, get({
                 let h = handler.clone();
                 move |query: Query<ListQueryParams>| async move {
                     Self::list_handler(h, query).await
                 }
             }))
-            // 2. POST /collection - Create
-            .route(base_path, post({
-                let h = handler.clone();
-                move |body: Json<C>| async move {
-                    Self::create_handler(h, body).await
-                }
-            }))
-            // 7. POST /collection/bulk - Bulk create
-            .route(&format!("{}/bulk", base_path), post({
-                let h = handler.clone();
-                move |body: Json<Vec<C>>| async move {
-                    Self::bulk_create_handler(h, body).await
-                }
-            }))
-            // 8. POST /collection/upsert - Upsert
-            .route(&format!("{}/upsert", base_path), post({
-                let h = handler.clone();
-                move |body: Json<C>| async move {
-                    Self::upsert_handler(h, body).await
-                }
-            }))
-            // 9. GET /collection/trash - List deleted
+            // GET /collection/trash - List deleted
             .route(&format!("{}/trash", base_path), get({
                 let h = handler.clone();
                 move |query: Query<ListQueryParams>| async move {
                     Self::list_deleted_handler(h, query).await
                 }
             }))
-            // 11. DELETE /collection/empty - Empty trash
-            .route(&format!("{}/empty", base_path), delete({
-                let h = handler.clone();
-                move || async move {
-                    Self::empty_trash_handler(h).await
-                }
-            }))
-            // 13. DELETE /collection/trash/:id - Permanent delete from trash
-            .route(&format!("{}/trash/:id", base_path), delete({
-                let h = handler.clone();
-                move |path: Path<String>| async move {
-                    Self::permanent_delete_handler(h, path).await
-                }
-            }))
-            // 3. GET /collection/:id - Get by ID
+            // GET /collection/:id - Get by ID
             .route(&format!("{}/:id", base_path), get({
                 let h = handler.clone();
                 move |path: Path<String>| async move {
                     Self::get_handler(h, path).await
                 }
             }))
-            // 4. PUT /collection/:id - Full update
-            .route(&format!("{}/:id", base_path), put({
-                let h = handler.clone();
-                move |path: Path<String>, body: Json<U>| async move {
-                    Self::update_handler(h, path, body).await
-                }
-            }))
-            // 5. PATCH /collection/:id - Partial update
-            .route(&format!("{}/:id", base_path), patch({
-                let h = handler.clone();
-                move |path: Path<String>, body: Json<HashMap<String, serde_json::Value>>| async move {
-                    Self::partial_update_handler(h, path, body).await
-                }
-            }))
-            // 6. DELETE /collection/:id - Soft delete
-            .route(&format!("{}/:id", base_path), delete({
-                let h = handler.clone();
-                move |path: Path<String>| async move {
-                    Self::delete_handler(h, path).await
-                }
-            }))
-            // 10. POST /collection/:id/restore - Restore
-            .route(&format!("{}/:id/restore", base_path), post({
-                let h = handler.clone();
-                move |path: Path<String>| async move {
-                    Self::restore_handler(h, path).await
-                }
-            }))
-            // 12. GET /collection/:id/deleted - Get deleted by ID
+            // GET /collection/:id/deleted - Get deleted by ID
             .route(&format!("{}/:id/deleted", base_path), get({
                 let h = handler.clone();
                 move |path: Path<String>| async move {
                     Self::get_deleted_handler(h, path).await
                 }
             }))
-            // 15. GET /collection/count - Count active entities
+            // GET /collection/count - Count active entities
             .route(&format!("{}/count", base_path), get({
                 let h = handler.clone();
                 move || async move {
                     Self::count_active_handler(h).await
                 }
             }))
-            // 16. GET /collection/trash/count - Count deleted entities
+            // GET /collection/trash/count - Count deleted entities
             .route(&format!("{}/trash/count", base_path), get({
                 let h = handler.clone();
                 move || async move {
                     Self::count_deleted_handler(h).await
+                }
+            }))
+    }
+
+    /// Create Axum router with only the write (mutation) endpoints.
+    ///
+    /// These routes should not be publicly exposed. Wrap them with an auth
+    /// middleware (see `BackboneCrudHandler` module docs) before nesting
+    /// into the application router.
+    ///
+    /// # Routes Created
+    /// - `POST {base_path}` - Create
+    /// - `POST {base_path}/bulk` - Bulk create
+    /// - `POST {base_path}/upsert` - Upsert
+    /// - `DELETE {base_path}/empty` - Empty trash
+    /// - `DELETE {base_path}/trash/:id` - Permanent delete from trash
+    /// - `PUT {base_path}/:id` - Full update
+    /// - `PATCH {base_path}/:id` - Partial update
+    /// - `DELETE {base_path}/:id` - Soft delete
+    /// - `POST {base_path}/:id/restore` - Restore
+    pub fn write_routes(service: Arc<S>, base_path: &str) -> axum::Router<()>
+    where
+        S: Clone,
+    {
+        use axum::{
+            extract::Path,
+            routing::{delete, patch, post, put},
+            Json, Router,
+        };
+
+        let handler = Arc::new(Self::new(service));
+
+        Router::new()
+            // POST /collection - Create
+            .route(base_path, post({
+                let h = handler.clone();
+                move |body: Json<C>| async move {
+                    Self::create_handler(h, body).await
+                }
+            }))
+            // POST /collection/bulk - Bulk create
+            .route(&format!("{}/bulk", base_path), post({
+                let h = handler.clone();
+                move |body: Json<Vec<C>>| async move {
+                    Self::bulk_create_handler(h, body).await
+                }
+            }))
+            // POST /collection/upsert - Upsert
+            .route(&format!("{}/upsert", base_path), post({
+                let h = handler.clone();
+                move |body: Json<C>| async move {
+                    Self::upsert_handler(h, body).await
+                }
+            }))
+            // DELETE /collection/empty - Empty trash
+            .route(&format!("{}/empty", base_path), delete({
+                let h = handler.clone();
+                move || async move {
+                    Self::empty_trash_handler(h).await
+                }
+            }))
+            // DELETE /collection/trash/:id - Permanent delete from trash
+            .route(&format!("{}/trash/:id", base_path), delete({
+                let h = handler.clone();
+                move |path: Path<String>| async move {
+                    Self::permanent_delete_handler(h, path).await
+                }
+            }))
+            // PUT /collection/:id - Full update
+            .route(&format!("{}/:id", base_path), put({
+                let h = handler.clone();
+                move |path: Path<String>, body: Json<U>| async move {
+                    Self::update_handler(h, path, body).await
+                }
+            }))
+            // PATCH /collection/:id - Partial update
+            .route(&format!("{}/:id", base_path), patch({
+                let h = handler.clone();
+                move |path: Path<String>, body: Json<HashMap<String, serde_json::Value>>| async move {
+                    Self::partial_update_handler(h, path, body).await
+                }
+            }))
+            // DELETE /collection/:id - Soft delete
+            .route(&format!("{}/:id", base_path), delete({
+                let h = handler.clone();
+                move |path: Path<String>| async move {
+                    Self::delete_handler(h, path).await
+                }
+            }))
+            // POST /collection/:id/restore - Restore
+            .route(&format!("{}/:id/restore", base_path), post({
+                let h = handler.clone();
+                move |path: Path<String>| async move {
+                    Self::restore_handler(h, path).await
                 }
             }))
     }
