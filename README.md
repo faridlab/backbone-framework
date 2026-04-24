@@ -31,16 +31,45 @@ A modular Rust framework for building production-grade backend services. Backbon
 
 ## Getting Started
 
-Add the crates you need to your service's `Cargo.toml`:
+Add the crates you need to your service's `Cargo.toml`. Backbone is distributed
+as **git dependencies pinned to a release tag** — not via crates.io. Pin every
+member crate to the same tag so they're consistent at one commit:
 
 ```toml
 [dependencies]
-backbone-core = { path = "../backbone-framework/backbone-core" }
-backbone-orm  = { path = "../backbone-framework/backbone-orm" }
-backbone-auth = { path = "../backbone-framework/backbone-auth" }
+backbone-core = { git = "https://github.com/faridlab/backbone-framework", tag = "v2.0.0", features = ["postgres"] }
+backbone-orm  = { git = "https://github.com/faridlab/backbone-framework", tag = "v2.0.0" }
+backbone-auth = { git = "https://github.com/faridlab/backbone-framework", tag = "v2.0.0" }
 ```
 
+> **Do not use `branch = "main"`.** It makes every `cargo update` pull HEAD,
+> which silently drags in breaking changes. Always pin `tag = "v<version>"`
+> and bump the tag deliberately when you want to adopt a new release.
+
+During local development against an unreleased change, temporarily swap to a
+`path = "../backbone-framework/backbone-<crate>"` dep — but revert to a tag
+pin before committing.
+
 Each crate ships with its own `README.md` and `examples/` directory — start there for usage patterns.
+
+## Versioning & Releases
+
+This workspace uses **monorepo versioning**: one version covers every member
+crate at a given commit. The authoritative version lives in
+`[workspace.metadata.release].version` in [Cargo.toml](Cargo.toml); each
+release is a git tag `v<version>` pointing at the commit where that version
+was set. See [CHANGELOG.md](CHANGELOG.md) for the release history.
+
+Semver applies to the workspace as a whole:
+
+- **Patch** (`v2.0.0` → `v2.0.1`) — bug fixes; safe to adopt.
+- **Minor** (`v2.0.0` → `v2.1.0`) — additive; safe to adopt.
+- **Major** (`v2.0.0` → `v3.0.0`) — breaking changes somewhere in the workspace; consumers must opt in.
+
+Releases are cut by pushing a `v<version>` tag. The release workflow
+(`.github/workflows/release.yml`) verifies the tag matches the workspace
+version, builds and tests the whole workspace, and publishes a GitHub Release
+with notes from `CHANGELOG.md`.
 
 ## Building
 
