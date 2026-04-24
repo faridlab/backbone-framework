@@ -1,14 +1,18 @@
 name: Release
 
-# Tag format: <crate>-v<semver>, e.g. `backbone-core-v2.0.0` or
-# `backbone-core-v2.0.0-rc1`. Each member crate in this workspace is released
-# independently; a single `v*` tag would be ambiguous across 15 crates with
-# divergent versions.
+# Monorepo tag-driven release.
+#
+# Distribution model: this workspace is consumed as git deps, not crates.io.
+# A single `v<version>` tag snapshots the entire workspace at one commit;
+# downstream projects pin with `{ git = "...", tag = "v<version>" }`.
+#
+# The tag's version MUST equal `[workspace.metadata.release].version` in the
+# root Cargo.toml — the workflow refuses to release if they disagree.
 
 on:
   push:
     tags:
-      - '*-v*'
+      - 'v*'
 
 permissions:
   contents: write
@@ -21,71 +25,54 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Parse tag into crate + version
-        id: parse
-        run: |
-          tag="${GITHUB_REF_NAME}"
-          if [[ "$tag" != *-v* ]]; then
-            echo "Tag '$tag' does not match '<crate>-v<version>' pattern" >&2
-            exit 1
-          fi
-          crate="${tag%-v*}"
-          version="${tag##*-v}"
-          if [ ! -f "$crate/Cargo.toml" ]; then
-            echo "Crate '$crate' not found at $crate/Cargo.toml" >&2
-            exit 1
-          fi
-          manifest_version="$(awk -F'"' '/^version *= *"/ {print $2; exit}' "$crate/Cargo.toml")"
-          if [ "$manifest_version" != "$version" ]; then
-            echo "Tag version '$version' disagrees with $crate/Cargo.toml ('$manifest_version')" >&2
-            exit 1
-          fi
-          echo "crate=$crate"     >> "$GITHUB_OUTPUT"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@v2
 
-      - name: Verify crate builds and tests pass
+      - name: Verify tag matches workspace version
+        id: verify
         run: |
-          cargo build -p "${{ steps.parse.outputs.crate }}" --all-features
-          cargo test  -p "${{ steps.parse.outputs.crate }}" --all-features
+          tag_version="${GITHUB_REF_NAME#v}"
+          workspace_version="$(cargo metadata --format-version 1 --no-deps \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["metadata"]["release"]["version"])')"
+          if [ "$tag_version" != "$workspace_version" ]; then
+            echo "Tag '$GITHUB_REF_NAME' (version '$tag_version') disagrees with" >&2
+            echo "[workspace.metadata.release].version = '$workspace_version'." >&2
+            echo "Bump the workspace version in Cargo.toml or retag." >&2
+            exit 1
+          fi
+          echo "version=$tag_version" >> "$GITHUB_OUTPUT"
+
+      - name: Build and test the entire workspace
+        run: |
+          cargo build --workspace --all-features
+          cargo test  --workspace --all-features
 
       - name: Extract release notes from CHANGELOG.md
         run: |
-          crate="${{ steps.parse.outputs.crate }}"
-          version="${{ steps.parse.outputs.version }}"
-          changelog="$crate/CHANGELOG.md"
+          version="${{ steps.verify.outputs.version }}"
           # Copy the body under `## [<header>]` up to (but not including) the
           # next `## [` header. Prefer the exact version section; if missing,
-          # fall back to `## [Unreleased]` — the convention is to rename that
-          # section to the tag's version when cutting a release, but this
-          # covers the case where the rename hasn't happened yet.
+          # fall back to `## [Unreleased]`.
           extract() {
             awk -v hdr="## [$1]" '
               index($0, hdr) == 1 { found=1; next }
               found && /^## \[/  { exit }
               found              { print }
-            ' "$changelog"
+            ' CHANGELOG.md
           }
           : > release_notes.md
-          if [ -f "$changelog" ]; then
+          if [ -f CHANGELOG.md ]; then
             extract "$version"    > release_notes.md
             [ -s release_notes.md ] || extract "Unreleased" > release_notes.md
           fi
           [ -s release_notes.md ] || echo "Release $GITHUB_REF_NAME" > release_notes.md
-
-      - name: Publish to crates.io
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p "${{ steps.parse.outputs.crate }}" --all-features
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           body_path: release_notes.md
           draft: false
-          prerelease: ${{ contains(steps.parse.outputs.version, '-') }}
+          prerelease: ${{ contains(steps.verify.outputs.version, '-') }}
