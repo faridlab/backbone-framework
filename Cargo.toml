@@ -23,3 +23,12 @@ members = [
 # monorepo-backbone (no workspace inheritance), so we preserve that property
 # during extraction. Lift-and-shift discipline: the source files inside each
 # member directory are byte-for-byte unchanged from monorepo-backbone.
+
+# Distribution model: this workspace is consumed via git deps, not crates.io.
+# Downstream projects pin the whole framework at a point in time with:
+#   backbone-core = { git = "...", tag = "v<version>" }
+# The release tag and the version below move together. The release workflow
+# (.github/workflows/release.yml) refuses to publish a `v*` tag whose version
+# doesn't match this field.
+[workspace.metadata.release]
+version = "2.0.0"
