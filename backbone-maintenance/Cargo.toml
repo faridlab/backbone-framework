@@ -1,0 +1,21 @@
+[package]
+name = "backbone-maintenance"
+version = "2.0.0"
+edition = "2021"
+description = "Backbone Framework Maintenance Mode — toggleable 503 gate with admin endpoint, RFC 7231 Retry-After, and allow-path bypass"
+license = "MIT"
+
+[lib]
+name = "backbone_maintenance"
+path = "src/lib.rs"
+
+[dependencies]
+axum = { version = "0.7", features = ["json", "macros"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1.0", features = ["macros", "rt-multi-thread", "sync"] }
+tower = { version = "0.5", features = ["util"] }
