@@ -9,6 +9,7 @@ members = [
     "backbone-graphql",
     "backbone-health",
     "backbone-jobs",
+    "backbone-maintenance",
     "backbone-messaging",
     "backbone-observability",
     "backbone-orm",
@@ -31,4 +32,4 @@ members = [
 # (.github/workflows/release.yml) refuses to publish a `v*` tag whose version
 # doesn't match this field.
 [workspace.metadata.release]
-version = "2.0.0"
+version = "2.1.0"
