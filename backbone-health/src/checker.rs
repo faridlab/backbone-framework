@@ -164,6 +164,12 @@ impl HealthChecker {
             }
         }
 
+        // Drop both locks before calling `health_report`, which re-acquires
+        // `statuses.read()`. Without this, the prior `statuses.write()` causes
+        // a self-deadlock against tokio's fair RwLock.
+        drop(statuses);
+        drop(components);
+
         Ok(self.health_report().await)
     }
 
