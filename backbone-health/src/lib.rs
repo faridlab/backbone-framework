@@ -29,6 +29,11 @@
 pub mod checker;
 pub mod components_simple;
 
+#[cfg(feature = "cli")]
+pub mod cli;
+
+pub mod routes;
+
 // Re-export components with a cleaner name
 pub use components_simple as components;
 pub mod status;

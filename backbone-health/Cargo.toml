@@ -28,20 +28,18 @@ tracing = "0.1"
 # Optional database support
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid"], optional = true }
 
-# Optional dependencies (commented out for simplicity)
-# reqwest = { version = "0.11", features = ["json"], optional = true }
-# redis = { version = "0.24", features = ["tokio-comp"], optional = true }
+# In-binary healthcheck client (for distroless Docker HEALTHCHECK)
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
 
 [features]
 default = []
 database = ["sqlx"]
-# http = ["reqwest"]
-# redis = ["dep:redis"]
-# full = ["database", "http", "redis"]
+cli = ["dep:reqwest"]
 
 [dev-dependencies]
 tokio-test = "0.4"
 tower-test = "0.4"
+tower = { version = "0.4", features = ["util"] }
 
 [[example]]
 name = "health_demo"
