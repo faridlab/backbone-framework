@@ -11,6 +11,9 @@ pub mod metrics;
 pub mod middleware;
 pub mod tracing;
 
+#[cfg(feature = "audit")]
+pub mod audit;
+
 #[cfg(test)]
 mod tests;
 

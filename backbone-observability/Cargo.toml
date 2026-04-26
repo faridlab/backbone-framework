@@ -52,6 +52,9 @@ json-logs = []
 # Observability middleware for HTTP requests
 middleware = ["dep:tower"]
 
+# Security audit logging middleware (axum-native)
+audit = ["dep:axum"]
+
 # Prometheus metrics export with HTTP server
 prometheus-metrics = [
     "dep:prometheus",
