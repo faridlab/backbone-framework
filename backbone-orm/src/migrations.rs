@@ -204,45 +204,34 @@ impl MigrationManager {
         Ok(row.map(|r| r.get("name")))
     }
 
-    /// Find the corresponding down migration file
+    /// Find the corresponding down migration file.
+    ///
+    /// Migrations live as paired siblings: `<name>.up.sql` and
+    /// `<name>.down.sql`. The migration "name" stored in the
+    /// `schema_migrations` table is the part before `.up.sql`, so finding
+    /// the rollback is a direct path lookup.
     fn find_down_migration(&self, migration_name: &str) -> Result<Option<String>> {
-        let migrations_dir = Path::new("migrations");
-
-        // Look for the down migration file
-        let down_name = format!("{}_down", migration_name);
-
-        if migrations_dir.exists() {
-            for entry in fs::read_dir(migrations_dir)? {
-                let entry = entry?;
-                let path = entry.path();
-
-                if path.extension().and_then(|s| s.to_str()) == Some("sql") {
-                    let file_stem = path.file_stem()
-                        .unwrap()
-                        .to_string_lossy()
-                        .to_string();
-
-                    if file_stem == down_name {
-                        let content = fs::read_to_string(&path)?;
-                        return Ok(Some(content));
-                    }
-                }
-            }
+        let path = Path::new("migrations").join(format!("{}.down.sql", migration_name));
+        if path.exists() {
+            Ok(Some(fs::read_to_string(&path)?))
+        } else {
+            Ok(None)
         }
-
-        Ok(None)
     }
 
-    /// Rollback a specific migration
+    /// Rollback a specific migration in a single transaction.
+    ///
+    /// Down migrations are multi-statement (drop indexes, drop table,
+    /// drop functions, drop types) so we use `sqlx::raw_sql` rather than
+    /// `sqlx::query` — the latter goes through the extended protocol and
+    /// rejects compound statements.
     async fn rollback_migration(&self, migration_name: &str, down_content: &str) -> Result<()> {
         let mut tx = self.pool.begin().await?;
 
-        // Execute the down migration SQL
-        sqlx::query(down_content)
+        sqlx::raw_sql(down_content)
             .execute(&mut *tx)
             .await?;
 
-        // Remove migration record from database
         sqlx::query("DELETE FROM schema_migrations WHERE name = $1")
             .bind(migration_name)
             .execute(&mut *tx)
@@ -252,18 +241,18 @@ impl MigrationManager {
         Ok(())
     }
 
-    /// Create a new migration
+    /// Create a new paired up/down migration: `<ts>_<name>.up.sql` and
+    /// `<ts>_<name>.down.sql` under `migrations/`. Timestamp is the
+    /// `YYYYMMDDHHMMSS` form so it sorts cleanly next to generator-emitted
+    /// migrations.
     pub async fn create_migration(&self, name: &str) -> Result<()> {
         println!("📝 Creating new migration: {}", name.bright_cyan());
 
-        let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
-        let migration_name = format!("{}_{}.sql", timestamp, name);
+        let timestamp = chrono::Utc::now().format("%Y%m%d%H%M%S");
+        let stem = format!("{}_{}", timestamp, name);
         let migrations_dir = "migrations";
-
-        // Create migrations directory if it doesn't exist
         fs::create_dir_all(migrations_dir)?;
 
-        // Create up migration file
         let up_content = format!(
             r#"-- Migration: {name}
 -- Created: {timestamp}
@@ -272,37 +261,32 @@ impl MigrationManager {
 -- Example:
 -- CREATE TABLE example_table (
 --     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
---     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
---     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+--     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+--     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 -- );
 "#,
             name = name,
             timestamp = timestamp
         );
-
-        let up_path = Path::new(migrations_dir).join(&migration_name);
+        let up_path = Path::new(migrations_dir).join(format!("{}.up.sql", stem));
         fs::write(&up_path, up_content)?;
 
-        // Create down migration file
-        let down_name = format!("{}_{}_down.sql", timestamp, name);
         let down_content = format!(
             r#"-- Down Migration: {name}
 -- Created: {timestamp}
 
 -- Add your rollback SQL here
 -- Example:
--- DROP TABLE IF EXISTS example_table;
+-- DROP TABLE IF EXISTS example_table CASCADE;
 "#,
             name = name,
             timestamp = timestamp
         );
-
-        let down_path = Path::new(migrations_dir).join(&down_name);
+        let down_path = Path::new(migrations_dir).join(format!("{}.down.sql", stem));
         fs::write(&down_path, down_content)?;
 
         println!("  ✓ Created: {}", up_path.display().to_string().bright_green());
         println!("  ✓ Created: {}", down_path.display().to_string().bright_green());
-
         Ok(())
     }
 
@@ -323,7 +307,10 @@ impl MigrationManager {
         Ok(())
     }
 
-    /// Load migration files from filesystem
+    /// Load up-migration files from `migrations/`, sorted by name (which
+    /// for our convention also sorts chronologically because filenames are
+    /// timestamp-prefixed). The "name" returned strips the `.up.sql`
+    /// suffix so it matches what gets recorded in `schema_migrations`.
     fn load_migration_files(&self) -> Result<Vec<MigrationFile>> {
         let migrations_dir = Path::new("migrations");
         let mut migrations = Vec::new();
@@ -332,22 +319,17 @@ impl MigrationManager {
             for entry in fs::read_dir(migrations_dir)? {
                 let entry = entry?;
                 let path = entry.path();
-
-                if path.extension().and_then(|s| s.to_str()) == Some("sql") &&
-                   !path.file_name().unwrap().to_string_lossy().contains("_down") {
-
-                    let name = path.file_stem()
-                        .unwrap()
-                        .to_string_lossy()
-                        .to_string();
-
-                    let content = fs::read_to_string(&path)?;
-
-                    migrations.push(MigrationFile {
-                        name: name.clone(),
-                        content,
-                    });
-                }
+                let Some(file_name) = path.file_name().and_then(|f| f.to_str()) else {
+                    continue;
+                };
+                let Some(name) = file_name.strip_suffix(".up.sql") else {
+                    continue;
+                };
+                let content = fs::read_to_string(&path)?;
+                migrations.push(MigrationFile {
+                    name: name.to_string(),
+                    content,
+                });
             }
         }
 
@@ -369,23 +351,25 @@ impl MigrationManager {
         Ok(migrations)
     }
 
-    /// Apply a single migration
+    /// Apply a single migration in a single transaction.
+    ///
+    /// Generated `.up.sql` files contain multiple statements (CREATE
+    /// TABLE + CREATE INDEX + CREATE FUNCTION + ALTER TABLE …). Use
+    /// `sqlx::raw_sql` so the simple-query protocol handles the compound
+    /// SQL — `sqlx::query` only accepts a single statement.
     async fn apply_migration(&self, migration: &MigrationFile) -> Result<()> {
         let mut tx = self.pool.begin().await?;
 
-        // Execute migration SQL
-        sqlx::query(&migration.content)
+        sqlx::raw_sql(&migration.content)
             .execute(&mut *tx)
             .await?;
 
-        // Record migration as applied
         sqlx::query("INSERT INTO schema_migrations (name) VALUES ($1)")
             .bind(&migration.name)
             .execute(&mut *tx)
             .await?;
 
         tx.commit().await?;
-
         Ok(())
     }
 }
