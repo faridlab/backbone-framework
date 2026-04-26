@@ -11,6 +11,7 @@ mod types;
 mod storage;
 mod limiter;
 mod middleware;
+pub mod dual;
 
 #[cfg(feature = "redis")]
 mod redis_storage;
