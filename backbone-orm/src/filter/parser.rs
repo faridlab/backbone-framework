@@ -25,6 +25,30 @@ pub(crate) fn is_custom_enum_type(col_type: &str) -> bool {
     !BUILTIN_PG_TYPES.contains(&col_type.to_lowercase().as_str())
 }
 
+/// Audit-metadata timestamp fields that live inside the `metadata` JSONB
+/// column rather than as top-level columns. When a filter targets one of
+/// these, the field is rewritten to `(metadata->>'<field>')::timestamptz`
+/// so the generated SQL is valid PostgreSQL.
+///
+/// All entities in the schema-driven migrations follow this convention —
+/// timestamps live in `metadata` to keep them out of the entity's typed
+/// schema and let triggers manage them uniformly. Without this rewrite,
+/// any client sending `?updated_at[gte]=...` (e.g. mobile delta-sync)
+/// gets a `column "updated_at" does not exist` 500 error.
+const AUDIT_METADATA_FIELDS: &[&str] = &["created_at", "updated_at", "deleted_at"];
+
+/// If `field` is one of the audit-metadata timestamps, return the
+/// SQL expression that reads it from the `metadata` JSONB column with
+/// a timestamptz cast (so range comparisons work). Otherwise return
+/// `None` and the caller should use the field name as-is.
+pub(crate) fn audit_metadata_sql_expr(field: &str) -> Option<String> {
+    if AUDIT_METADATA_FIELDS.contains(&field) {
+        Some(format!("(metadata->>'{}')::timestamptz", field))
+    } else {
+        None
+    }
+}
+
 /// Convert PascalCase or camelCase string to snake_case.
 /// E.g., "Detergent" → "detergent", "StainRemover" → "stain_remover",
 ///       "DryCleanChemical" → "dry_clean_chemical"
@@ -99,8 +123,10 @@ pub fn parse_filters(
                 match operator_str.to_ascii_lowercase().as_str() {
                     "orderby" => {
                         // orderby[field]=direction
+                        let sort_field = audit_metadata_sql_expr(&sanitized_field)
+                            .unwrap_or_else(|| sanitized_field.clone());
                         filter.add_sort(SortSpec::new(
-                            sanitized_field.clone(),
+                            sort_field,
                             SortDirection::from_str(value)
                         ));
                         continue;
@@ -129,14 +155,22 @@ pub fn parse_filters(
                                 value.clone()
                             };
 
+                            // Audit timestamps live in `metadata` JSONB — rewrite the
+                            // field to the SQL expression that reads from there.
+                            let condition_field = audit_metadata_sql_expr(&sanitized_field)
+                                .unwrap_or_else(|| sanitized_field.clone());
+
                             let condition = FilterCondition::new(
-                                sanitized_field.clone(),
+                                condition_field,
                                 op.clone(),
                                 FilterValue::from_string(filter_value, false)
                             );
 
-                            // Add column type if specified
-                            let condition = if let Some(col_type) = column_types.get(&sanitized_field) {
+                            // Add column type if specified — but skip for audit-metadata
+                            // fields, since the SQL expression already includes the cast.
+                            let condition = if audit_metadata_sql_expr(&sanitized_field).is_some() {
+                                condition
+                            } else if let Some(col_type) = column_types.get(&sanitized_field) {
                                 condition.with_column_type(col_type.clone())
                             } else {
                                 condition
@@ -163,25 +197,29 @@ pub fn parse_filters(
                             };
                             let field = part.trim_start_matches('-');
                             if let Ok(sanitized) = sanitize_field_name(field) {
+                                let sort_field = audit_metadata_sql_expr(&sanitized)
+                                    .unwrap_or_else(|| sanitized.clone());
                                 // Validate against allow-list if provided
                                 if let Some(allowed) = allowed_fields {
                                     if is_valid_field(&sanitized, allowed) {
-                                        filter.add_sort(SortSpec::new(sanitized, direction));
+                                        filter.add_sort(SortSpec::new(sort_field, direction));
                                     }
                                 } else {
-                                    filter.add_sort(SortSpec::new(sanitized, direction));
+                                    filter.add_sort(SortSpec::new(sort_field, direction));
                                 }
                             }
                         }
                     } else {
                         #[allow(clippy::collapsible_else_if)]
                         if let Ok(sanitized) = sanitize_field_name(value) {
+                            let sort_field = audit_metadata_sql_expr(&sanitized)
+                                .unwrap_or_else(|| sanitized.clone());
                             if let Some(allowed) = allowed_fields {
                                 if is_valid_field(&sanitized, allowed) {
-                                    filter.add_sort(SortSpec::new(sanitized, SortDirection::Asc));
+                                    filter.add_sort(SortSpec::new(sort_field, SortDirection::Asc));
                                 }
                             } else {
-                                filter.add_sort(SortSpec::new(sanitized, SortDirection::Asc));
+                                filter.add_sort(SortSpec::new(sort_field, SortDirection::Asc));
                             }
                         }
                     }
@@ -254,13 +292,20 @@ pub fn parse_filters(
                             value.clone()
                         };
 
+                        // Audit timestamps live in `metadata` JSONB — rewrite the
+                        // field to the SQL expression that reads from there.
+                        let condition_field = audit_metadata_sql_expr(&sanitized_field)
+                            .unwrap_or_else(|| sanitized_field.clone());
+
                         let condition = FilterCondition::new(
-                            sanitized_field.clone(),
+                            condition_field,
                             FilterOperator::Equal,
                             FilterValue::from_string(filter_value, value.contains(','))
                         );
 
-                        let condition = if let Some(col_type) = column_types.get(&sanitized_field) {
+                        let condition = if audit_metadata_sql_expr(&sanitized_field).is_some() {
+                            condition
+                        } else if let Some(col_type) = column_types.get(&sanitized_field) {
                             condition.with_column_type(col_type.clone())
                         } else {
                             condition

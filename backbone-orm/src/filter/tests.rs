@@ -438,3 +438,67 @@ fn test_enum_normalization_already_snake_case() {
     let params = filter.conditions[0].get_params();
     assert_eq!(params, vec!["dry_clean_chemical"]);
 }
+
+#[test]
+fn test_audit_metadata_rewrite_bracket() {
+    // ?updated_at[gte]=... must read from metadata JSONB, not a top-level column
+    let mut params = HashMap::new();
+    params.insert("updated_at[gte]".to_string(), "2026-01-01T00:00:00Z".to_string());
+
+    let column_types = HashMap::new();
+    let filter = parse_filters(&params, &column_types, None).unwrap();
+
+    assert_eq!(filter.conditions.len(), 1);
+    let (where_clause, _) = filter.build_where_clause();
+    assert!(
+        where_clause.contains("(metadata->>'updated_at')::timestamptz"),
+        "expected metadata rewrite, got: {}", where_clause
+    );
+    assert!(!where_clause.contains(" updated_at "), "bare column leaked: {}", where_clause);
+}
+
+#[test]
+fn test_audit_metadata_rewrite_simple_equality() {
+    let mut params = HashMap::new();
+    params.insert("created_at".to_string(), "2026-01-01T00:00:00Z".to_string());
+
+    let column_types = HashMap::new();
+    let filter = parse_filters(&params, &column_types, None).unwrap();
+
+    let (where_clause, _) = filter.build_where_clause();
+    assert!(where_clause.contains("(metadata->>'created_at')::timestamptz"));
+}
+
+#[test]
+fn test_audit_metadata_rewrite_orderby() {
+    // Bracket form: orderby[updated_at]=desc
+    let mut params = HashMap::new();
+    params.insert("updated_at[orderby]".to_string(), "desc".to_string());
+
+    let column_types = HashMap::new();
+    let filter = parse_filters(&params, &column_types, None).unwrap();
+
+    assert_eq!(filter.sorts.len(), 1);
+    assert_eq!(filter.sorts[0].field, "(metadata->>'updated_at')::timestamptz");
+
+    // Multi-field form with DESC prefix: orderby=-updated_at,name
+    let mut params2 = HashMap::new();
+    params2.insert("orderby".to_string(), "-updated_at,name".to_string());
+    let filter2 = parse_filters(&params2, &column_types, None).unwrap();
+    assert_eq!(filter2.sorts.len(), 2);
+    assert_eq!(filter2.sorts[0].field, "(metadata->>'updated_at')::timestamptz");
+    assert_eq!(filter2.sorts[1].field, "name");
+}
+
+#[test]
+fn test_audit_metadata_does_not_affect_other_fields() {
+    let mut params = HashMap::new();
+    params.insert("name".to_string(), "alice".to_string());
+
+    let column_types = HashMap::new();
+    let filter = parse_filters(&params, &column_types, None).unwrap();
+
+    let (where_clause, _) = filter.build_where_clause();
+    assert!(!where_clause.contains("metadata"));
+    assert!(where_clause.contains("name"));
+}
