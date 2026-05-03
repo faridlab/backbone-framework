@@ -455,6 +455,12 @@ fn test_audit_metadata_rewrite_bracket() {
         "expected metadata rewrite, got: {}", where_clause
     );
     assert!(!where_clause.contains(" updated_at "), "bare column leaked: {}", where_clause);
+    // RHS must also be cast to timestamptz — params are bound as text and Postgres
+    // has no implicit `timestamptz <op> text` operator.
+    assert!(
+        where_clause.contains("$1::timestamptz"),
+        "expected RHS timestamptz cast, got: {}", where_clause
+    );
 }
 
 #[test]
@@ -467,6 +473,10 @@ fn test_audit_metadata_rewrite_simple_equality() {
 
     let (where_clause, _) = filter.build_where_clause();
     assert!(where_clause.contains("(metadata->>'created_at')::timestamptz"));
+    assert!(
+        where_clause.contains("$1::timestamptz"),
+        "expected RHS timestamptz cast, got: {}", where_clause
+    );
 }
 
 #[test]

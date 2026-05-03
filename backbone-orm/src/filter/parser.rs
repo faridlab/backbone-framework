@@ -166,10 +166,12 @@ pub fn parse_filters(
                                 FilterValue::from_string(filter_value, false)
                             );
 
-                            // Add column type if specified — but skip for audit-metadata
-                            // fields, since the SQL expression already includes the cast.
+                            // Add column type for casting. Audit-metadata fields need
+                            // `::timestamptz` on the RHS too — the LHS expression casts the
+                            // JSONB extract, but the bound parameter is still text and Postgres
+                            // has no implicit `timestamptz <op> text` operator.
                             let condition = if audit_metadata_sql_expr(&sanitized_field).is_some() {
-                                condition
+                                condition.with_column_type("timestamptz".to_string())
                             } else if let Some(col_type) = column_types.get(&sanitized_field) {
                                 condition.with_column_type(col_type.clone())
                             } else {
@@ -304,7 +306,7 @@ pub fn parse_filters(
                         );
 
                         let condition = if audit_metadata_sql_expr(&sanitized_field).is_some() {
-                            condition
+                            condition.with_column_type("timestamptz".to_string())
                         } else if let Some(col_type) = column_types.get(&sanitized_field) {
                             condition.with_column_type(col_type.clone())
                         } else {
