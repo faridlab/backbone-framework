@@ -8,6 +8,8 @@ Rate limiting middleware for Axum web framework with configurable backends.
 - **Configuration**: YAML-based configuration with per-route overrides
 - **Axum Middleware**: Easy integration with `State` extractor
 - **Security-Focused**: IP-based and user-based rate limiting
+- **Hard Lockout**: Optional `lockout_seconds` rejects all further requests
+  for a fixed duration once the window limit is exceeded
 - **Type-Safe**: Full Rust type safety with comprehensive error handling
 
 ## Installation
@@ -28,8 +30,11 @@ rate_limiting:
   enabled: true
   key: "x-rate-limit"  # Header-based or IP-based
   config:
-    max_requests: 100      # Max requests per window
+    max_requests: 100         # Max requests per window
     window_seconds: 60        # Time window in seconds
+    lockout_seconds: 300      # Optional. When set, exceeding max_requests
+                              # locks the key for this many seconds and
+                              # rejects all further requests until expiry.
 ```
 
 ## Usage
@@ -51,12 +56,13 @@ use std::sync::Arc;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Build rate limiter layer with configuration
-    let config = RateLimitConfig {
-        key: "default".to_string(),
-        max_requests: 100,
-        window_seconds: 60,
-        enabled: true,
-    };
+    let config = RateLimitConfig::new("default", 100, 60, true);
+
+    // Optional: add a hard lockout. After 100 requests in 60s, the key
+    // is locked for 5 minutes — every subsequent request is rejected
+    // until the lockout expires, regardless of window position.
+    // let config = RateLimitConfig::new("default", 100, 60, true)
+    //     .with_lockout(300);
 
     let rate_limit_layer = RateLimitLayer::new(
         InMemoryStorage::new(),
@@ -140,6 +146,34 @@ rate_limiting:
       url: "redis://127.0.0.1:6379"
       key_prefix: "rate_limit:"
 ```
+
+## Hard Lockout
+
+By default the limiter uses pure window semantics: once `window_seconds`
+elapses, the counter resets and the caller may try again. For abuse
+mitigation you can layer a **hard lockout** on top:
+
+```rust
+use backbone_rate_limit::RateLimitConfig;
+
+let config = RateLimitConfig::new("login", 5, 60, true)
+    .with_lockout(900); // 15-minute lockout after 5 failed attempts/min
+```
+
+Behavior:
+
+- While inside the window, the limiter behaves as before.
+- The first request that exceeds `max_requests` flips the key into
+  lockout. The response carries `locked_until` (unix timestamp) and
+  `reset_at` is set to that same value.
+- Every subsequent request during the lockout is rejected with
+  `allowed = false` and the same `locked_until`. The counter is **not**
+  incremented while locked.
+- When `locked_until` passes, the next call starts a fresh window.
+
+Redis backend stores the lock as a sibling key
+(`{prefix}:lock:{key}`) with a TTL equal to `lockout_seconds`, so
+distributed nodes observe the same lockout window.
 
 ## License
 
