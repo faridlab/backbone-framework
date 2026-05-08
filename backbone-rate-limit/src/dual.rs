@@ -53,7 +53,11 @@ pub enum DualStorage {
 
 #[async_trait::async_trait]
 impl StorageBackend for DualStorage {
-    async fn increment(&self, key: &str, config: &RateLimitConfig) -> RateLimitResult<u64> {
+    async fn increment(
+        &self,
+        key: &str,
+        config: &RateLimitConfig,
+    ) -> RateLimitResult<crate::types::IncrementOutcome> {
         match self {
             #[cfg(feature = "redis")]
             DualStorage::Redis(s) => s.increment(key, config).await,
@@ -214,12 +218,7 @@ mod tests {
     use super::*;
 
     fn test_config() -> RateLimitConfig {
-        RateLimitConfig {
-            key: "t".to_string(),
-            max_requests: 10,
-            window_seconds: 60,
-            enabled: true,
-        }
+        RateLimitConfig::new("t", 10, 60, true)
     }
 
     #[tokio::test]
@@ -230,7 +229,8 @@ mod tests {
         assert!(matches!(s, DualStorage::InMemory(_)));
         // Sanity-check it actually works
         let c = s.increment("k", &test_config()).await.unwrap();
-        assert_eq!(c, 1);
+        assert_eq!(c.count, 1);
+        assert!(c.locked_until.is_none());
     }
 
     #[tokio::test]
