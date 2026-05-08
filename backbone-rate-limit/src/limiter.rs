@@ -27,22 +27,38 @@ impl<B: StorageBackend> RateLimiter<B> {
                 message: None,
                 current_count: 0,
                 exceeded: false,
+                locked_until: None,
             });
         }
 
-        let count = self.backend.increment(key, &self.config).await?;
+        let outcome = self.backend.increment(key, &self.config).await?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
-        let remaining = if count >= self.config.max_requests {
+        // Active lockout dominates: reject regardless of window position.
+        if let Some(until) = outcome.locked_until {
+            if until > now {
+                return Ok(RateLimitResponse {
+                    allowed: false,
+                    remaining: 0,
+                    reset_at: Some(until),
+                    message: Some("Rate limit exceeded — locked out".to_string()),
+                    current_count: outcome.count,
+                    exceeded: true,
+                    locked_until: Some(until),
+                });
+            }
+        }
+
+        let remaining = if outcome.count >= self.config.max_requests {
             0
         } else {
-            self.config.max_requests.saturating_sub(count)
+            self.config.max_requests.saturating_sub(outcome.count)
         };
 
-        let exceeded = count > self.config.max_requests;
+        let exceeded = outcome.count > self.config.max_requests;
 
         Ok(RateLimitResponse {
             allowed: !exceeded,
@@ -53,8 +69,9 @@ impl<B: StorageBackend> RateLimiter<B> {
             } else {
                 None
             },
-            current_count: count,
+            current_count: outcome.count,
             exceeded,
+            locked_until: None,
         })
     }
 
