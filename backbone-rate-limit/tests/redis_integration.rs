@@ -11,12 +11,7 @@ mod redis_tests {
     };
 
     fn test_config() -> RateLimitConfig {
-        RateLimitConfig {
-            key: "test".to_string(),
-            max_requests: 5,
-            window_seconds: 60,
-            enabled: true,
-        }
+        RateLimitConfig::new("test", 5, 60, true)
     }
 
     #[tokio::test]
@@ -30,14 +25,14 @@ mod redis_tests {
         // Reset first
         storage.reset("test_incr", &config).await.unwrap();
 
-        let count = storage.increment("test_incr", &config).await.unwrap();
-        assert_eq!(count, 1);
+        let outcome = storage.increment("test_incr", &config).await.unwrap();
+        assert_eq!(outcome.count, 1);
 
-        let count = storage.increment("test_incr", &config).await.unwrap();
-        assert_eq!(count, 2);
+        let outcome = storage.increment("test_incr", &config).await.unwrap();
+        assert_eq!(outcome.count, 2);
 
-        let count = storage.increment("test_incr", &config).await.unwrap();
-        assert_eq!(count, 3);
+        let outcome = storage.increment("test_incr", &config).await.unwrap();
+        assert_eq!(outcome.count, 3);
 
         // Cleanup
         storage.reset("test_incr", &config).await.unwrap();
@@ -88,12 +83,7 @@ mod redis_tests {
         let storage = RedisStorage::new("redis://localhost:6379")
             .await
             .expect("Redis connection failed");
-        let config = RateLimitConfig {
-            key: "test_limiter".to_string(),
-            max_requests: 3,
-            window_seconds: 60,
-            enabled: true,
-        };
+        let config = RateLimitConfig::new("test_limiter", 3, 60, true);
 
         let limiter = RateLimiter::new(storage.clone(), config.clone());
 
@@ -118,12 +108,7 @@ mod redis_tests {
     #[tokio::test]
     #[ignore]
     async fn test_redis_middleware_constructor() {
-        let config = RateLimitConfig {
-            key: "test_mw".to_string(),
-            max_requests: 100,
-            window_seconds: 60,
-            enabled: true,
-        };
+        let config = RateLimitConfig::new("test_mw", 100, 60, true);
 
         let middleware = RateLimitMiddleware::with_redis("redis://localhost:6379", config)
             .await

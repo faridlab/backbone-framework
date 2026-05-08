@@ -31,12 +31,7 @@ fn next_test_id() -> u64 {
 #[tokio::test]
 async fn test_in_memory_backend() {
     let backend = InMemoryStorage::new();
-    let config = RateLimitConfig {
-        key: "test".to_string(),
-        max_requests: 5,
-        window_seconds: 60,
-        enabled: true,
-    };
+    let config = RateLimitConfig::new("test", 5, 60, true);
 
     let limiter = RateLimiter::new(backend, config);
 

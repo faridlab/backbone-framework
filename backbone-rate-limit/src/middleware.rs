@@ -130,11 +130,6 @@ pub fn from_config(config: RateLimitConfig) -> Arc<RateLimitMiddleware<InMemoryS
 
 /// Create rate limit middleware with simple parameters (backward compatible, in-memory)
 pub fn new(max_requests: u64, window_seconds: u64) -> Arc<RateLimitMiddleware<InMemoryStorage>> {
-    let config = RateLimitConfig {
-        key: "default".to_string(),
-        max_requests,
-        window_seconds,
-        enabled: true,
-    };
+    let config = RateLimitConfig::new("default", max_requests, window_seconds, true);
     Arc::new(RateLimitMiddleware::new(config))
 }
