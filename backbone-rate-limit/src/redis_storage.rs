@@ -4,11 +4,19 @@
 //! the algorithm used by `InMemoryStorage`. When the key expires after
 //! `window_seconds`, the next INCR creates a fresh counter at 1.
 //!
-//! Key format: `{prefix}:{key}`
+//! When `RateLimitConfig::lockout_seconds` is set, exceeding the window
+//! limit additionally writes a sibling lock key (`{prefix}:lock:{key}`)
+//! with a TTL of `lockout_seconds`. While the lock key exists, increments
+//! are skipped and the existing TTL is reported back as `locked_until`.
+//!
+//! Key formats:
+//! - Counter: `{prefix}:{key}`
+//! - Lock:    `{prefix}:lock:{key}`
 
-use redis::{AsyncCommands, Client, aio::ConnectionManager};
+use redis::{aio::ConnectionManager, AsyncCommands, Client};
+
 use crate::storage::StorageBackend;
-use crate::types::{RateLimitConfig, RateLimitError, RateLimitResult};
+use crate::types::{IncrementOutcome, RateLimitConfig, RateLimitError, RateLimitResult};
 
 /// Redis-backed storage for distributed rate limiting
 ///
@@ -21,12 +29,7 @@ use crate::types::{RateLimitConfig, RateLimitError, RateLimitResult};
 /// use backbone_rate_limit::{RedisStorage, RateLimiter, RateLimitConfig};
 ///
 /// let storage = RedisStorage::new("redis://localhost:6379").await?;
-/// let config = RateLimitConfig {
-///     key: "api".to_string(),
-///     max_requests: 100,
-///     window_seconds: 60,
-///     enabled: true,
-/// };
+/// let config = RateLimitConfig::new("api", 100, 60, true);
 /// let limiter = RateLimiter::new(storage, config);
 /// ```
 #[derive(Clone)]
@@ -60,29 +63,72 @@ impl RedisStorage {
     fn build_key(&self, key: &str) -> String {
         format!("{}:{}", self.key_prefix, key)
     }
+
+    fn build_lock_key(&self, key: &str) -> String {
+        format!("{}:lock:{}", self.key_prefix, key)
+    }
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 #[async_trait::async_trait]
 impl StorageBackend for RedisStorage {
-    async fn increment(&self, key: &str, config: &RateLimitConfig) -> RateLimitResult<u64> {
-        let full_key = self.build_key(key);
+    async fn increment(
+        &self,
+        key: &str,
+        config: &RateLimitConfig,
+    ) -> RateLimitResult<IncrementOutcome> {
+        let counter_key = self.build_key(key);
+        let lock_key = self.build_lock_key(key);
         let mut conn = self.connection.clone();
 
-        // INCR is atomic — if the key doesn't exist, Redis creates it at 0 then increments to 1
+        // Honor any active lockout. TTL semantics: -2 = key absent,
+        // -1 = key exists with no TTL, >=0 = remaining seconds.
+        if config.lockout_seconds.is_some() {
+            let lock_ttl: i64 = conn
+                .ttl(&lock_key)
+                .await
+                .map_err(|e| RateLimitError::RedisOperation(e.to_string()))?;
+            if lock_ttl >= 0 {
+                let count: u64 = conn
+                    .get::<_, Option<u64>>(&counter_key)
+                    .await
+                    .map_err(|e| RateLimitError::RedisOperation(e.to_string()))?
+                    .unwrap_or(config.max_requests + 1);
+                return Ok(IncrementOutcome {
+                    count,
+                    locked_until: Some(now_unix() + lock_ttl as u64),
+                });
+            }
+        }
+
         let count: u64 = conn
-            .incr(&full_key, 1u64)
+            .incr(&counter_key, 1u64)
             .await
             .map_err(|e| RateLimitError::RedisOperation(e.to_string()))?;
 
-        // On the first request in the window (count == 1), set the TTL
-        // so the key auto-expires when the window closes
+        // First request in window — set TTL so the key auto-expires.
         if count == 1 {
-            let _: Result<bool, _> = conn
-                .expire(&full_key, config.window_seconds as i64)
-                .await;
+            let _: Result<bool, _> = conn.expire(&counter_key, config.window_seconds as i64).await;
         }
 
-        Ok(count)
+        let mut locked_until = None;
+        if count > config.max_requests {
+            if let Some(lockout) = config.lockout_seconds {
+                let _: Result<(), _> = conn.set_ex(&lock_key, 1u8, lockout).await;
+                locked_until = Some(now_unix() + lockout);
+            }
+        }
+
+        Ok(IncrementOutcome {
+            count,
+            locked_until,
+        })
     }
 
     async fn get_count(&self, key: &str, _config: &RateLimitConfig) -> RateLimitResult<u64> {
@@ -98,10 +144,12 @@ impl StorageBackend for RedisStorage {
     }
 
     async fn reset(&self, key: &str, _config: &RateLimitConfig) -> RateLimitResult<()> {
-        let full_key = self.build_key(key);
+        let counter_key = self.build_key(key);
+        let lock_key = self.build_lock_key(key);
         let mut conn = self.connection.clone();
 
-        let _: Result<i32, _> = conn.del(&full_key).await;
+        let _: Result<i32, _> = conn.del(&counter_key).await;
+        let _: Result<i32, _> = conn.del(&lock_key).await;
 
         Ok(())
     }
@@ -109,8 +157,6 @@ impl StorageBackend for RedisStorage {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_build_key_default_prefix() {
         // We can't construct RedisStorage without a connection,
@@ -123,5 +169,11 @@ mod tests {
     fn test_build_key_custom_prefix() {
         let key = format!("{}:{}", "myapp:ratelimit", "login");
         assert_eq!(key, "myapp:ratelimit:login");
+    }
+
+    #[test]
+    fn test_build_lock_key_format() {
+        let key = format!("{}:lock:{}", "rate_limit", "login:1.2.3.4");
+        assert_eq!(key, "rate_limit:lock:login:1.2.3.4");
     }
 }
