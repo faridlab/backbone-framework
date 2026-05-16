@@ -653,6 +653,21 @@ where
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
 
+        // Normalize incoming JSON keys to snake_case before forwarding to the
+        // service-layer merge. Entities serialize with Rust's snake_case field
+        // names by default, so a client sending camelCase (e.g. `isVip`) would
+        // otherwise produce a merged JSON object with both `is_vip` (from the
+        // existing entity) and `isVip` (from the patch). On deserialize back
+        // to the entity, the unknown camelCase key is silently dropped and the
+        // edit is lost. Normalization makes this class of bug impossible.
+        //
+        // The conversion is idempotent — already-snake_case keys pass through
+        // unchanged — so clients that already conform see no behavior change.
+        let fields: HashMap<String, serde_json::Value> = fields
+            .into_iter()
+            .map(|(k, v)| (camel_to_snake_case(&k), v))
+            .collect();
+
         match handler.service.partial_update(&id, fields).await {
             Ok(Some(entity)) => {
                 let response: R = entity.into();
@@ -949,4 +964,100 @@ pub struct PaginationRequest {
     pub limit: u32,
     pub sort_by: Option<String>,
     pub sort_order: Option<String>,
+}
+
+// ============================================================
+// Internal Helpers
+// ============================================================
+
+/// Convert a single JSON key from `camelCase` / `PascalCase` to `snake_case`.
+///
+/// Idempotent on already-`snake_case` input: `is_vip` → `is_vip`.
+/// Single words pass through unchanged: `name` → `name`.
+/// Boundary detection inserts an underscore between a lowercase/digit and the
+/// following uppercase, and between a run of uppercase and a following
+/// uppercase-then-lowercase pair (so `IOError` → `io_error`, not `i_o_error`).
+///
+/// Used by `BackboneCrudHandler::partial_update_handler` to normalize PATCH
+/// payload keys so the service-layer JSON merge aligns with snake_case entity
+/// fields regardless of the client's serialization convention.
+fn camel_to_snake_case(key: &str) -> String {
+    let chars: Vec<char> = key.chars().collect();
+    let mut result = String::with_capacity(key.len() + 2);
+    for (i, &c) in chars.iter().enumerate() {
+        if c.is_ascii_uppercase() {
+            let prev = if i > 0 { chars[i - 1] } else { '\0' };
+            let next = chars.get(i + 1).copied().unwrap_or('\0');
+            // Insert separator before this uppercase letter when crossing a
+            // word boundary. Skip if the result is empty or already ends with
+            // an underscore (e.g. `_Foo` should stay `_foo`, not `__foo`).
+            let crosses_lower = prev.is_ascii_lowercase() || prev.is_ascii_digit();
+            let crosses_acronym = prev.is_ascii_uppercase() && next.is_ascii_lowercase();
+            if (crosses_lower || crosses_acronym)
+                && !result.is_empty()
+                && !result.ends_with('_')
+            {
+                result.push('_');
+            }
+            result.push(c.to_ascii_lowercase());
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snake_case_input_passes_through_unchanged() {
+        assert_eq!(camel_to_snake_case("is_vip"), "is_vip");
+        assert_eq!(camel_to_snake_case("flag_reason"), "flag_reason");
+        assert_eq!(camel_to_snake_case("loyalty_tier_v2"), "loyalty_tier_v2");
+    }
+
+    #[test]
+    fn single_word_unchanged() {
+        assert_eq!(camel_to_snake_case("name"), "name");
+        assert_eq!(camel_to_snake_case("id"), "id");
+        assert_eq!(camel_to_snake_case(""), "");
+    }
+
+    #[test]
+    fn camel_case_converts() {
+        assert_eq!(camel_to_snake_case("isVip"), "is_vip");
+        assert_eq!(camel_to_snake_case("userId"), "user_id");
+        assert_eq!(camel_to_snake_case("customerSegment"), "customer_segment");
+        assert_eq!(camel_to_snake_case("blacklistReason"), "blacklist_reason");
+    }
+
+    #[test]
+    fn pascal_case_converts() {
+        assert_eq!(camel_to_snake_case("IsVip"), "is_vip");
+        assert_eq!(camel_to_snake_case("UserId"), "user_id");
+    }
+
+    #[test]
+    fn acronym_runs_stay_together() {
+        // The transition from an uppercase run to a lowercase letter starts a
+        // new word at the last uppercase, not between every pair.
+        assert_eq!(camel_to_snake_case("IOError"), "io_error");
+        assert_eq!(camel_to_snake_case("httpURL"), "http_url");
+        assert_eq!(camel_to_snake_case("ABC"), "abc");
+        assert_eq!(camel_to_snake_case("XMLHttpRequest"), "xml_http_request");
+    }
+
+    #[test]
+    fn digits_count_as_lowercase_for_boundary() {
+        assert_eq!(camel_to_snake_case("v2Field"), "v2_field");
+        assert_eq!(camel_to_snake_case("field2Name"), "field2_name");
+    }
+
+    #[test]
+    fn underscores_not_doubled() {
+        assert_eq!(camel_to_snake_case("_Foo"), "_foo");
+        assert_eq!(camel_to_snake_case("foo_Bar"), "foo_bar");
+    }
 }
