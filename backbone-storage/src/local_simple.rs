@@ -438,6 +438,8 @@ impl StorageService for LocalStorage {
             retention: None,
             access_control: None,
             backend_config: HashMap::new(),
+            #[cfg(feature = "compression")]
+            compression_config: None,
         })
     }
 }
