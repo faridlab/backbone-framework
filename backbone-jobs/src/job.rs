@@ -172,7 +172,9 @@ impl Job {
 
     /// Reset the job to scheduled state (for retry)
     pub fn reset_for_retry(&mut self) -> JobResult<()> {
-        if self.status != JobStatus::Failed {
+        // Allow re-scheduling after a terminal outcome (failure for retry, or
+        // completion for the next cron tick). Cancelled jobs are excluded.
+        if !matches!(self.status, JobStatus::Failed | JobStatus::Completed) {
             return Err(JobError::invalid_status_transition(
                 &self.status.to_string(),
                 "scheduled",

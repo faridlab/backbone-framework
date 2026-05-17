@@ -111,18 +111,20 @@ impl CronExpression {
 
     /// Get the next execution time after the given datetime
     pub fn next_after(&self, after: DateTime<Utc>, timezone: &chrono_tz::Tz) -> JobResult<DateTime<Utc>> {
-        let mut current = after + Duration::seconds(1);
+        // Cron has minute resolution: always advance to the start of the next
+        // minute so we never return the same minute we were called with.
+        let mut current = (after + Duration::seconds(60 - after.second() as i64))
+            .with_nanosecond(0)
+            .unwrap();
         let mut attempts = 0;
-        const MAX_ATTEMPTS: u32 = 1000; // Prevent infinite loops
+        const MAX_ATTEMPTS: u32 = 100_000; // covers up to ~2 months at minute resolution
 
         while attempts < MAX_ATTEMPTS {
             if self.matches(current, timezone) {
                 return Ok(current);
             }
 
-            // Increment to next minute
-            current = current + Duration::seconds(60 - current.second() as i64);
-            current = current.with_nanosecond(0).unwrap();
+            current = current + Duration::seconds(60);
             attempts += 1;
         }
 

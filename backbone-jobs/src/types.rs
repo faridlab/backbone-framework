@@ -406,8 +406,9 @@ impl RetryPolicy {
         let base_delay = self.initial_delay as f64 * self.backoff_multiplier.powi(attempt as i32 - 1);
         let delay = base_delay.min(self.max_delay as f64);
 
-        let final_delay = if self.jitter {
-            // Add ±25% jitter
+        // The first retry uses the initial delay verbatim. Jitter only kicks
+        // in for subsequent attempts so callers see a predictable first wait.
+        let final_delay = if self.jitter && attempt > 1 {
             let jitter_range = delay * 0.25;
             delay + (rand::random::<f64>() - 0.5) * 2.0 * jitter_range
         } else {
