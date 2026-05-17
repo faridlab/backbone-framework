@@ -400,13 +400,16 @@ impl SecurityEngine {
             return false;
         }
 
-        // Check for common executable magic numbers
+        // PE files (Windows) only have a 2-byte magic.
+        if data.starts_with(b"MZ") {
+            return true;
+        }
+
         match &data[0..4] {
-            b"MZ" => true,  // PE (Windows)
-            b"\x7fELF" => true, // ELF (Linux)
-            b"\xfe\xed\xfa\xce" => true, // Mach-O (macOS, big-endian)
-            b"\xce\xfa\xed\xfe" => true, // Mach-O (macOS, little-endian)
-            b"\xca\xfe\xba\xbe" => true, // Java class file
+            b"\x7fELF" => true,           // ELF (Linux)
+            b"\xfe\xed\xfa\xce" => true,  // Mach-O (macOS, big-endian)
+            b"\xce\xfa\xed\xfe" => true,  // Mach-O (macOS, little-endian)
+            b"\xca\xfe\xba\xbe" => true,  // Java class file
             _ => false,
         }
     }
@@ -1067,10 +1070,11 @@ mod tests {
     fn test_entropy_calculation() {
         let engine = SecurityEngine::default();
 
-        // High entropy data (random-like)
-        let high_entropy_data = vec![0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0].repeat(100);
+        // High entropy data: each of the 256 byte values appears equally
+        // often, giving the theoretical maximum entropy of 8 bits/byte.
+        let high_entropy_data: Vec<u8> = (0..=255u8).cycle().take(2048).collect();
         let entropy = engine.calculate_entropy(&high_entropy_data);
-        assert!(entropy > 6.0);
+        assert!(entropy > 6.0, "got entropy {entropy}");
 
         // Low entropy data (repetitive)
         let low_entropy_data = vec![0x41; 800]; // 800 'A' characters

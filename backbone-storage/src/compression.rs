@@ -885,6 +885,6 @@ mod tests {
         };
 
         assert!(result.is_beneficial());
-        assert_eq!(result.size_reduction_percent(), 33.333333);
+        assert!((result.size_reduction_percent() - 33.333333).abs() < 0.001);
     }
 }
