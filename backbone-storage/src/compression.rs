@@ -856,7 +856,7 @@ mod tests {
         assert_eq!(CompressionQuality::Low.as_u8(), 70);
         assert_eq!(CompressionQuality::Custom(95).as_u8(), 95);
         assert_eq!(CompressionQuality::Custom(150).as_u8(), 100);
-        assert_eq!(CompressionQuality::Custom(-10).as_u8(), 0);
+        assert_eq!(CompressionQuality::Custom(0).as_u8(), 0);
     }
 
     #[test]
