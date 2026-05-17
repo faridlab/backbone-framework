@@ -55,23 +55,14 @@ impl MemoryCache {
             return;
         }
 
-        // Find least recently used entry
-        let Some((key_to_remove, _)) = entries
+        // Find least recently used entry. Entries that have never been
+        // accessed fall back to their insertion time, so a freshly inserted
+        // entry is considered older than one that has been touched since.
+        let Some(key_to_remove) = entries
             .iter()
-            .filter(|(_, entry)| entry.last_accessed.is_some())
-            .min_by_key(|(_, entry)| entry.last_accessed.unwrap())
-            .map(|(k, v)| (k.clone(), v))
+            .min_by_key(|(_, entry)| entry.last_accessed.unwrap_or(entry.created_at))
+            .map(|(k, _)| k.clone())
         else {
-            // Fallback: remove the oldest entry
-            if !entries.is_empty() {
-                if let Some(key_to_remove) = entries
-                    .iter()
-                    .min_by_key(|(_, entry)| entry.created_at)
-                    .map(|(k, _)| k.clone())
-                {
-                    entries.remove(&key_to_remove);
-                }
-            }
             return;
         };
 
