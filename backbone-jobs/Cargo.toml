@@ -77,15 +77,3 @@ path = "examples/cron_jobs.rs"
 [[example]]
 name = "database_cleanup"
 path = "examples/database_cleanup.rs"
-
-[[example]]
-name = "email_campaigns"
-path = "examples/email_campaigns.rs"
-
-[[example]]
-name = "data_sync"
-path = "examples/data_sync.rs"
-
-[[example]]
-name = "backup_jobs"
-path = "examples/backup_jobs.rs"
