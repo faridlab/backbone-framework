@@ -127,8 +127,8 @@ mod redis_tests {
         let config = test_config();
 
         storage.reset("prefix_test", &config).await.unwrap();
-        let count = storage.increment("prefix_test", &config).await.unwrap();
-        assert_eq!(count, 1);
+        let outcome = storage.increment("prefix_test", &config).await.unwrap();
+        assert_eq!(outcome.count, 1);
 
         storage.reset("prefix_test", &config).await.unwrap();
     }
