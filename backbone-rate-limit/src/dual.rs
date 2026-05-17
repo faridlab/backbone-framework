@@ -20,6 +20,7 @@
 //!     max_requests: 100,
 //!     window_seconds: 60,
 //!     enabled: true,
+//!     lockout_seconds: None,
 //! };
 //! let middleware = from_config_with_fallback(
 //!     config,

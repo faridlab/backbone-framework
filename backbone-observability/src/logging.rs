@@ -230,7 +230,7 @@ fn format_timestamp(time: SystemTime) -> String {
 ///     ..Default::default()
 /// };
 ///
-/// let buffer = init_structured_logging(&config, "my-service", "production")?;
+/// let buffer = init_structured_logging(&config, "my-service", "production", "info")?;
 /// # Ok(())
 /// # }
 /// ```

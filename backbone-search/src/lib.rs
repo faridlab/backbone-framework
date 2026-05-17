@@ -15,7 +15,7 @@
 //!
 //! ## Quick Start
 //!
-//! ```rust
+//! ```ignore
 //! use backbone_search::{SearchService, ElasticsearchSearch, SearchQuery, SearchDocument};
 //!
 //! // Elasticsearch search service

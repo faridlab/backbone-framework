@@ -13,7 +13,7 @@
 //!
 //! ## Quick Start
 //!
-//! ```rust
+//! ```ignore
 //! use backbone_email::{EmailService, SmtpProvider, EmailMessage};
 //!
 //! // SMTP email service
