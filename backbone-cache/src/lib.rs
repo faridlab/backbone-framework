@@ -12,7 +12,7 @@
 //!
 //! ## Quick Start
 //!
-//! ```rust
+//! ```no_run
 //! use backbone_cache::{Cache, RedisCache};
 //! use serde::{Serialize, Deserialize};
 //!
@@ -22,6 +22,7 @@
 //!     name: String,
 //! }
 //!
+//! # async fn doc() -> Result<(), Box<dyn std::error::Error>> {
 //! // Redis cache
 //! let cache = RedisCache::new("redis://localhost:6379").await?;
 //!
@@ -31,6 +32,7 @@
 //!
 //! // Retrieve user from cache
 //! let cached_user: Option<User> = cache.get("user:123").await?;
+//! # Ok(()) }
 //! ```
 
 pub mod memory;
