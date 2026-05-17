@@ -313,8 +313,8 @@ impl JobBuilder {
     }
 
     /// Set the job ID (will generate one if not set)
-    pub fn id(mut self, id: JobId) -> Self {
-        self.id = Some(id);
+    pub fn id(mut self, id: impl Into<JobId>) -> Self {
+        self.id = Some(id.into());
         self
     }
 

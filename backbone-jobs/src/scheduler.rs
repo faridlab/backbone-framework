@@ -587,7 +587,7 @@ mod tests {
     #[tokio::test]
     async fn test_scheduler_lifecycle() {
         let storage = Arc::new(InMemoryJobStorage::new());
-        let queue_service = Arc::new(crate::job_executor::MockQueueService);
+        let queue_service = Arc::new(crate::job_executor::MockQueueService::new());
         let executor = JobExecutor::new(queue_service, Duration::from_secs(300));
         let config = SchedulerConfig::default();
 

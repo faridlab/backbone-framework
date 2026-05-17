@@ -399,6 +399,7 @@ pub mod helpers {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
     use chrono_tz::UTC;
 
     #[test]
