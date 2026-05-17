@@ -31,7 +31,10 @@
 //! let mut args = std::env::args().skip(1);
 //! if let Some(cmd) = args.next() {
 //!     match cmd.as_str() {
-//!         "healthcheck" => return backbone_health::cli::run_healthcheck(3000).await,
+//!         "healthcheck" => {
+//!             backbone_health::cli::run_healthcheck(3000).await?;
+//!             return Ok(());
+//!         }
 //!         "serve" => {} // fall through
 //!         other => anyhow::bail!("unknown subcommand: {}", other),
 //!     }

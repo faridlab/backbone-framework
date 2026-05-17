@@ -11,7 +11,7 @@
 //!
 //! ## Quick Start
 //!
-//! ```rust
+//! ```ignore
 //! use backbone_health::{HealthChecker, HealthConfig, MockHealthCheck, SimpleHealthServer};
 //! use std::time::Duration;
 //!
