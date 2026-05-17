@@ -50,7 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create and enqueue a simple message
     let message = QueueMessage::builder()
-        .payload("Hello, Redis Queue!")
+        .payload("Hello, Redis Queue!").expect("payload serialization")
         .priority(QueuePriority::Normal)
         .build();
 
@@ -84,19 +84,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create messages with different priorities
     let priority_messages = vec![
         QueueMessage::builder()
-            .payload("Low priority task")
+            .payload("Low priority task").expect("payload serialization")
             .priority(QueuePriority::Low)
             .build(),
         QueueMessage::builder()
-            .payload("Critical emergency task")
+            .payload("Critical emergency task").expect("payload serialization")
             .priority(QueuePriority::Critical)
             .build(),
         QueueMessage::builder()
-            .payload("Normal background task")
+            .payload("Normal background task").expect("payload serialization")
             .priority(QueuePriority::Normal)
             .build(),
         QueueMessage::builder()
-            .payload("High priority task")
+            .payload("High priority task").expect("payload serialization")
             .priority(QueuePriority::High)
             .build(),
     ];
@@ -125,7 +125,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut batch_messages = Vec::new();
     for i in 1..=10 {
         batch_messages.push(QueueMessage::builder()
-            .payload(format!("Batch message {}", i))
+            .payload(format!("Batch message {}", i)).expect("payload serialization")
             .priority(QueuePriority::Normal)
             .build());
     }
@@ -177,7 +177,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     attributes.insert("request_id".to_string(), "req-abc-123".to_string());
 
     let message_with_attrs = QueueMessage::builder()
-        .payload("Process user data")
+        .payload("Process user data").expect("payload serialization")
         .priority(QueuePriority::High)
         .attributes(attributes)
         .build();

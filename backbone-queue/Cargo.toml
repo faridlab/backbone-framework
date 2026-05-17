@@ -3,6 +3,11 @@ name = "backbone-queue"
 version = "2.0.0"
 edition = "2021"
 description = "Backbone Framework Queue Module - Redis, SQS, and RabbitMQ support"
+autoexamples = false
+
+[[example]]
+name = "basic_redis_queue"
+path = "examples/basic_redis_queue.rs"
 
 [dependencies]
 # Core dependencies
