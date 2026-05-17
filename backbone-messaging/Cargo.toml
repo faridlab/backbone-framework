@@ -2,12 +2,7 @@
 name = "backbone-messaging"
 version = "2.0.0"
 edition = "2021"
-authors = ["Backbone Framework Team"]
 description = "Event-driven messaging infrastructure for Backbone Framework"
-license = "MIT"
-repository = "https://github.com/example/backbone"
-keywords = ["messaging", "events", "event-bus", "domain-events", "cqrs"]
-categories = ["asynchronous", "data-structures"]
 
 [dependencies]
 # Async runtime

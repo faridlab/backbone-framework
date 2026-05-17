@@ -2,12 +2,7 @@
 name = "backbone-jobs"
 version = "0.1.0"
 edition = "2021"
-authors = ["Rusty Framework Team"]
 description = "Job scheduling and cron management for the Backbone Framework"
-license = "MIT"
-repository = "https://github.com/startapp-id/backbone"
-keywords = ["scheduler", "cron", "jobs", "background", "async"]
-categories = ["development-tools", "asynchronous"]
 
 [dependencies]
 # Core async runtime
