@@ -15,7 +15,7 @@ use tracing::{debug, info};
 use serde::{Deserialize, Serialize};
 
 /// File type categories for compression strategies
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FileCategory {
     /// Image files (JPEG, PNG, WebP, etc.)
     Image,
@@ -36,7 +36,7 @@ pub enum FileCategory {
 }
 
 /// Compression algorithms for different file types
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CompressionAlgorithm {
     /// No compression
     None,
@@ -49,11 +49,91 @@ pub enum CompressionAlgorithm {
     /// Snappy compression (fast, reasonable ratio)
     Snappy,
     /// Image-specific compression
-    Image(ImageFormat),
+    Image(#[serde(with = "image_format_serde")] ImageFormat),
+}
+
+/// Serde adapter for `image::ImageFormat` (foreign type without serde impls).
+mod image_format_serde {
+    use image::ImageFormat;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(format: &ImageFormat, ser: S) -> Result<S::Ok, S::Error> {
+        ser.serialize_str(name(format))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<ImageFormat, D::Error> {
+        let s = String::deserialize(de)?;
+        from_name(&s).ok_or_else(|| serde::de::Error::custom(format!("unknown image format: {s}")))
+    }
+
+    pub(super) fn name(format: &ImageFormat) -> &'static str {
+        match format {
+            ImageFormat::Png => "png",
+            ImageFormat::Jpeg => "jpeg",
+            ImageFormat::Gif => "gif",
+            ImageFormat::WebP => "webp",
+            ImageFormat::Pnm => "pnm",
+            ImageFormat::Tiff => "tiff",
+            ImageFormat::Tga => "tga",
+            ImageFormat::Dds => "dds",
+            ImageFormat::Bmp => "bmp",
+            ImageFormat::Ico => "ico",
+            ImageFormat::Hdr => "hdr",
+            ImageFormat::OpenExr => "openexr",
+            ImageFormat::Farbfeld => "farbfeld",
+            ImageFormat::Avif => "avif",
+            ImageFormat::Qoi => "qoi",
+            ImageFormat::Pcx => "pcx",
+            _ => "unknown",
+        }
+    }
+
+    pub(super) fn from_name(s: &str) -> Option<ImageFormat> {
+        Some(match s.to_ascii_lowercase().as_str() {
+            "png" => ImageFormat::Png,
+            "jpeg" | "jpg" => ImageFormat::Jpeg,
+            "gif" => ImageFormat::Gif,
+            "webp" => ImageFormat::WebP,
+            "pnm" => ImageFormat::Pnm,
+            "tiff" => ImageFormat::Tiff,
+            "tga" => ImageFormat::Tga,
+            "dds" => ImageFormat::Dds,
+            "bmp" => ImageFormat::Bmp,
+            "ico" => ImageFormat::Ico,
+            "hdr" => ImageFormat::Hdr,
+            "openexr" => ImageFormat::OpenExr,
+            "farbfeld" => ImageFormat::Farbfeld,
+            "avif" => ImageFormat::Avif,
+            "qoi" => ImageFormat::Qoi,
+            "pcx" => ImageFormat::Pcx,
+            _ => return None,
+        })
+    }
+}
+
+mod image_format_vec_serde {
+    use image::ImageFormat;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(formats: &Vec<ImageFormat>, ser: S) -> Result<S::Ok, S::Error> {
+        let names: Vec<&'static str> = formats.iter().map(super::image_format_serde::name).collect();
+        names.serialize(ser)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<Vec<ImageFormat>, D::Error> {
+        let names: Vec<String> = Vec::deserialize(de)?;
+        names
+            .iter()
+            .map(|s| {
+                super::image_format_serde::from_name(s)
+                    .ok_or_else(|| serde::de::Error::custom(format!("unknown image format: {s}")))
+            })
+            .collect()
+    }
 }
 
 /// Compression quality levels
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CompressionQuality {
     /// High quality (85-95% quality)
     High,
@@ -97,6 +177,7 @@ pub struct ImageCompressionConfig {
     /// Maximum file size in bytes (recompresses if larger)
     pub max_file_size: Option<u64>,
     /// Target formats for conversion (e.g., convert PNG to JPEG)
+    #[serde(with = "image_format_vec_serde")]
     pub preferred_formats: Vec<ImageFormat>,
     /// Preserve metadata (EXIF, etc.)
     pub preserve_metadata: bool,
@@ -328,11 +409,12 @@ impl ImageCompressor {
     /// Compress image data
     pub async fn compress(&self, image_data: Vec<u8>, content_type: Option<&str>) -> StorageResult<CompressionResult> {
         if !self.config.enabled {
+            let len = image_data.len() as u64;
             return Ok(CompressionResult {
                 original_data: image_data.clone(),
                 compressed_data: image_data,
-                original_size: image_data.len() as u64,
-                compressed_size: image_data.len() as u64,
+                original_size: len,
+                compressed_size: len,
                 original_format: ImageFormat::Png, // Placeholder
                 final_format: ImageFormat::Png,
                 original_dimensions: (0, 0),
@@ -534,13 +616,16 @@ impl ImageCompressor {
             image_clone.write_to(&mut cursor, ImageFormat::Jpeg)
                 .map_err(|e| format!("Image encoding failed: {}", e))?;
 
-            Ok(buffer)
+            Ok::<Vec<u8>, String>(buffer)
         }).await.map_err(|e| {
             StorageError::OperationFailed {
                 operation: "image_encoding".to_string(),
                 message: format!("Encoding task failed: {}", e),
             }
-        })??;
+        })?.map_err(|e| StorageError::OperationFailed {
+            operation: "image_encoding".to_string(),
+            message: e,
+        })?;
 
         Ok(data)
     }
