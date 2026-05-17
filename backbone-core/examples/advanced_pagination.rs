@@ -255,7 +255,7 @@ impl BackboneHttpHandler<Product> for ProductService {
                         "category" => if let Some(s) = value.as_str() { product.category = s.to_string(); },
                         "price" => if let Some(n) = value.as_f64() { product.price = n; },
                         "stock" => if let Some(n) = value.as_i64() { product.stock = n as i32; },
-                        "rating" => if let Some(n) = value.as_f64() { product.rating = n; },
+                        "rating" => if let Some(n) = value.as_f64() { product.rating = n as f32; },
                         _ => return Ok(ApiResponse::error(format!("Invalid field: {}", field))),
                     }
                 }

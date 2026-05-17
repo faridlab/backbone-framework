@@ -600,7 +600,10 @@ impl ECommerceService {
             deleted_at: None,
         };
 
-        self.create(review)
+        let response = self.create(review)?;
+        response
+            .data
+            .ok_or_else(|| anyhow::anyhow!("Failed to create review"))
     }
 
     fn get_user_orders(&self, user_id: &Uuid) -> Result<Vec<Order>> {
@@ -637,7 +640,9 @@ fn demonstrate_ecommerce_workflow(service: &ECommerceService) -> Result<()> {
     println!("===================================");
 
     // Get existing users
-    let users = service.list(ListRequest::default())?.data.unwrap();
+    let users = <ECommerceService as BackboneHttpHandler<User>>::list(service, ListRequest::default())?
+        .data
+        .unwrap();
     let customer = users.iter().find(|u| matches!(u.role, UserRole::Customer)).unwrap();
     let admin = users.iter().find(|u| matches!(u.role, UserRole::Admin)).unwrap();
 
@@ -647,7 +652,9 @@ fn demonstrate_ecommerce_workflow(service: &ECommerceService) -> Result<()> {
 
     // Show products
     println!("\n2️⃣ Available Products:");
-    let products = service.list(ListRequest::default())?.data.unwrap();
+    let products = <ECommerceService as BackboneHttpHandler<Product>>::list(service, ListRequest::default())?
+        .data
+        .unwrap();
     let product_ids: Vec<(Uuid, i32)> = products.iter().map(|p| (p.id, 1)).collect();
     for (i, product) in products.iter().enumerate() {
         println!("   {}. {} - ${:.2} (Stock: {})", i + 1, product.name, product.price, product.stock);
@@ -757,20 +764,27 @@ fn demonstrate_ecommerce_workflow(service: &ECommerceService) -> Result<()> {
 
     // User management operations
     println!("\n9️⃣ User Management Operations:");
-    let active_users = service.list(ListRequest::default())?.data.unwrap();
+    let active_users = <ECommerceService as BackboneHttpHandler<User>>::list(service, ListRequest::default())?
+        .data
+        .unwrap();
     println!("   Active users: {}", active_users.len());
 
     // Soft delete a user
     if let Some(user_to_delete) = active_users.iter().find(|u| u.username == "alice_customer") {
-        service.soft_delete(&user_to_delete.id)?;
+        <ECommerceService as BackboneHttpHandler<User>>::soft_delete(service, &user_to_delete.id)?;
         println!("   ✅ Soft deleted user: {}", user_to_delete.first_name);
 
         // List deleted users
-        let deleted_users = service.list_deleted(ListRequest::default())?.data.unwrap();
+        let deleted_users = <ECommerceService as BackboneHttpHandler<User>>::list_deleted(
+            service,
+            ListRequest::default(),
+        )?
+        .data
+        .unwrap();
         println!("   Deleted users: {}", deleted_users.len());
 
         // Restore the user
-        service.restore(&user_to_delete.id)?;
+        <ECommerceService as BackboneHttpHandler<User>>::restore(service, &user_to_delete.id)?;
         println!("   ✅ Restored user: {}", user_to_delete.first_name);
     }
 

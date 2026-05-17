@@ -282,7 +282,12 @@ impl BackboneGrpcService<User> for UserGrpcService {
     }
 
     fn partial_update(&self, request: GrpcPartialUpdateRequest) -> Result<GrpcResponse<User>> {
-        match self.http_service.partial_update(&request.id, request.fields) {
+        let fields = request
+            .fields
+            .into_iter()
+            .map(|(k, v)| (k, serde_json::Value::String(v)))
+            .collect();
+        match self.http_service.partial_update(&request.id, fields) {
             Ok(api_response) => Ok(GrpcResponse::success(api_response.data.unwrap())),
             Err(e) => Ok(GrpcResponse::error(e.to_string())),
         }
@@ -408,7 +413,10 @@ fn main() -> Result<()> {
     println!("\n5. Partial update via HTTP...");
     if let Some(created_user) = http_service.create(User::new("Charlie Brown".to_string(), "charlie@example.com".to_string()))?.data {
         let mut fields = HashMap::new();
-        fields.insert("name".to_string(), "Charlie Davis".to_string());
+        fields.insert(
+            "name".to_string(),
+            serde_json::Value::String("Charlie Davis".to_string()),
+        );
         let update_result = http_service.partial_update(&created_user.id, fields)?;
         println!("✅ Updated user: {:?}", update_result.data.unwrap().name);
     }

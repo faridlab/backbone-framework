@@ -25,7 +25,7 @@ struct Task {
     deleted_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 enum TaskStatus {
     Todo,
     InProgress,
@@ -70,8 +70,8 @@ enum TaskError {
     #[error("Cannot edit task in {status:?} status")]
     CannotEdit { status: TaskStatus },
 
-    #[error("Database operation failed: {operation}")]
-    DatabaseError { operation: String, source: String },
+    #[error("Database operation failed: {operation}: {details}")]
+    DatabaseError { operation: String, details: String },
 
     #[error("Validation failed: {field} - {message}")]
     ValidationError { field: String, message: String },
@@ -123,15 +123,16 @@ impl Entity for User {
 
 impl UserService {
     fn new() -> Self {
-        let mut service = Self {
+        let service = Self {
             users: std::sync::Mutex::new(Vec::new()),
         };
 
-        // Add sample users
-        let mut users = service.users.lock().unwrap();
-        users.push(User::new("John Doe".to_string(), "john@example.com".to_string()));
-        users.push(User::new("Jane Smith".to_string(), "jane@example.com".to_string()));
-        users.push(User::new("Bob Wilson".to_string(), "bob@example.com".to_string()));
+        {
+            let mut users = service.users.lock().unwrap();
+            users.push(User::new("John Doe".to_string(), "john@example.com".to_string()));
+            users.push(User::new("Jane Smith".to_string(), "jane@example.com".to_string()));
+            users.push(User::new("Bob Wilson".to_string(), "bob@example.com".to_string()));
+        }
 
         service
     }
@@ -271,7 +272,7 @@ impl TaskService {
             Err(e) => {
                 let db_error = TaskError::DatabaseError {
                     operation: "create".to_string(),
-                    source: e,
+                    details: e.to_string(),
                 };
                 Err(db_error.into())
             }
@@ -410,9 +411,10 @@ impl BackboneHttpHandler<Task> for TaskService {
             .cloned()
             .collect();
 
+        let count = active_tasks.len();
         let response = ApiResponse::success(
             active_tasks,
-            Some(format!("Found {} tasks", active_tasks.len()))
+            Some(format!("Found {} tasks", count))
         );
 
         println!("✅ Listed {} tasks", response.data.as_ref().unwrap().len());
@@ -566,11 +568,13 @@ impl BackboneHttpHandler<Task> for TaskService {
             failed: errors.len(),
             errors,
         };
+        let summary = format!(
+            "Bulk create completed: {} successful, {} failed",
+            created_tasks.len(),
+            response.failed
+        );
 
-        Ok(ApiResponse::success(
-            response,
-            Some(format!("Bulk create completed: {} successful, {} failed", created_tasks.len(), response.failed))
-        ))
+        Ok(ApiResponse::success(response, Some(summary)))
     }
 
     fn upsert(&self, request: UpsertRequest<Task>) -> Result<ApiResponse<Task>> {
