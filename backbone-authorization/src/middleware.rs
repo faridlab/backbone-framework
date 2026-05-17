@@ -200,7 +200,9 @@ fn is_public_endpoint(path: &str) -> bool {
         "/",
     ];
 
-    public_paths.iter().any(|p| path.starts_with(p) || path == *p)
+    public_paths
+        .iter()
+        .any(|p| if *p == "/" { path == "/" } else { path == *p || path.starts_with(p) })
 }
 
 #[cfg(test)]
