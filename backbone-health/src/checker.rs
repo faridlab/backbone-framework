@@ -133,35 +133,56 @@ impl HealthChecker {
             let timeout = component.timeout().unwrap_or(self.config.timeout);
             let check_result = tokio::time::timeout(timeout, component.check()).await;
 
+            // Preserve running counters across checks by reusing the prior
+            // status when one exists; otherwise start fresh.
+            let mut component_status = statuses
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| ComponentStatus::new(name.clone()));
+
             match check_result {
-                Ok(Ok(mut component_status)) => {
-                    // Apply failure/success thresholds
-                    let current_status = statuses.get(name);
-
-                    if let Some(_current) = current_status {
-                        // Apply thresholds
-                        if component_status.consecutive_failures >= self.config.failure_threshold {
-                            component_status.status = HealthStatus::Unhealthy;
-                        } else if component_status.consecutive_successes >= self.config.success_threshold {
-                            component_status.status = HealthStatus::Healthy;
-                        }
+                Ok(Ok(check_status)) => {
+                    let response_time = check_status.response_time;
+                    match check_status.status {
+                        HealthStatus::Healthy => component_status.record_success(response_time),
+                        HealthStatus::Degraded => component_status.record_degraded(
+                            check_status
+                                .message
+                                .clone()
+                                .unwrap_or_else(|| "Degraded".to_string()),
+                            response_time,
+                        ),
+                        HealthStatus::Unhealthy => component_status.record_failure(
+                            check_status
+                                .error
+                                .clone()
+                                .or_else(|| check_status.message.clone())
+                                .unwrap_or_else(|| "Unhealthy".to_string()),
+                            response_time,
+                        ),
                     }
-
-                    statuses.insert(name.clone(), component_status);
+                    // Carry over any metadata the check attached.
+                    for (k, v) in check_status.metadata {
+                        component_status.add_metadata(k, v);
+                    }
                 }
                 Ok(Err(e)) => {
-                    // Health check itself failed
-                    let mut component_status = ComponentStatus::new(name.clone());
                     component_status.record_failure(format!("Health check error: {}", e), timeout);
-                    statuses.insert(name.clone(), component_status);
                 }
                 Err(_) => {
-                    // Timeout
-                    let mut component_status = ComponentStatus::new(name.clone());
-                    component_status.record_failure("Health check timed out".to_string(), timeout);
-                    statuses.insert(name.clone(), component_status);
+                    component_status
+                        .record_failure("Health check timed out".to_string(), timeout);
                 }
             }
+
+            // Apply failure/success thresholds to overall component status.
+            if component_status.consecutive_failures >= self.config.failure_threshold {
+                component_status.status = HealthStatus::Unhealthy;
+            } else if component_status.consecutive_successes >= self.config.success_threshold {
+                component_status.status = HealthStatus::Healthy;
+            }
+
+            statuses.insert(name.clone(), component_status);
         }
 
         // Drop both locks before calling `health_report`, which re-acquires

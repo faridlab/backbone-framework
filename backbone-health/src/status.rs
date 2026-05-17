@@ -24,6 +24,7 @@ pub trait HealthCheck: Send + Sync {
 
 /// Overall health status of the application
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
 pub enum HealthStatus {
     /// Application is healthy and all components are functioning
     Healthy,
@@ -143,8 +144,9 @@ impl ComponentStatus {
         if self.total_checks == 0 {
             self.success_rate = 0.0;
         } else {
-            let failures = self.total_checks - self.consecutive_successes as u64;
-            self.success_rate = ((self.total_checks - failures) as f64 / self.total_checks as f64) * 100.0;
+            let failures = self.consecutive_failures as u64;
+            self.success_rate =
+                ((self.total_checks - failures) as f64 / self.total_checks as f64) * 100.0;
         }
     }
 
@@ -232,9 +234,11 @@ impl HealthReport {
             }
         }
 
-        if unhealthy_count > 0 {
+        // All components unhealthy → overall Unhealthy.
+        // Any (but not all) unhealthy or degraded → overall Degraded.
+        if unhealthy_count == components.len() {
             HealthStatus::Unhealthy
-        } else if degraded_count > 0 {
+        } else if unhealthy_count > 0 || degraded_count > 0 {
             HealthStatus::Degraded
         } else {
             HealthStatus::Healthy
@@ -295,9 +299,17 @@ impl HealthReport {
 
     /// Check if the application is alive (has been checked recently)
     pub fn is_alive(&self, max_age: Duration) -> bool {
-        // Consider alive if any component was checked within the max age
+        // With no registered components, the application is trivially alive.
+        if self.components.is_empty() {
+            return true;
+        }
+        // Otherwise: alive if any component was checked within the max age.
         self.components.values().any(|c| {
-            Utc::now().signed_duration_since(c.last_checked).to_std().unwrap_or(Duration::MAX) <= max_age
+            Utc::now()
+                .signed_duration_since(c.last_checked)
+                .to_std()
+                .unwrap_or(Duration::MAX)
+                <= max_age
         })
     }
 }
