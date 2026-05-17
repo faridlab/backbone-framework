@@ -21,6 +21,7 @@ mod basic_tests {
     use super::*;
 
     #[tokio::test]
+    #[ignore = "requires running RabbitMQ broker"]
     async fn test_rabbitmq_queue_creation() {
         let config = RabbitMQConfig {
             connection_url: "amqp://guest:guest@localhost:5672/%2f".to_string(),
@@ -38,6 +39,7 @@ mod basic_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires running RabbitMQ broker"]
     async fn test_rabbitmq_message_enqueue() {
         let config = RabbitMQConfig::default();
         let queue = RabbitMQQueueSimple::new(config).await.unwrap();
@@ -57,6 +59,7 @@ mod basic_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires running RabbitMQ broker"]
     async fn test_rabbitmq_batch_enqueue() {
         let config = RabbitMQConfig::default();
         let queue = RabbitMQQueueSimple::new(config).await.unwrap();
@@ -91,6 +94,7 @@ mod basic_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires running RabbitMQ broker"]
     async fn test_rabbitmq_dequeue_empty_queue() {
         let config = RabbitMQConfig::default();
         let queue = RabbitMQQueueSimple::new(config).await.unwrap();
@@ -103,6 +107,7 @@ mod basic_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires running RabbitMQ broker"]
     async fn test_rabbitmq_dequeue_batch_empty() {
         let config = RabbitMQConfig::default();
         let queue = RabbitMQQueueSimple::new(config).await.unwrap();
@@ -118,6 +123,7 @@ mod basic_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires running RabbitMQ broker"]
     async fn test_rabbitmq_ack_message() {
         let config = RabbitMQConfig::default();
         let queue = RabbitMQQueueSimple::new(config).await.unwrap();
@@ -128,6 +134,7 @@ mod basic_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires running RabbitMQ broker"]
     async fn test_rabbitmq_ack_batch() {
         let config = RabbitMQConfig::default();
         let queue = RabbitMQQueueSimple::new(config).await.unwrap();
@@ -144,6 +151,7 @@ mod basic_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires running RabbitMQ broker"]
     async fn test_rabbitmq_nack_message() {
         let config = RabbitMQConfig::default();
         let queue = RabbitMQQueueSimple::new(config).await.unwrap();
@@ -154,6 +162,7 @@ mod basic_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires running RabbitMQ broker"]
     async fn test_rabbitmq_delete_message() {
         let config = RabbitMQConfig::default();
         let queue = RabbitMQQueueSimple::new(config).await.unwrap();
@@ -164,6 +173,7 @@ mod basic_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires running RabbitMQ broker"]
     async fn test_rabbitmq_get_message() {
         let config = RabbitMQConfig::default();
         let queue = RabbitMQQueueSimple::new(config).await.unwrap();
@@ -176,6 +186,7 @@ mod basic_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires running RabbitMQ broker"]
     async fn test_rabbitmq_queue_stats() {
         let config = RabbitMQConfig::default();
         let queue = RabbitMQQueueSimple::new(config).await.unwrap();
@@ -194,6 +205,7 @@ mod basic_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires running RabbitMQ broker"]
     async fn test_rabbitmq_purge_queue() {
         let config = RabbitMQConfig::default();
         let queue = RabbitMQQueueSimple::new(config).await.unwrap();
@@ -204,6 +216,7 @@ mod basic_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires running RabbitMQ broker"]
     async fn test_rabbitmq_queue_size() {
         let config = RabbitMQConfig::default();
         let queue = RabbitMQQueueSimple::new(config).await.unwrap();
@@ -214,6 +227,7 @@ mod basic_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires running RabbitMQ broker"]
     async fn test_rabbitmq_is_empty() {
         let config = RabbitMQConfig::default();
         let queue = RabbitMQQueueSimple::new(config).await.unwrap();
@@ -229,6 +243,7 @@ mod configuration_tests {
     use super::*;
 
     #[tokio::test]
+    #[ignore = "requires running RabbitMQ broker"]
     async fn test_rabbitmq_config_validation() {
         let config = RabbitMQConfig::default();
         let queue = RabbitMQQueueSimple::new(config).await.unwrap();
@@ -239,6 +254,7 @@ mod configuration_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires running RabbitMQ broker"]
     async fn test_rabbitmq_invalid_connection_url() {
         let config = RabbitMQConfig {
             connection_url: "invalid-url".to_string(),
@@ -257,6 +273,7 @@ mod configuration_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires running RabbitMQ broker"]
     async fn test_rabbitmq_empty_connection_url() {
         let config = RabbitMQConfig {
             connection_url: "".to_string(),
@@ -271,6 +288,7 @@ mod configuration_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires running RabbitMQ broker"]
     async fn test_rabbitmq_non_amqp_url() {
         let config = RabbitMQConfig {
             connection_url: "http://example.com".to_string(),
@@ -290,6 +308,7 @@ mod health_check_tests {
     use super::*;
 
     #[tokio::test]
+    #[ignore = "requires running RabbitMQ broker"]
     async fn test_rabbitmq_health_check() {
         let config = RabbitMQConfig::default();
         let queue = RabbitMQQueueSimple::new(config).await.unwrap();
@@ -305,6 +324,7 @@ mod health_check_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires running RabbitMQ broker"]
     async fn test_rabbitmq_test_connection() {
         let config = RabbitMQConfig::default();
         let queue = RabbitMQQueueSimple::new(config).await.unwrap();
@@ -321,6 +341,7 @@ mod message_routing_tests {
     use super::*;
 
     #[tokio::test]
+    #[ignore = "requires running RabbitMQ broker"]
     async fn test_rabbitmq_direct_exchange() {
         let config = RabbitMQConfig {
             connection_url: "amqp://guest:guest@localhost:5672/%2f".to_string(),
@@ -344,6 +365,7 @@ mod message_routing_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires running RabbitMQ broker"]
     async fn test_rabbitmq_fanout_exchange() {
         let config = RabbitMQConfig {
             connection_url: "amqp://guest:guest@localhost:5672/%2f".to_string(),
@@ -366,6 +388,7 @@ mod message_routing_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires running RabbitMQ broker"]
     async fn test_rabbitmq_topic_exchange() {
         let config = RabbitMQConfig {
             connection_url: "amqp://guest:guest@localhost:5672/%2f".to_string(),
@@ -434,6 +457,7 @@ mod edge_case_tests {
     use super::*;
 
     #[tokio::test]
+    #[ignore = "requires running RabbitMQ broker"]
     async fn test_rabbitmq_large_message_payload() {
         let config = RabbitMQConfig::default();
         let queue = RabbitMQQueueSimple::new(config).await.unwrap();
@@ -450,6 +474,7 @@ mod edge_case_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires running RabbitMQ broker"]
     async fn test_rabbitmq_complex_json_payload() {
         let config = RabbitMQConfig::default();
         let queue = RabbitMQQueueSimple::new(config).await.unwrap();
@@ -479,6 +504,7 @@ mod edge_case_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires running RabbitMQ broker"]
     async fn test_rabbitmq_message_with_headers() {
         let config = RabbitMQConfig::default();
         let queue = RabbitMQQueueSimple::new(config).await.unwrap();
@@ -514,6 +540,7 @@ mod edge_case_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires running RabbitMQ broker"]
     async fn test_rabbitmq_batch_dequeue_various_sizes() {
         let config = RabbitMQConfig::default();
         let queue = RabbitMQQueueSimple::new(config).await.unwrap();
