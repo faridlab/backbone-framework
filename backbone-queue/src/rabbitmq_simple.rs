@@ -36,6 +36,39 @@ pub struct RabbitMQConfig {
     pub routing_key: Option<String>,
 }
 
+/// Build a development-friendly `RabbitMQConfig` pointing at `localhost:5672`.
+pub fn dev_config(
+    queue_name: impl Into<String>,
+    exchange_name: impl Into<String>,
+    exchange_type: ExchangeType,
+) -> RabbitMQConfig {
+    let queue_name = queue_name.into();
+    RabbitMQConfig {
+        connection_url: "amqp://guest:guest@localhost:5672/%2f".to_string(),
+        routing_key: Some(queue_name.clone()),
+        queue_name,
+        exchange_name: exchange_name.into(),
+        exchange_type,
+    }
+}
+
+/// Build a `RabbitMQConfig` for production use, using the given connection URL.
+pub fn prod_config(
+    connection_url: impl Into<String>,
+    queue_name: impl Into<String>,
+    exchange_name: impl Into<String>,
+    exchange_type: ExchangeType,
+) -> RabbitMQConfig {
+    let queue_name = queue_name.into();
+    RabbitMQConfig {
+        connection_url: connection_url.into(),
+        routing_key: Some(queue_name.clone()),
+        queue_name,
+        exchange_name: exchange_name.into(),
+        exchange_type,
+    }
+}
+
 impl Default for RabbitMQConfig {
     fn default() -> Self {
         Self {
