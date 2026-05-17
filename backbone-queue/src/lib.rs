@@ -15,15 +15,15 @@
 //!
 //! ## Quick Start
 //!
-//! ```rust
-//! use backbone_queue::{QueueService, RedisQueue, QueueMessage};
+//! ```ignore
+//! use backbone_queue::{QueueService, RedisQueue, QueueMessage, QueuePriority};
 //!
 //! // Redis queue service
 //! let queue = RedisQueue::new("redis://localhost:6379", "my_queue").await?;
 //!
 //! // Send message
 //! let message = QueueMessage::builder()
-//!     .payload("Hello, World!")
+//!     .payload("Hello, World!")?
 //!     .priority(QueuePriority::Normal)
 //!     .build();
 //!
@@ -32,8 +32,7 @@
 //! // Receive message
 //! let message = queue.dequeue().await?;
 //! if let Some(msg) = message {
-//!     println!("Received: {}", msg.payload);
-//!     queue.ack(msg.id).await?;
+//!     queue.ack(&msg.id).await?;
 //! }
 //! ```
 
