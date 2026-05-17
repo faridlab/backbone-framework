@@ -54,6 +54,7 @@ rand = "0.8"
 tokio-test = "0.4"
 tempfile = "3.0"
 wiremock = "0.6"
+tracing-subscriber = "0.3"
 
 [features]
 default = ["postgres"]

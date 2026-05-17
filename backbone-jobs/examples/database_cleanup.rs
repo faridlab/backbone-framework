@@ -20,8 +20,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create scheduler
     let storage = Arc::new(InMemoryJobStorage::new());
     let scheduler = JobSchedulerBuilder::new()
-        .with_storage(storage)
-        .build()?;
+        .storage(storage)
+        .build()
+        .await?;
 
     scheduler.start().await?;
 
@@ -410,7 +411,7 @@ async fn show_job_summary(scheduler: &JobScheduler) -> Result<(), Box<dyn std::e
     let mut optimization_count = 0;
     let mut archiving_count = 0;
 
-    for job in jobs {
+    for job in &jobs {
         match job.queue.as_str() {
             "database_maintenance" | "file_maintenance" | "cache_maintenance" | "job_maintenance" => {
                 cleanup_count += 1;

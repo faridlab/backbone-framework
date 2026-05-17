@@ -22,8 +22,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create scheduler
     let storage = Arc::new(InMemoryJobStorage::new());
     let scheduler = JobSchedulerBuilder::new()
-        .with_storage(storage)
-        .build()?;
+        .storage(storage)
+        .build()
+        .await?;
 
     scheduler.start().await?;
 

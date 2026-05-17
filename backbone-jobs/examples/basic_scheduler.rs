@@ -24,9 +24,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let queue_service = Arc::new(MockQueueService::new());
 
     // Create a scheduler with in-memory storage
-    let scheduler = JobSchedulerBuilder::new()
-        .with_storage(storage)
-        .build()?;
+    let scheduler = Arc::new(
+        JobSchedulerBuilder::new()
+            .storage(storage)
+            .build()
+            .await?,
+    );
 
     // Schedule different types of jobs
 
@@ -126,7 +129,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Simulate job execution by listening to queue messages
     // In a real application, you would have workers processing these messages
+    let scheduler_clone = Arc::clone(&scheduler);
     tokio::spawn(async move {
+        let scheduler = scheduler_clone;
         let mut interval = tokio::time::interval(Duration::from_secs(10));
 
         loop {
