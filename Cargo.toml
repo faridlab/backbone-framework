@@ -32,4 +32,4 @@ members = [
 # (.github/workflows/release.yml) refuses to publish a `v*` tag whose version
 # doesn't match this field.
 [workspace.metadata.release]
-version = "2.1.5"
+version = "2.1.6"
