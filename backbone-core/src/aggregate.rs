@@ -180,16 +180,16 @@ mod tests {
             self.id = id;
         }
 
-        fn created_at(&self) -> DateTime<Utc> {
-            self.created_at
+        fn created_at(&self) -> Option<DateTime<Utc>> {
+            Some(self.created_at)
         }
 
         fn set_created_at(&mut self, at: DateTime<Utc>) {
             self.created_at = at;
         }
 
-        fn updated_at(&self) -> DateTime<Utc> {
-            self.updated_at
+        fn updated_at(&self) -> Option<DateTime<Utc>> {
+            Some(self.updated_at)
         }
 
         fn set_updated_at(&mut self, at: DateTime<Utc>) {

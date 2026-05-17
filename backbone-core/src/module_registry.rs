@@ -309,6 +309,7 @@ impl Default for ModuleRegistry {
 mod tests {
     use super::*;
     use crate::module::BackboneModule;
+    use std::path::PathBuf;
 
     struct TestModuleA;
     struct TestModuleB;
