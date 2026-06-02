@@ -5,6 +5,7 @@
 //! - `BackboneCrudHandler`: Generic Axum router builder for all 11 endpoints
 //! - Response types: `ApiResponse`, `PaginatedResponse`, `BulkResponse`
 
+use crate::extractors::JsonOrForm;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -490,21 +491,21 @@ where
             // POST /collection - Create
             .route(base_path, post({
                 let h = handler.clone();
-                move |body: Json<C>| async move {
+                move |body: JsonOrForm<C>| async move {
                     Self::create_handler(h, body).await
                 }
             }))
             // POST /collection/bulk - Bulk create
             .route(&format!("{}/bulk", base_path), post({
                 let h = handler.clone();
-                move |body: Json<Vec<C>>| async move {
+                move |body: JsonOrForm<Vec<C>>| async move {
                     Self::bulk_create_handler(h, body).await
                 }
             }))
             // POST /collection/upsert - Upsert
             .route(&format!("{}/upsert", base_path), post({
                 let h = handler.clone();
-                move |body: Json<C>| async move {
+                move |body: JsonOrForm<C>| async move {
                     Self::upsert_handler(h, body).await
                 }
             }))
@@ -525,14 +526,14 @@ where
             // PUT /collection/:id - Full update
             .route(&format!("{}/:id", base_path), put({
                 let h = handler.clone();
-                move |path: Path<String>, body: Json<U>| async move {
+                move |path: Path<String>, body: JsonOrForm<U>| async move {
                     Self::update_handler(h, path, body).await
                 }
             }))
             // PATCH /collection/:id - Partial update
             .route(&format!("{}/:id", base_path), patch({
                 let h = handler.clone();
-                move |path: Path<String>, body: Json<HashMap<String, serde_json::Value>>| async move {
+                move |path: Path<String>, body: JsonOrForm<HashMap<String, serde_json::Value>>| async move {
                     Self::partial_update_handler(h, path, body).await
                 }
             }))
@@ -585,7 +586,7 @@ where
 
     async fn create_handler(
         handler: Arc<Self>,
-        axum::Json(dto): axum::Json<C>,
+        JsonOrForm(dto): JsonOrForm<C>,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
 
@@ -628,7 +629,7 @@ where
     async fn update_handler(
         handler: Arc<Self>,
         axum::extract::Path(id): axum::extract::Path<String>,
-        axum::Json(dto): axum::Json<U>,
+        JsonOrForm(dto): JsonOrForm<U>,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
 
@@ -649,7 +650,7 @@ where
     async fn partial_update_handler(
         handler: Arc<Self>,
         axum::extract::Path(id): axum::extract::Path<String>,
-        axum::Json(fields): axum::Json<HashMap<String, serde_json::Value>>,
+        JsonOrForm(fields): JsonOrForm<HashMap<String, serde_json::Value>>,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
 
@@ -705,7 +706,7 @@ where
 
     async fn bulk_create_handler(
         handler: Arc<Self>,
-        axum::Json(items): axum::Json<Vec<C>>,
+        JsonOrForm(items): JsonOrForm<Vec<C>>,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
 
@@ -729,7 +730,7 @@ where
 
     async fn upsert_handler(
         handler: Arc<Self>,
-        axum::Json(dto): axum::Json<C>,
+        JsonOrForm(dto): JsonOrForm<C>,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
 

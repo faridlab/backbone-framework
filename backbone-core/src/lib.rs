@@ -51,6 +51,7 @@ pub mod config;
 pub mod crud;
 pub mod entity;
 pub mod repository;
+pub mod extractors;
 pub mod http;
 pub mod grpc;
 pub mod builder;
