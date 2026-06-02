@@ -1,7 +1,7 @@
 # Backbone Core
 
 **Status:** ✅ FULLY IMPLEMENTED
-**Last Updated:** 2026-02-11
+**Last Updated:** 2026-06-02
 
 🦴 **Foundation for generic CRUD system with 11 standard endpoints**
 
@@ -26,6 +26,7 @@ Backbone Core is a **protocol-agnostic, generic CRUD foundation** that enables a
 - ✅ **Pagination, filtering, and sorting**
 - ✅ **Bulk operations and soft delete**
 - ✅ **Type-safe generic implementations**
+- ✅ **JSON or form-encoded request bodies** (auto-detected by `Content-Type`)
 - ✅ **Production-ready error handling**
 
 ### The 11 Backbone Endpoints
@@ -57,6 +58,15 @@ Backbone Core is a **protocol-agnostic, generic CRUD foundation** that enables a
 - **Sorting**: Multi-field sorting with configurable order
 - **Bulk Operations**: Efficient bulk create and upsert
 - **Soft Delete**: Trash management with restore functionality
+
+### 📨 Flexible Request Bodies
+- **JSON or form**: `BackboneCrudHandler` decodes create/update/upsert/bulk bodies
+  via the [`JsonOrForm`](src/extractors.rs) extractor, accepting both
+  `application/json` and `application/x-www-form-urlencoded`.
+- **Lenient default**: falls back to JSON when the `Content-Type` is missing or
+  unrecognized.
+- **Drop-in**: use `JsonOrForm(x): JsonOrForm<T>` anywhere you would write
+  `Json(x): Json<T>` in your own handlers.
 
 ### 🛡️ Type Safety
 - **Generic Types**: Works with any entity implementing `Entity` trait

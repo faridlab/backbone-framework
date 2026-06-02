@@ -7,6 +7,9 @@
 //!
 //! - **`CrudService` trait**: Core async trait for entity CRUD operations
 //! - **`BackboneCrudHandler`**: Generic Axum router builder for all 11 endpoints
+//! - **`extractors::JsonOrForm`**: Body extractor that accepts JSON or
+//!   url-encoded form payloads; `BackboneCrudHandler` uses it so every generated
+//!   endpoint accepts both content types.
 //! - **Response types**: `ApiResponse`, `PaginatedResponse`, `BulkResponse`
 //! - **Utilities**: Timestamp, ID generation, pagination, validation
 //! - **Persistence**: Generic repositories for PostgreSQL and in-memory storage

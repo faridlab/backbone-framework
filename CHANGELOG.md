@@ -15,6 +15,18 @@ back to `## [Unreleased]`.
 
 ## [Unreleased]
 
+## [2.2.0]
+
+### Added
+- `backbone-core`: `extractors::JsonOrForm<T>` request body extractor that accepts
+  either `application/json` or `application/x-www-form-urlencoded` bodies,
+  defaulting to JSON when the `Content-Type` is absent or unrecognized.
+
+### Changed
+- `backbone-core`: `BackboneCrudHandler` now decodes create, update, partial
+  update, upsert, and bulk-create bodies via `JsonOrForm`, so all generated CRUD
+  endpoints accept JSON **and** form-encoded payloads with no handler changes.
+
 ## [2.0.0]
 
 ### Release model
