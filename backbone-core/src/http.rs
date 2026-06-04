@@ -97,6 +97,35 @@ pub struct ListQueryParams {
 fn default_page() -> u32 { 1 }
 fn default_limit() -> u32 { 20 }
 
+/// Hard cap on page size. Mirrors the clamp in
+/// `backbone_orm::PaginationParams::new` (`per_page.clamp(1, 100)`); kept here so
+/// the offset-depth check below computes the same effective offset the DB uses.
+pub const MAX_PER_PAGE: u32 = 100;
+
+/// Maximum number of rows offset pagination is allowed to skip. Requests that
+/// would page deeper than this are rejected with `400` so clients narrow their
+/// query with filters instead of deep-scanning the table (`OFFSET` cost grows
+/// with depth). At `MAX_PER_PAGE` this allows ~100 pages.
+pub const MAX_PAGINATION_OFFSET: u32 = 10_000;
+
+/// Reject list requests that page beyond [`MAX_PAGINATION_OFFSET`].
+///
+/// Returns `Some(message)` describing the violation, or `None` when the request
+/// is within bounds. The page size is clamped to [`MAX_PER_PAGE`] first so the
+/// computed offset matches what the repository actually issues to Postgres.
+fn pagination_depth_error(page: u32, limit: u32) -> Option<String> {
+    let effective_limit = limit.clamp(1, MAX_PER_PAGE);
+    let offset = page.max(1).saturating_sub(1).saturating_mul(effective_limit);
+    if offset > MAX_PAGINATION_OFFSET {
+        Some(format!(
+            "Result set too deep: offset {offset} exceeds the maximum of \
+             {MAX_PAGINATION_OFFSET}. Please add filters to narrow your search."
+        ))
+    } else {
+        None
+    }
+}
+
 /// Classify a list/query error as a client fault (bad filter or sort key) vs a
 /// genuine server fault.
 ///
@@ -578,6 +607,10 @@ where
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
 
+        if let Some(err) = pagination_depth_error(params.page, params.limit) {
+            return (StatusCode::BAD_REQUEST, Json(PaginatedApiResponse::<R>::error(err)));
+        }
+
         // Merge search and status into filters HashMap
         let mut filters = params.filters.clone();
         if let Some(search) = params.search {
@@ -772,6 +805,10 @@ where
         axum::extract::Query(params): axum::extract::Query<ListQueryParams>,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
+
+        if let Some(err) = pagination_depth_error(params.page, params.limit) {
+            return (StatusCode::BAD_REQUEST, Json(PaginatedApiResponse::<R>::error(err)));
+        }
 
         match handler.service.list_deleted(params.page, params.limit).await {
             Ok((entities, total)) => {
@@ -1089,5 +1126,35 @@ mod tests {
     fn underscores_not_doubled() {
         assert_eq!(camel_to_snake_case("_Foo"), "_foo");
         assert_eq!(camel_to_snake_case("foo_Bar"), "foo_bar");
+    }
+
+    #[test]
+    fn shallow_pages_are_allowed() {
+        // page 1 has zero offset regardless of size
+        assert!(pagination_depth_error(1, 100).is_none());
+        // last in-bounds page at max size: offset = 100 * 100 = 10_000 (== cap)
+        assert!(pagination_depth_error(101, 100).is_none());
+    }
+
+    #[test]
+    fn pages_past_the_cap_are_rejected() {
+        // page 102 at size 100 → offset 10_100 > 10_000
+        assert!(pagination_depth_error(102, 100).is_some());
+        // small page size still rejected once deep enough: 1001 * 10 = 10_010
+        assert!(pagination_depth_error(1002, 10).is_some());
+    }
+
+    #[test]
+    fn oversized_page_size_is_clamped_before_the_check() {
+        // limit=200 is clamped to 100, so the effective offset is 101*100=10_100
+        assert!(pagination_depth_error(102, 200).is_some());
+        // and a request that would only be in-bounds *because* of the clamp passes
+        assert!(pagination_depth_error(101, 200).is_none());
+    }
+
+    #[test]
+    fn huge_page_number_does_not_overflow() {
+        // saturating arithmetic keeps this a clean rejection, not a panic
+        assert!(pagination_depth_error(u32::MAX, u32::MAX).is_some());
     }
 }
