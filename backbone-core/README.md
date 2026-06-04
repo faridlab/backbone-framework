@@ -56,6 +56,10 @@ Backbone Core is a **protocol-agnostic, generic CRUD foundation** that enables a
 - **Pagination**: Automatic pagination with metadata
 - **Filtering**: HashMap-based field filtering
 - **Sorting**: Multi-field sorting with configurable order
+- **Client-error aware**: list/query endpoints return `400 Bad Request` (not
+  `500`) when a bad filter or sort key produces a Postgres
+  `column "..." does not exist` (SQLSTATE 42703) or `invalid input syntax`
+  error — e.g. a typo or a stray camelCase param like `sortOrder`.
 - **Bulk Operations**: Efficient bulk create and upsert
 - **Soft Delete**: Trash management with restore functionality
 

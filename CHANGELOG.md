@@ -15,6 +15,17 @@ back to `## [Unreleased]`.
 
 ## [Unreleased]
 
+## [2.2.1]
+
+### Changed
+- `backbone-core`: list/query CRUD handlers now return `400 Bad Request` instead
+  of `500 Internal Server Error` when a request supplies an unknown filter or
+  sort key. Such params are injected as column names, so a typo or stray
+  camelCase param (e.g. `sortOrder`) surfaces as a Postgres
+  `column "..." does not exist` (SQLSTATE 42703) or `invalid input syntax`
+  error — these are now classified as client faults and reported as
+  `Invalid query parameter or filter: ...`.
+
 ## [2.2.0]
 
 ### Added
