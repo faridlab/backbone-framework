@@ -15,6 +15,34 @@ back to `## [Unreleased]`.
 
 ## [Unreleased]
 
+## [2.3.0]
+
+### Added
+- `backbone-core`: atomic batch operations across the CRUD stack (HTTP handlers,
+  `CrudService`, persistence traits, the `impl_crud_repository!` macro, and
+  `backbone-orm::GenericCrudRepository`). Each runs inside a single transaction
+  with all-or-nothing semantics — if any id is missing or already in the target
+  state, the whole batch is rolled back and no rows are written. New endpoints:
+  - `PUT  {collection}/bulk` — full-update many (`[{ "id", ...fields }]`)
+  - `PATCH {collection}/bulk` — partial-update many; accepts a shared
+    `{ ids, patch }` shape or a per-id `{ items: [{ id, patch }] }` shape
+    (auto-detected via untagged deserialization)
+  - `POST {collection}/delete/bulk` — soft-delete many by id (`{ "ids": [...] }`)
+  - `POST {collection}/restore/bulk` — restore many soft-deleted by id
+  - `POST {collection}/restore/all` — restore every soft-deleted entity
+  - `DELETE {collection}/trash/bulk` — permanently delete many trashed by id
+- `backbone-core`: `MAX_BATCH_SIZE` (1,000) public constant, enforced at both the
+  HTTP layer (`400 Bad Request`) and the service layer (so gRPC / internal callers
+  get the same bound). Lifecycle hooks and CRUD events fire per affected entity,
+  mirroring the single-row methods — including `restore_all`, which now emits a
+  `Restored` event per restored entity.
+- `backbone-core`: batch behaviour hardening — id-list operations (soft-delete,
+  restore, permanent-delete) de-duplicate ids before the `IN (...)` query so a
+  repeated id no longer fails the whole batch; bulk update / partial-update reject
+  a request that maps the same id twice with a clear `400`; `bulk_permanent_delete`
+  relies on the repository's atomic in-trash check rather than a redundant,
+  race-prone per-id pre-validation pass.
+
 ## [2.2.2]
 
 ### Changed

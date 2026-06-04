@@ -45,6 +45,23 @@ Backbone Core is a **protocol-agnostic, generic CRUD foundation** that enables a
 | 10 | `POST` | `/api/v1/{collection}/:id/restore` | `restore()` | Restore soft-deleted entity |
 | 11 | `DELETE` | `/api/v1/{collection}/empty` | `empty_trash()` | Permanently delete all trash |
 
+### Atomic batch endpoints
+
+All-or-nothing operations applied inside a single transaction: ids are validated
+up-front, and if any id is missing (or already in the target state) the whole
+batch is rolled back with `400 Bad Request` — no partial writes. Batches are
+capped at `MAX_BATCH_SIZE` (1,000) items; larger payloads are rejected with
+`400`. Lifecycle hooks and CRUD events fire per affected entity.
+
+| HTTP Method | HTTP Endpoint | Service method | Purpose |
+|-------------|---------------|----------------|---------|
+| `PUT` | `/api/v1/{collection}/bulk` | `bulk_update()` | Full-update many entities (`[{ "id", ...fields }]`) |
+| `PATCH` | `/api/v1/{collection}/bulk` | `bulk_partial_update()` | Partial-update many — shared `{ ids, patch }` or per-id `{ items: [{ id, patch }] }` |
+| `POST` | `/api/v1/{collection}/delete/bulk` | `bulk_soft_delete()` | Soft-delete many by id (`{ "ids": [...] }`) |
+| `POST` | `/api/v1/{collection}/restore/bulk` | `bulk_restore()` | Restore many soft-deleted by id |
+| `POST` | `/api/v1/{collection}/restore/all` | `restore_all()` | Restore every soft-deleted entity |
+| `DELETE` | `/api/v1/{collection}/trash/bulk` | `bulk_permanent_delete()` | Permanently delete many trashed by id |
+
 ## 🚀 Features
 
 ### 🔄 Protocol Agnostic
@@ -65,6 +82,9 @@ Backbone Core is a **protocol-agnostic, generic CRUD foundation** that enables a
   `column "..." does not exist` (SQLSTATE 42703) or `invalid input syntax`
   error — e.g. a typo or a stray camelCase param like `sortOrder`.
 - **Bulk Operations**: Efficient bulk create and upsert
+- **Atomic batch operations**: transactional, all-or-nothing bulk update / partial-update /
+  soft-delete / restore / permanent-delete — a missing id rolls back the whole batch
+  (`400`), and batches are capped at `MAX_BATCH_SIZE` (1,000)
 - **Soft Delete**: Trash management with restore functionality
 
 ### 📨 Flexible Request Bodies
