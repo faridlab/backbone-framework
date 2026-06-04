@@ -15,6 +15,18 @@ back to `## [Unreleased]`.
 
 ## [Unreleased]
 
+## [2.2.2]
+
+### Changed
+- `backbone-core`: list/query CRUD handlers (including `list_deleted`) now reject
+  requests that page beyond a fixed offset depth with `400 Bad Request` instead
+  of running an expensive deep `OFFSET` scan. The page size is clamped to
+  `MAX_PER_PAGE` (100) before computing the offset, and any request whose
+  effective offset exceeds `MAX_PAGINATION_OFFSET` (10,000 — ~100 pages at max
+  size) is reported as `Result set too deep: offset ... exceeds the maximum of
+  10000. Please add filters to narrow your search.` `MAX_PER_PAGE` and
+  `MAX_PAGINATION_OFFSET` are exposed as public constants.
+
 ## [2.2.1]
 
 ### Changed

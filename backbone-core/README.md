@@ -54,6 +54,10 @@ Backbone Core is a **protocol-agnostic, generic CRUD foundation** that enables a
 
 ### 📊 Advanced CRUD Operations
 - **Pagination**: Automatic pagination with metadata
+- **Depth-capped pagination**: list/query endpoints return `400 Bad Request` once
+  a request would page beyond `MAX_PAGINATION_OFFSET` (10,000 rows — ~100 pages
+  at the `MAX_PER_PAGE` clamp of 100), avoiding expensive deep `OFFSET` scans and
+  prompting clients to add filters instead.
 - **Filtering**: HashMap-based field filtering
 - **Sorting**: Multi-field sorting with configurable order
 - **Client-error aware**: list/query endpoints return `400 Bad Request` (not
