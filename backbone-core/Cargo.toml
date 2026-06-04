@@ -43,6 +43,12 @@ tower-http = { version = "0.5", features = ["cors", "trace"] }
 # Database (optional - only for builder pattern examples)
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono"], optional = true }
 
+[dev-dependencies]
+# Used by tests/crud_macro_compile.rs to expand `impl_crud_repository!` against a
+# real `GenericCrudRepository`, the same way generated consumer repos do.
+backbone-orm = { path = "../backbone-orm" }
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono"] }
+
 [features]
 default = []
 database = ["sqlx"]

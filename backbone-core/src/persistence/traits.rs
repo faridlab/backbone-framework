@@ -208,6 +208,75 @@ where
     async fn exists(&self, id: &str) -> Result<bool, RepositoryError> {
         Ok(self.find_by_id(id).await?.is_some())
     }
+
+    // ── Atomic batch operations ───────────────────────────────────────────────
+    //
+    // The default implementations loop over the single-row methods and are NOT
+    // transactional — they exist so non-Postgres implementors (mocks, custom
+    // adapters) keep compiling. The macro-generated repositories override these
+    // (via `impl_crud_repository!`) with truly atomic, single-transaction
+    // versions backed by `GenericCrudRepository`.
+
+    /// Soft-delete many entities by id. Returns the number affected.
+    async fn bulk_soft_delete(&self, ids: &[String]) -> Result<u64, RepositoryError> {
+        let mut n = 0;
+        for id in ids {
+            if self.soft_delete(id).await? {
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
+
+    /// Restore many soft-deleted entities by id. Returns the restored entities.
+    async fn bulk_restore(&self, ids: &[String]) -> Result<Vec<E>, RepositoryError> {
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(e) = self.restore(id).await? {
+                out.push(e);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Permanently delete many entities by id. Returns the number affected.
+    async fn bulk_hard_delete(&self, ids: &[String]) -> Result<u64, RepositoryError> {
+        let mut n = 0;
+        for id in ids {
+            if self.hard_delete(id).await? {
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
+
+    /// Restore every soft-deleted entity. Returns the restored entities.
+    async fn restore_all(&self) -> Result<Vec<E>, RepositoryError> {
+        let mut restored = Vec::new();
+        // Restoring removes rows from the deleted set, so page 1 always returns
+        // the next batch of still-deleted rows until none remain.
+        loop {
+            let (batch, _) = self.list_deleted(1, 500).await?;
+            if batch.is_empty() {
+                break;
+            }
+            for entity in &batch {
+                if let Some(e) = self.restore(&entity.entity_id()).await? {
+                    restored.push(e);
+                }
+            }
+        }
+        Ok(restored)
+    }
+
+    /// Update many entities atomically. Returns the updated entities.
+    async fn bulk_update(&self, entities: Vec<E>) -> Result<Vec<E>, RepositoryError> {
+        let mut out = Vec::with_capacity(entities.len());
+        for entity in entities {
+            out.push(self.update(entity).await?);
+        }
+        Ok(out)
+    }
 }
 
 /// Extended repository with search/filter capabilities

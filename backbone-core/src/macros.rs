@@ -203,6 +203,50 @@ macro_rules! impl_crud_repository {
                     .await
                     .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
             }
+
+            // ── Atomic batch operations (single-transaction, all-or-nothing) ──
+
+            async fn bulk_soft_delete(
+                &self,
+                ids: &[String],
+            ) -> Result<u64, backbone_core::RepositoryError> {
+                (&**self).bulk_soft_delete(ids)
+                    .await
+                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+            }
+
+            async fn bulk_restore(
+                &self,
+                ids: &[String],
+            ) -> Result<Vec<$entity>, backbone_core::RepositoryError> {
+                (&**self).bulk_restore(ids)
+                    .await
+                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+            }
+
+            async fn bulk_hard_delete(
+                &self,
+                ids: &[String],
+            ) -> Result<u64, backbone_core::RepositoryError> {
+                (&**self).bulk_permanent_delete(ids)
+                    .await
+                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+            }
+
+            async fn restore_all(&self) -> Result<Vec<$entity>, backbone_core::RepositoryError> {
+                (&**self).restore_all()
+                    .await
+                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+            }
+
+            async fn bulk_update(
+                &self,
+                entities: Vec<$entity>,
+            ) -> Result<Vec<$entity>, backbone_core::RepositoryError> {
+                (&**self).bulk_update(&entities)
+                    .await
+                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+            }
         }
     };
 
@@ -344,6 +388,49 @@ macro_rules! impl_crud_repository {
 
             async fn empty_trash(&self) -> Result<u64, backbone_core::RepositoryError> {
                 Ok(0)
+            }
+
+            // ── Atomic batch operations ───────────────────────────────────────
+
+            async fn bulk_soft_delete(
+                &self,
+                ids: &[String],
+            ) -> Result<u64, backbone_core::RepositoryError> {
+                // No soft delete: fall back to hard delete
+                (&**self).bulk_delete(ids)
+                    .await
+                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+            }
+
+            async fn bulk_restore(
+                &self,
+                _ids: &[String],
+            ) -> Result<Vec<$entity>, backbone_core::RepositoryError> {
+                // No soft delete: nothing is ever in trash to restore
+                Ok(Vec::new())
+            }
+
+            async fn bulk_hard_delete(
+                &self,
+                ids: &[String],
+            ) -> Result<u64, backbone_core::RepositoryError> {
+                (&**self).bulk_delete(ids)
+                    .await
+                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+            }
+
+            async fn restore_all(&self) -> Result<Vec<$entity>, backbone_core::RepositoryError> {
+                // No soft delete: trash is always empty
+                Ok(Vec::new())
+            }
+
+            async fn bulk_update(
+                &self,
+                entities: Vec<$entity>,
+            ) -> Result<Vec<$entity>, backbone_core::RepositoryError> {
+                (&**self).bulk_update(&entities)
+                    .await
+                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
             }
         }
     };

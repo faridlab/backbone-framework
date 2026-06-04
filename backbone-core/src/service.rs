@@ -464,6 +464,249 @@ where
         }
         Ok(results)
     }
+
+    // ── Atomic batch operations ───────────────────────────────────────────────
+    //
+    // All-or-nothing: ids are validated up-front (so a missing id fails the whole
+    // request before any write), then the repository applies the change inside a
+    // single transaction. Lifecycle hooks and CRUD events fire per affected
+    // entity, mirroring the single-row methods. Events are best-effort.
+
+    /// Soft-delete many entities by id (atomic).
+    pub async fn bulk_soft_delete(&self, ids: Vec<String>) -> ServiceResult<u64> {
+        check_batch_size(ids.len())?;
+        let ids = dedup_ids(ids);
+        // Load the entities up-front: they are the payloads for the lifecycle
+        // `before_delete` hook and the `SoftDeleted` event below. The repository's
+        // atomic affected-row check (not this loop) is what guarantees the write
+        // is all-or-nothing.
+        let mut entities = Vec::with_capacity(ids.len());
+        for id in &ids {
+            match self
+                .repository
+                .find_by_id(id)
+                .await
+                .map_err(ServiceError::Repository)?
+            {
+                Some(e) => entities.push(e),
+                None => return Err(ServiceError::Validation(format!("id '{id}' not found"))),
+            }
+        }
+        for entity in &entities {
+            self.lifecycle.before_delete(entity).await?;
+        }
+        let affected = self
+            .repository
+            .bulk_soft_delete(&ids)
+            .await
+            .map_err(ServiceError::Repository)?;
+        for (id, entity) in ids.iter().zip(entities.into_iter()) {
+            self.lifecycle.after_delete(id).await?;
+            let meta = EventMetadata::new(id, std::any::type_name::<E>());
+            let _ = self
+                .event_publisher
+                .publish(CrudEvent::SoftDeleted { entity, metadata: meta })
+                .await;
+        }
+        Ok(affected)
+    }
+
+    /// Restore many soft-deleted entities by id (atomic).
+    pub async fn bulk_restore(&self, ids: Vec<String>) -> ServiceResult<Vec<E>> {
+        check_batch_size(ids.len())?;
+        let ids = dedup_ids(ids);
+        let restored = self
+            .repository
+            .bulk_restore(&ids)
+            .await
+            .map_err(ServiceError::Repository)?;
+        for entity in &restored {
+            let meta = EventMetadata::new(entity.entity_id(), std::any::type_name::<E>());
+            let _ = self
+                .event_publisher
+                .publish(CrudEvent::Restored { entity: entity.clone(), metadata: meta })
+                .await;
+        }
+        Ok(restored)
+    }
+
+    /// Restore every soft-deleted entity (atomic). Returns the number restored.
+    /// Emits a `Restored` event per entity, mirroring [`bulk_restore`](Self::bulk_restore).
+    pub async fn restore_all(&self) -> ServiceResult<u64> {
+        let restored = self
+            .repository
+            .restore_all()
+            .await
+            .map_err(ServiceError::Repository)?;
+        for entity in &restored {
+            let meta = EventMetadata::new(entity.entity_id(), std::any::type_name::<E>());
+            let _ = self
+                .event_publisher
+                .publish(CrudEvent::Restored { entity: entity.clone(), metadata: meta })
+                .await;
+        }
+        Ok(restored.len() as u64)
+    }
+
+    /// Permanently delete many soft-deleted entities by id (atomic).
+    pub async fn bulk_permanent_delete(&self, ids: Vec<String>) -> ServiceResult<u64> {
+        check_batch_size(ids.len())?;
+        let ids = dedup_ids(ids);
+        // No pre-validation loop: `bulk_hard_delete` deletes only rows that are
+        // actually in trash and rolls the whole batch back unless every id
+        // matched, so the repository's atomic check is the single source of truth
+        // (and avoids a per-id round-trip plus a TOCTOU window).
+        let affected = self
+            .repository
+            .bulk_hard_delete(&ids)
+            .await
+            .map_err(ServiceError::Repository)?;
+        for id in &ids {
+            let meta = EventMetadata::new(id, std::any::type_name::<E>());
+            let _ = self
+                .event_publisher
+                .publish(CrudEvent::HardDeleted {
+                    entity_id: id.to_string(),
+                    metadata: meta,
+                })
+                .await;
+        }
+        Ok(affected)
+    }
+
+    /// Full-update many entities (atomic). Each item is `(id, UpdateDto)`.
+    pub async fn bulk_update(&self, items: Vec<(String, U)>) -> ServiceResult<Vec<E>> {
+        check_batch_size(items.len())?;
+        if let Some(dup) = first_duplicate_id(items.iter().map(|(id, _)| id.clone())) {
+            return Err(ServiceError::Validation(format!(
+                "duplicate id '{dup}' in bulk update"
+            )));
+        }
+        let mut befores = Vec::with_capacity(items.len());
+        let mut prepared = Vec::with_capacity(items.len());
+        for (id, dto) in items {
+            let Some(before) = self
+                .repository
+                .find_by_id(&id)
+                .await
+                .map_err(ServiceError::Repository)?
+            else {
+                return Err(ServiceError::Validation(format!("id '{id}' not found")));
+            };
+            let mut updated = before.clone().apply_update(dto)?;
+            self.lifecycle.before_update(&mut updated).await?;
+            befores.push(before);
+            prepared.push(updated);
+        }
+        let saved = self
+            .repository
+            .bulk_update(prepared)
+            .await
+            .map_err(ServiceError::Repository)?;
+        self.publish_bulk_updates(befores, &saved).await?;
+        Ok(saved)
+    }
+
+    /// Fire `after_update` and a `Updated` event for each `(before, after)` pair.
+    /// Shared by [`bulk_update`](Self::bulk_update) and
+    /// [`bulk_partial_update`](Self::bulk_partial_update); events are best-effort.
+    async fn publish_bulk_updates(&self, befores: Vec<E>, saved: &[E]) -> ServiceResult<()> {
+        for (before, after) in befores.into_iter().zip(saved.iter()) {
+            self.lifecycle.after_update(after).await?;
+            let meta = EventMetadata::new(after.entity_id(), std::any::type_name::<E>());
+            let _ = self
+                .event_publisher
+                .publish(CrudEvent::Updated {
+                    before,
+                    after: after.clone(),
+                    metadata: meta,
+                })
+                .await;
+        }
+        Ok(())
+    }
+
+    /// Partial-update many entities (atomic). Each item is `(id, field_map)`.
+    pub async fn bulk_partial_update(
+        &self,
+        items: Vec<(String, HashMap<String, serde_json::Value>)>,
+    ) -> ServiceResult<Vec<E>>
+    where
+        E: serde::Serialize + serde::de::DeserializeOwned,
+    {
+        check_batch_size(items.len())?;
+        if let Some(dup) = first_duplicate_id(items.iter().map(|(id, _)| id.clone())) {
+            return Err(ServiceError::Validation(format!(
+                "duplicate id '{dup}' in bulk partial update"
+            )));
+        }
+        let mut befores = Vec::with_capacity(items.len());
+        let mut prepared = Vec::with_capacity(items.len());
+        for (id, fields) in items {
+            let Some(before) = self
+                .repository
+                .find_by_id(&id)
+                .await
+                .map_err(ServiceError::Repository)?
+            else {
+                return Err(ServiceError::Validation(format!("id '{id}' not found")));
+            };
+            let mut map = serde_json::to_value(&before)
+                .map_err(|e| ServiceError::Internal(e.to_string()))?;
+            if let serde_json::Value::Object(ref mut obj) = map {
+                for (key, value) in fields {
+                    obj.insert(key, value);
+                }
+            }
+            let mut patched: E = serde_json::from_value(map)
+                .map_err(|e| ServiceError::Internal(e.to_string()))?;
+            self.lifecycle.before_update(&mut patched).await?;
+            befores.push(before);
+            prepared.push(patched);
+        }
+        let saved = self
+            .repository
+            .bulk_update(prepared)
+            .await
+            .map_err(ServiceError::Repository)?;
+        self.publish_bulk_updates(befores, &saved).await?;
+        Ok(saved)
+    }
+}
+
+/// Maximum number of ids / items a single batch operation may contain. Enforced
+/// here at the service layer (not only in the HTTP handlers) so every caller —
+/// gRPC, background jobs, internal code — gets the same bound.
+pub const MAX_BATCH_SIZE: usize = 1000;
+
+/// Reject an over-sized batch before any work is done.
+fn check_batch_size(count: usize) -> Result<(), ServiceError> {
+    if count > MAX_BATCH_SIZE {
+        return Err(ServiceError::Validation(format!(
+            "Batch too large: {count} items exceeds the maximum of {MAX_BATCH_SIZE}."
+        )));
+    }
+    Ok(())
+}
+
+/// Drop duplicate ids while preserving first-seen order. Id-list batch ops issue
+/// a SQL `IN (...)` whose distinct-row count would never match a list that
+/// repeats an id, so a stray duplicate would otherwise fail the whole batch.
+fn dedup_ids(ids: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    ids.into_iter().filter(|id| seen.insert(id.clone())).collect()
+}
+
+/// Return the first id that appears more than once, if any. Used to reject
+/// ambiguous bulk updates (the same id mapped to two different payloads).
+fn first_duplicate_id(ids: impl IntoIterator<Item = String>) -> Option<String> {
+    let mut seen = std::collections::HashSet::new();
+    for id in ids {
+        if !seen.insert(id.clone()) {
+            return Some(id);
+        }
+    }
+    None
 }
 
 // ─── Blanket CrudService impl ────────────────────────────────────────────────
@@ -574,6 +817,33 @@ where
 
     async fn count_deleted(&self) -> Result<u64, ServiceError> {
         self.count_deleted().await
+    }
+
+    async fn bulk_soft_delete(&self, ids: Vec<String>) -> Result<u64, ServiceError> {
+        self.bulk_soft_delete(ids).await
+    }
+
+    async fn bulk_restore(&self, ids: Vec<String>) -> Result<Vec<E>, ServiceError> {
+        self.bulk_restore(ids).await
+    }
+
+    async fn bulk_permanent_delete(&self, ids: Vec<String>) -> Result<u64, ServiceError> {
+        self.bulk_permanent_delete(ids).await
+    }
+
+    async fn restore_all(&self) -> Result<u64, ServiceError> {
+        self.restore_all().await
+    }
+
+    async fn bulk_update(&self, items: Vec<(String, U)>) -> Result<Vec<E>, ServiceError> {
+        self.bulk_update(items).await
+    }
+
+    async fn bulk_partial_update(
+        &self,
+        items: Vec<(String, HashMap<String, serde_json::Value>)>,
+    ) -> Result<Vec<E>, ServiceError> {
+        self.bulk_partial_update(items).await
     }
 }
 
@@ -830,5 +1100,140 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(updated.unwrap().name, "new");
+    }
+
+    // ── Batch operations ──────────────────────────────────────────────────────
+
+    fn svc() -> GenericCrudService<Widget, CreateWidgetDto, UpdateWidgetDto, InMemoryWidgetRepo> {
+        GenericCrudService::with_repository(Arc::new(InMemoryWidgetRepo::new()))
+    }
+
+    #[tokio::test]
+    async fn bulk_soft_delete_success() {
+        let service = svc();
+        let mut ids = Vec::new();
+        for n in 0..3 {
+            ids.push(service.create(CreateWidgetDto { name: format!("w{n}") }).await.unwrap().id);
+        }
+        let n = service.bulk_soft_delete(ids).await.unwrap();
+        assert_eq!(n, 3);
+        let (active, _) = service.list(1, 20, Default::default()).await.unwrap();
+        assert!(active.is_empty());
+    }
+
+    #[tokio::test]
+    async fn bulk_soft_delete_is_all_or_nothing_on_missing_id() {
+        let service = svc();
+        let a = service.create(CreateWidgetDto { name: "a".into() }).await.unwrap();
+        let b = service.create(CreateWidgetDto { name: "b".into() }).await.unwrap();
+
+        // One id is missing → whole batch must be rejected with nothing deleted.
+        let res = service
+            .bulk_soft_delete(vec![a.id.clone(), b.id.clone(), "does-not-exist".into()])
+            .await;
+        assert!(res.is_err());
+
+        let (active, _) = service.list(1, 20, Default::default()).await.unwrap();
+        assert_eq!(active.len(), 2, "no rows should have been deleted");
+    }
+
+    #[tokio::test]
+    async fn bulk_restore_and_restore_all() {
+        let service = svc();
+        let mut ids = Vec::new();
+        for n in 0..3 {
+            ids.push(service.create(CreateWidgetDto { name: format!("w{n}") }).await.unwrap().id);
+        }
+        service.bulk_soft_delete(ids.clone()).await.unwrap();
+
+        // Restore two explicitly.
+        let restored = service.bulk_restore(vec![ids[0].clone(), ids[1].clone()]).await.unwrap();
+        assert_eq!(restored.len(), 2);
+
+        // Restore the remaining one via restore_all.
+        let n = service.restore_all().await.unwrap();
+        assert_eq!(n, 1);
+
+        let (active, _) = service.list(1, 20, Default::default()).await.unwrap();
+        assert_eq!(active.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn bulk_update_is_all_or_nothing_on_missing_id() {
+        let service = svc();
+        let a = service.create(CreateWidgetDto { name: "a".into() }).await.unwrap();
+
+        let res = service
+            .bulk_update(vec![
+                (a.id.clone(), UpdateWidgetDto { name: "A2".into() }),
+                ("missing".into(), UpdateWidgetDto { name: "X".into() }),
+            ])
+            .await;
+        assert!(res.is_err());
+
+        // The valid row must be untouched because the batch aborted pre-write.
+        let still = service.get_by_id(&a.id).await.unwrap().unwrap();
+        assert_eq!(still.name, "a");
+    }
+
+    #[tokio::test]
+    async fn bulk_partial_update_success() {
+        let service = svc();
+        let a = service.create(CreateWidgetDto { name: "a".into() }).await.unwrap();
+        let b = service.create(CreateWidgetDto { name: "b".into() }).await.unwrap();
+
+        let mut patch_a = std::collections::HashMap::new();
+        patch_a.insert("name".to_string(), serde_json::json!("a2"));
+        let mut patch_b = std::collections::HashMap::new();
+        patch_b.insert("name".to_string(), serde_json::json!("b2"));
+
+        let saved = service
+            .bulk_partial_update(vec![(a.id.clone(), patch_a), (b.id.clone(), patch_b)])
+            .await
+            .unwrap();
+        assert_eq!(saved.len(), 2);
+        assert_eq!(service.get_by_id(&a.id).await.unwrap().unwrap().name, "a2");
+        assert_eq!(service.get_by_id(&b.id).await.unwrap().unwrap().name, "b2");
+    }
+
+    #[tokio::test]
+    async fn bulk_soft_delete_tolerates_duplicate_ids() {
+        let service = svc();
+        let a = service.create(CreateWidgetDto { name: "a".into() }).await.unwrap();
+        let b = service.create(CreateWidgetDto { name: "b".into() }).await.unwrap();
+
+        // A repeated id must not fail the batch: ids are de-duplicated first.
+        let n = service
+            .bulk_soft_delete(vec![a.id.clone(), a.id.clone(), b.id.clone()])
+            .await
+            .unwrap();
+        assert_eq!(n, 2, "two distinct rows soft-deleted");
+
+        let (active, _) = service.list(1, 20, Default::default()).await.unwrap();
+        assert!(active.is_empty());
+    }
+
+    #[tokio::test]
+    async fn bulk_update_rejects_duplicate_ids() {
+        let service = svc();
+        let a = service.create(CreateWidgetDto { name: "a".into() }).await.unwrap();
+
+        // The same id mapped to two payloads is ambiguous → rejected, nothing written.
+        let res = service
+            .bulk_update(vec![
+                (a.id.clone(), UpdateWidgetDto { name: "first".into() }),
+                (a.id.clone(), UpdateWidgetDto { name: "second".into() }),
+            ])
+            .await;
+        assert!(res.is_err());
+        assert_eq!(service.get_by_id(&a.id).await.unwrap().unwrap().name, "a");
+    }
+
+    #[tokio::test]
+    async fn bulk_soft_delete_rejects_oversized_batch() {
+        let service = svc();
+        let ids: Vec<String> = (0..MAX_BATCH_SIZE + 1).map(|n| format!("id-{n}")).collect();
+        // Enforced at the service layer, independent of any HTTP handler.
+        assert!(service.bulk_soft_delete(ids).await.is_err());
     }
 }

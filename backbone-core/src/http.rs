@@ -126,6 +126,25 @@ fn pagination_depth_error(page: u32, limit: u32) -> Option<String> {
     }
 }
 
+/// Maximum number of ids / items a single batch request may contain. Larger
+/// payloads are rejected with `400` to bound memory and transaction size.
+///
+/// Re-exported from the service layer, which enforces the same cap for non-HTTP
+/// callers — see [`crate::service::MAX_BATCH_SIZE`].
+pub use crate::service::MAX_BATCH_SIZE;
+
+/// Reject batch requests larger than [`MAX_BATCH_SIZE`]. Returns `Some(message)`
+/// when over the limit, `None` otherwise.
+fn batch_size_error(count: usize) -> Option<String> {
+    if count > MAX_BATCH_SIZE {
+        Some(format!(
+            "Batch too large: {count} items exceeds the maximum of {MAX_BATCH_SIZE}."
+        ))
+    } else {
+        None
+    }
+}
+
 /// Classify a list/query error as a client fault (bad filter or sort key) vs a
 /// genuine server fault.
 ///
@@ -229,6 +248,58 @@ pub struct UpsertRequest<T> {
     pub create_if_not_exists: bool,
 }
 
+/// Request body carrying a list of entity ids — used by bulk soft-delete, bulk
+/// restore, and bulk permanent-delete endpoints.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BatchIdsRequest {
+    pub ids: Vec<String>,
+}
+
+/// One element of the `PUT {resource}/bulk` array: an id plus the (flattened)
+/// full update DTO for that row.
+#[derive(Debug, Deserialize)]
+#[serde(bound = "U: DeserializeOwned")]
+pub struct BulkUpdateItem<U> {
+    pub id: String,
+    #[serde(flatten)]
+    pub data: U,
+}
+
+/// One element of the per-id form of a bulk PATCH request.
+#[derive(Debug, Deserialize)]
+pub struct BulkPatchItem {
+    pub id: String,
+    pub patch: HashMap<String, serde_json::Value>,
+}
+
+/// Body for `PATCH {resource}/bulk`. Accepts either a single patch applied to
+/// many ids, or a distinct patch per id. Shape is auto-detected.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum BulkPatchRequest {
+    /// `{ "ids": [..], "patch": { .. } }` — same change applied to every id.
+    Shared {
+        ids: Vec<String>,
+        patch: HashMap<String, serde_json::Value>,
+    },
+    /// `{ "items": [ { "id": .., "patch": { .. } } ] }` — per-id changes.
+    PerItem { items: Vec<BulkPatchItem> },
+}
+
+impl BulkPatchRequest {
+    /// Flatten into `(id, field_map)` pairs the service layer consumes.
+    fn into_items(self) -> Vec<(String, HashMap<String, serde_json::Value>)> {
+        match self {
+            BulkPatchRequest::Shared { ids, patch } => {
+                ids.into_iter().map(|id| (id, patch.clone())).collect()
+            }
+            BulkPatchRequest::PerItem { items } => {
+                items.into_iter().map(|it| (it.id, it.patch)).collect()
+            }
+        }
+    }
+}
+
 /// Filtering and sorting options
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FilterOptions {
@@ -294,9 +365,11 @@ impl Default for ListRequest {
 #[async_trait::async_trait]
 pub trait CrudService<Entity, CreateDto, UpdateDto>: Send + Sync
 where
-    Entity: Send + Sync,
-    CreateDto: Send + Sync,
-    UpdateDto: Send + Sync,
+    // `'static` is required so the default batch methods (which hold these types
+    // across `.await` points) satisfy async-trait's `'async_trait` bound.
+    Entity: Send + Sync + 'static,
+    CreateDto: Send + Sync + 'static,
+    UpdateDto: Send + Sync + 'static,
 {
     /// Error type for service operations
     type Error: std::error::Error + Send + Sync;
@@ -351,6 +424,79 @@ where
 
     /// 16. Count deleted entities in trash
     async fn count_deleted(&self) -> Result<u64, Self::Error>;
+
+    // ── Atomic batch operations ───────────────────────────────────────────────
+    //
+    // The default implementations are best-effort loops over the single-row
+    // methods, provided so non-generic implementors keep compiling. The blanket
+    // impl on `GenericCrudService` overrides them with transactional,
+    // all-or-nothing versions (which is what every generated service runs).
+
+    /// 17. Soft-delete many entities by id. Returns the number affected.
+    async fn bulk_soft_delete(&self, ids: Vec<String>) -> Result<u64, Self::Error> {
+        let mut n = 0;
+        for id in ids {
+            if self.soft_delete(&id).await? {
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
+
+    /// 18. Restore many soft-deleted entities by id. Returns the restored rows.
+    async fn bulk_restore(&self, ids: Vec<String>) -> Result<Vec<Entity>, Self::Error> {
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(e) = self.restore(&id).await? {
+                out.push(e);
+            }
+        }
+        Ok(out)
+    }
+
+    /// 19. Permanently delete many soft-deleted entities by id.
+    async fn bulk_permanent_delete(&self, ids: Vec<String>) -> Result<u64, Self::Error> {
+        let mut n = 0;
+        for id in ids {
+            if self.permanent_delete(&id).await? {
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
+
+    /// 20. Restore every soft-deleted entity. Returns the number restored.
+    ///
+    /// Default is a no-op (`0`) — only the `GenericCrudService` blanket impl can
+    /// perform this without an id list.
+    async fn restore_all(&self) -> Result<u64, Self::Error> {
+        Ok(0)
+    }
+
+    /// 21. Full-update many entities. Each item is `(id, UpdateDto)`.
+    async fn bulk_update(&self, items: Vec<(String, UpdateDto)>) -> Result<Vec<Entity>, Self::Error> {
+        let mut out = Vec::with_capacity(items.len());
+        for (id, dto) in items {
+            if let Some(e) = self.update(&id, dto).await? {
+                out.push(e);
+            }
+        }
+        Ok(out)
+    }
+
+    /// 22. Partial-update many entities. Each item is `(id, field_map)`.
+    async fn bulk_partial_update(
+        &self,
+        items: Vec<(String, HashMap<String, serde_json::Value>)>,
+    ) -> Result<Vec<Entity>, Self::Error> {
+        let mut out = Vec::with_capacity(items.len());
+        for (id, fields) in items {
+            if let Some(e) = self.partial_update(&id, fields).await? {
+                out.push(e);
+            }
+        }
+        Ok(out)
+    }
 }
 
 // ============================================================
@@ -526,7 +672,7 @@ where
         use axum::{
             extract::Path,
             routing::{delete, patch, post, put},
-            Json, Router,
+            Router,
         };
 
         let handler = Arc::new(Self::new(service));
@@ -551,6 +697,49 @@ where
                 let h = handler.clone();
                 move |body: JsonOrForm<C>| async move {
                     Self::upsert_handler(h, body).await
+                }
+            }))
+            // POST /collection/delete/bulk - Bulk soft delete by ids
+            .route(&format!("{}/delete/bulk", base_path), post({
+                let h = handler.clone();
+                move |body: JsonOrForm<BatchIdsRequest>| async move {
+                    Self::bulk_delete_handler(h, body).await
+                }
+            }))
+            // POST /collection/restore/bulk - Bulk restore by ids
+            .route(&format!("{}/restore/bulk", base_path), post({
+                let h = handler.clone();
+                move |body: JsonOrForm<BatchIdsRequest>| async move {
+                    Self::bulk_restore_handler(h, body).await
+                }
+            }))
+            // POST /collection/restore/all - Restore all soft-deleted
+            .route(&format!("{}/restore/all", base_path), post({
+                let h = handler.clone();
+                move || async move {
+                    Self::restore_all_handler(h).await
+                }
+            }))
+            // DELETE /collection/trash/bulk - Bulk hard delete by ids
+            // (registered alongside /trash/:id; matchit prioritises the static segment)
+            .route(&format!("{}/trash/bulk", base_path), delete({
+                let h = handler.clone();
+                move |body: JsonOrForm<BatchIdsRequest>| async move {
+                    Self::bulk_permanent_delete_handler(h, body).await
+                }
+            }))
+            // PUT /collection/bulk - Bulk full update
+            .route(&format!("{}/bulk", base_path), put({
+                let h = handler.clone();
+                move |body: JsonOrForm<Vec<BulkUpdateItem<U>>>| async move {
+                    Self::bulk_update_handler(h, body).await
+                }
+            }))
+            // PATCH /collection/bulk - Bulk partial update (shared or per-id)
+            .route(&format!("{}/bulk", base_path), patch({
+                let h = handler.clone();
+                move |body: JsonOrForm<BulkPatchRequest>| async move {
+                    Self::bulk_patch_handler(h, body).await
                 }
             }))
             // DELETE /collection/empty - Empty trash
@@ -780,6 +969,128 @@ where
             Err(e) => {
                 (StatusCode::BAD_REQUEST, Json(ApiResponse::<BulkResponse<R>>::error(e.to_string())))
             }
+        }
+    }
+
+    // ── Batch handlers ────────────────────────────────────────────────────────
+
+    async fn bulk_delete_handler(
+        handler: Arc<Self>,
+        JsonOrForm(req): JsonOrForm<BatchIdsRequest>,
+    ) -> impl axum::response::IntoResponse {
+        use axum::{http::StatusCode, Json};
+
+        if let Some(err) = batch_size_error(req.ids.len()) {
+            return (StatusCode::BAD_REQUEST, Json(ApiResponse::<serde_json::Value>::error(err)));
+        }
+        match handler.service.bulk_soft_delete(req.ids).await {
+            Ok(count) => (StatusCode::OK, Json(ApiResponse::success_with_message(
+                serde_json::json!({ "soft_deleted": count }),
+                format!("Soft-deleted {count} item(s)"),
+            ))),
+            Err(e) => (StatusCode::BAD_REQUEST, Json(ApiResponse::<serde_json::Value>::error(e.to_string()))),
+        }
+    }
+
+    async fn bulk_restore_handler(
+        handler: Arc<Self>,
+        JsonOrForm(req): JsonOrForm<BatchIdsRequest>,
+    ) -> impl axum::response::IntoResponse {
+        use axum::{http::StatusCode, Json};
+
+        if let Some(err) = batch_size_error(req.ids.len()) {
+            return (StatusCode::BAD_REQUEST, Json(ApiResponse::<BulkResponse<R>>::error(err)));
+        }
+        match handler.service.bulk_restore(req.ids).await {
+            Ok(entities) => {
+                let items: Vec<R> = entities.into_iter().map(R::from).collect();
+                let total = items.len();
+                (StatusCode::OK, Json(ApiResponse::ok(BulkResponse { items, total, failed: 0, errors: vec![] })))
+            }
+            Err(e) => (StatusCode::BAD_REQUEST, Json(ApiResponse::<BulkResponse<R>>::error(e.to_string()))),
+        }
+    }
+
+    async fn restore_all_handler(
+        handler: Arc<Self>,
+    ) -> impl axum::response::IntoResponse {
+        use axum::{http::StatusCode, Json};
+
+        match handler.service.restore_all().await {
+            Ok(count) => (StatusCode::OK, Json(ApiResponse::success_with_message(
+                serde_json::json!({ "restored": count }),
+                format!("Restored {count} item(s) from trash"),
+            ))),
+            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<serde_json::Value>::error(e.to_string()))),
+        }
+    }
+
+    async fn bulk_permanent_delete_handler(
+        handler: Arc<Self>,
+        JsonOrForm(req): JsonOrForm<BatchIdsRequest>,
+    ) -> impl axum::response::IntoResponse {
+        use axum::{http::StatusCode, Json};
+
+        if let Some(err) = batch_size_error(req.ids.len()) {
+            return (StatusCode::BAD_REQUEST, Json(ApiResponse::<serde_json::Value>::error(err)));
+        }
+        match handler.service.bulk_permanent_delete(req.ids).await {
+            Ok(count) => (StatusCode::OK, Json(ApiResponse::success_with_message(
+                serde_json::json!({ "permanently_deleted": count }),
+                format!("Permanently deleted {count} item(s)"),
+            ))),
+            Err(e) => (StatusCode::BAD_REQUEST, Json(ApiResponse::<serde_json::Value>::error(e.to_string()))),
+        }
+    }
+
+    async fn bulk_update_handler(
+        handler: Arc<Self>,
+        JsonOrForm(items): JsonOrForm<Vec<BulkUpdateItem<U>>>,
+    ) -> impl axum::response::IntoResponse {
+        use axum::{http::StatusCode, Json};
+
+        if let Some(err) = batch_size_error(items.len()) {
+            return (StatusCode::BAD_REQUEST, Json(ApiResponse::<BulkResponse<R>>::error(err)));
+        }
+        let items: Vec<(String, U)> = items.into_iter().map(|it| (it.id, it.data)).collect();
+        match handler.service.bulk_update(items).await {
+            Ok(entities) => {
+                let items: Vec<R> = entities.into_iter().map(R::from).collect();
+                let total = items.len();
+                (StatusCode::OK, Json(ApiResponse::ok(BulkResponse { items, total, failed: 0, errors: vec![] })))
+            }
+            Err(e) => (StatusCode::BAD_REQUEST, Json(ApiResponse::<BulkResponse<R>>::error(e.to_string()))),
+        }
+    }
+
+    async fn bulk_patch_handler(
+        handler: Arc<Self>,
+        JsonOrForm(req): JsonOrForm<BulkPatchRequest>,
+    ) -> impl axum::response::IntoResponse {
+        use axum::{http::StatusCode, Json};
+
+        let items = req.into_items();
+        if let Some(err) = batch_size_error(items.len()) {
+            return (StatusCode::BAD_REQUEST, Json(ApiResponse::<BulkResponse<R>>::error(err)));
+        }
+        // Normalize patch keys to snake_case (mirrors partial_update_handler).
+        let items: Vec<(String, HashMap<String, serde_json::Value>)> = items
+            .into_iter()
+            .map(|(id, fields)| {
+                let fields = fields
+                    .into_iter()
+                    .map(|(k, v)| (camel_to_snake_case(&k), v))
+                    .collect();
+                (id, fields)
+            })
+            .collect();
+        match handler.service.bulk_partial_update(items).await {
+            Ok(entities) => {
+                let items: Vec<R> = entities.into_iter().map(R::from).collect();
+                let total = items.len();
+                (StatusCode::OK, Json(ApiResponse::ok(BulkResponse { items, total, failed: 0, errors: vec![] })))
+            }
+            Err(e) => (StatusCode::BAD_REQUEST, Json(ApiResponse::<BulkResponse<R>>::error(e.to_string()))),
         }
     }
 
@@ -1156,5 +1467,52 @@ mod tests {
     fn huge_page_number_does_not_overflow() {
         // saturating arithmetic keeps this a clean rejection, not a panic
         assert!(pagination_depth_error(u32::MAX, u32::MAX).is_some());
+    }
+
+    // ── Batch operations ──────────────────────────────────────────────────────
+
+    #[test]
+    fn batch_size_within_limit_is_allowed() {
+        assert!(batch_size_error(0).is_none());
+        assert!(batch_size_error(MAX_BATCH_SIZE).is_none());
+    }
+
+    #[test]
+    fn batch_size_over_limit_is_rejected() {
+        assert!(batch_size_error(MAX_BATCH_SIZE + 1).is_some());
+    }
+
+    #[test]
+    fn bulk_patch_request_parses_shared_shape() {
+        let json = r#"{ "ids": ["a", "b"], "patch": { "status": "void" } }"#;
+        let req: BulkPatchRequest = serde_json::from_str(json).unwrap();
+        let items = req.into_items();
+        assert_eq!(items.len(), 2);
+        // Both ids carry the same patch.
+        assert_eq!(items[0].1.get("status").unwrap(), "void");
+        assert_eq!(items[1].1.get("status").unwrap(), "void");
+        assert_eq!(items[0].0, "a");
+        assert_eq!(items[1].0, "b");
+    }
+
+    #[test]
+    fn bulk_patch_request_parses_per_item_shape() {
+        let json = r#"{ "items": [
+            { "id": "a", "patch": { "status": "void" } },
+            { "id": "b", "patch": { "note": "late" } }
+        ] }"#;
+        let req: BulkPatchRequest = serde_json::from_str(json).unwrap();
+        let items = req.into_items();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].0, "a");
+        assert_eq!(items[0].1.get("status").unwrap(), "void");
+        assert_eq!(items[1].0, "b");
+        assert_eq!(items[1].1.get("note").unwrap(), "late");
+    }
+
+    #[test]
+    fn batch_ids_request_parses() {
+        let req: BatchIdsRequest = serde_json::from_str(r#"{ "ids": ["x", "y", "z"] }"#).unwrap();
+        assert_eq!(req.ids, vec!["x", "y", "z"]);
     }
 }
