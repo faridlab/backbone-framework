@@ -512,6 +512,159 @@ where
             .await? as u64;
         Ok(count)
     }
+
+    // ── Atomic batch operations ───────────────────────────────────────────────
+    //
+    // Each runs inside a single transaction. For id-list operations the affected
+    // row count must equal the number of ids requested, otherwise the whole batch
+    // is rolled back — all-or-nothing semantics where a missing / already-in-the-
+    // target-state id (or a duplicate id) fails the entire request.
+
+    /// Soft-delete many active rows atomically.
+    pub async fn bulk_soft_delete(&self, ids: &[String]) -> Result<u64> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let placeholders = id_in_placeholders(ids.len());
+        let query = format!(
+            "UPDATE {} SET metadata = jsonb_set(\
+               COALESCE(metadata, '{{}}'), '{{deleted_at}}', to_jsonb(NOW())\
+             ) WHERE id IN ({placeholders}) AND (metadata->>'deleted_at') IS NULL",
+            self.table_name()
+        );
+        let mut tx = self.pool().begin().await?;
+        let mut q = sqlx::query(&query);
+        for id in ids {
+            q = q.bind(id);
+        }
+        let affected = q.execute(&mut *tx).await?.rows_affected();
+        if affected != ids.len() as u64 {
+            // `tx` is dropped here without commit → rolled back.
+            return Err(anyhow::anyhow!(
+                "bulk_soft_delete: {} of {} ids were not active/deletable; rolled back",
+                ids.len() as u64 - affected,
+                ids.len()
+            ));
+        }
+        tx.commit().await?;
+        Ok(affected)
+    }
+
+    /// Restore many soft-deleted rows atomically, returning the restored rows.
+    pub async fn bulk_restore(&self, ids: &[String]) -> Result<Vec<T>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = id_in_placeholders(ids.len());
+        let query = format!(
+            "UPDATE {} SET metadata = metadata - 'deleted_at' \
+             WHERE id IN ({placeholders}) AND (metadata->>'deleted_at') IS NOT NULL \
+             RETURNING *",
+            self.table_name()
+        );
+        let mut tx = self.pool().begin().await?;
+        let mut q = sqlx::query_as::<_, T>(&query);
+        for id in ids {
+            q = q.bind(id);
+        }
+        let rows = q.fetch_all(&mut *tx).await?;
+        if rows.len() != ids.len() {
+            return Err(anyhow::anyhow!(
+                "bulk_restore: {} of {} ids were not in trash; rolled back",
+                ids.len() - rows.len(),
+                ids.len()
+            ));
+        }
+        tx.commit().await?;
+        Ok(rows)
+    }
+
+    /// Permanently delete many soft-deleted rows atomically.
+    pub async fn bulk_permanent_delete(&self, ids: &[String]) -> Result<u64> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let placeholders = id_in_placeholders(ids.len());
+        let query = format!(
+            "DELETE FROM {} WHERE id IN ({placeholders}) AND (metadata->>'deleted_at') IS NOT NULL",
+            self.table_name()
+        );
+        let mut tx = self.pool().begin().await?;
+        let mut q = sqlx::query(&query);
+        for id in ids {
+            q = q.bind(id);
+        }
+        let affected = q.execute(&mut *tx).await?.rows_affected();
+        if affected != ids.len() as u64 {
+            return Err(anyhow::anyhow!(
+                "bulk_permanent_delete: {} of {} ids were not in trash; rolled back",
+                ids.len() as u64 - affected,
+                ids.len()
+            ));
+        }
+        tx.commit().await?;
+        Ok(affected)
+    }
+
+    /// Restore every soft-deleted row, returning the restored rows. A single
+    /// `UPDATE ... RETURNING` is atomic, and the returned rows let the service
+    /// layer emit a `Restored` event per entity.
+    pub async fn restore_all(&self) -> Result<Vec<T>> {
+        let query = format!(
+            "UPDATE {} SET metadata = metadata - 'deleted_at' \
+             WHERE (metadata->>'deleted_at') IS NOT NULL \
+             RETURNING *",
+            self.table_name()
+        );
+        let rows = sqlx::query_as::<_, T>(&query).fetch_all(self.pool()).await?;
+        Ok(rows)
+    }
+
+    /// Update many active rows atomically. Every entity must reference an
+    /// existing active (non-soft-deleted) row or the whole batch is rolled back.
+    pub async fn bulk_update(&self, entities: &[T]) -> Result<Vec<T>>
+    where
+        T: Serialize + Send + Sync,
+    {
+        bulk_update_rows(
+            self.pool(),
+            self.table_name(),
+            " AND t.metadata->>'deleted_at' IS NULL",
+            entities,
+        )
+        .await
+    }
+}
+
+/// Build `"$1::uuid, $2::uuid, …"` for an `id IN (…)` clause of `n` bound ids.
+fn id_in_placeholders(n: usize) -> String {
+    (1..=n)
+        .map(|i| format!("${i}::uuid"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Serialize an entity and return `(id, json_string, quoted_column_list)` for the
+/// `jsonb_populate_record` update query — shared by the per-mode `bulk_update`s.
+fn build_update_parts<T: Serialize>(entity: &T) -> Result<(String, String, String)> {
+    let json_value = serde_json::to_value(entity)?;
+    let json_obj = match json_value {
+        serde_json::Value::Object(obj) => obj,
+        _ => return Err(anyhow::anyhow!("entity must serialize to a JSON object")),
+    };
+    let id = json_obj
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("entity missing string 'id' field"))?
+        .to_string();
+    let column_names = json_obj
+        .keys()
+        .filter(|k| *k != "id")
+        .map(|k| format!("\"{k}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let json_str = serde_json::to_string(&json_obj)?;
+    Ok((id, json_str, column_names))
 }
 
 // ─── HardDelete mode ─────────────────────────────────────────────────────────
@@ -624,4 +777,87 @@ where
             pagination: PaginationInfo::new(pagination.page, pagination.per_page, total),
         })
     }
+
+    // ── Atomic batch operations ───────────────────────────────────────────────
+
+    /// Hard-delete many rows atomically. Rolls back unless every id matched.
+    pub async fn bulk_delete(&self, ids: &[String]) -> Result<u64> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let placeholders = id_in_placeholders(ids.len());
+        let query = format!(
+            "DELETE FROM {} WHERE id IN ({placeholders})",
+            self.table_name()
+        );
+        let mut tx = self.pool().begin().await?;
+        let mut q = sqlx::query(&query);
+        for id in ids {
+            q = q.bind(id);
+        }
+        let affected = q.execute(&mut *tx).await?.rows_affected();
+        if affected != ids.len() as u64 {
+            return Err(anyhow::anyhow!(
+                "bulk_delete: {} of {} ids not found; rolled back",
+                ids.len() as u64 - affected,
+                ids.len()
+            ));
+        }
+        tx.commit().await?;
+        Ok(affected)
+    }
+
+    /// Update many rows atomically. No soft-delete guard in this mode.
+    pub async fn bulk_update(&self, entities: &[T]) -> Result<Vec<T>> {
+        bulk_update_rows(self.pool(), self.table_name(), "", entities).await
+    }
+}
+
+/// Shared transactional bulk-update used by both delete modes. Each entity is
+/// updated by id inside one transaction; a missing (or, with `active_guard`,
+/// soft-deleted) row rolls the whole batch back. `active_guard` is an extra SQL
+/// predicate ANDed into the `WHERE` clause (`""` for none).
+async fn bulk_update_rows<T>(
+    pool: &PgPool,
+    table: &str,
+    active_guard: &str,
+    entities: &[T],
+) -> Result<Vec<T>>
+where
+    T: for<'r> FromRow<'r, PgRow> + Send + Sync + Unpin + Serialize,
+{
+    if entities.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut tx = pool.begin().await?;
+    let mut out = Vec::with_capacity(entities.len());
+    for entity in entities {
+        let (id, json_str, column_names) = build_update_parts(entity)?;
+        let query = format!(
+            "WITH new_row AS (\
+                SELECT (jsonb_populate_record(NULL::{table}, $1::jsonb)).*\
+             ) UPDATE {table} AS t \
+             SET ({columns}) = (SELECT {columns} FROM new_row) \
+             WHERE t.id = $2::uuid{guard} \
+             RETURNING t.*",
+            table = table,
+            columns = column_names,
+            guard = active_guard,
+        );
+        let updated = sqlx::query_as::<_, T>(&query)
+            .bind(&json_str)
+            .bind(&id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        match updated {
+            Some(e) => out.push(e),
+            None => {
+                return Err(anyhow::anyhow!(
+                    "bulk_update: id '{id}' not found or already deleted; rolled back"
+                ));
+            }
+        }
+    }
+    tx.commit().await?;
+    Ok(out)
 }
