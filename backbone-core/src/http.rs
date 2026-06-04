@@ -97,6 +97,21 @@ pub struct ListQueryParams {
 fn default_page() -> u32 { 1 }
 fn default_limit() -> u32 { 20 }
 
+/// Classify a list/query error as a client fault (bad filter or sort key) vs a
+/// genuine server fault.
+///
+/// Unknown query params flow into the filter map and are injected as column
+/// names, so a typo or a stray param (e.g. camelCase `sortOrder`) surfaces as a
+/// Postgres `column "..." does not exist` (SQLSTATE 42703) or an
+/// `invalid input syntax` cast error. Those are caused by the request, so they
+/// should be a 400, not a 500.
+fn is_bad_query_error(msg: &str) -> bool {
+    let m = msg.to_lowercase();
+    m.contains("does not exist")
+        || m.contains("invalid input syntax")
+        || m.contains("42703")
+}
+
 /// Pagination response metadata
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PaginationResponse {
@@ -579,7 +594,14 @@ where
                 (StatusCode::OK, Json(response))
             }
             Err(e) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, Json(PaginatedApiResponse::<R>::error(e.to_string())))
+                let msg = e.to_string();
+                if is_bad_query_error(&msg) {
+                    (StatusCode::BAD_REQUEST, Json(PaginatedApiResponse::<R>::error(
+                        format!("Invalid query parameter or filter: {msg}"),
+                    )))
+                } else {
+                    (StatusCode::INTERNAL_SERVER_ERROR, Json(PaginatedApiResponse::<R>::error(msg)))
+                }
             }
         }
     }
@@ -758,7 +780,14 @@ where
                 (StatusCode::OK, Json(response))
             }
             Err(e) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, Json(PaginatedApiResponse::<R>::error(e.to_string())))
+                let msg = e.to_string();
+                if is_bad_query_error(&msg) {
+                    (StatusCode::BAD_REQUEST, Json(PaginatedApiResponse::<R>::error(
+                        format!("Invalid query parameter or filter: {msg}"),
+                    )))
+                } else {
+                    (StatusCode::INTERNAL_SERVER_ERROR, Json(PaginatedApiResponse::<R>::error(msg)))
+                }
             }
         }
     }
