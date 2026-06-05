@@ -97,6 +97,43 @@ pub struct ListQueryParams {
 fn default_page() -> u32 { 1 }
 fn default_limit() -> u32 { 20 }
 
+/// Reserved response-shaping query keys (carved out of the filter grammar).
+const RESERVED_QUERY_KEYS: [&str; 3] = ["fields", "include", "with"];
+
+/// Parse the reserved `fields` key (comma-separated) into trimmed field names.
+/// Absent/empty → empty vec, meaning "no projection — return every field".
+fn sparse_fields(query: &HashMap<String, String>) -> Vec<String> {
+    query
+        .get("fields")
+        .map(|s| {
+            s.split(',')
+                .map(str::trim)
+                .filter(|f| !f.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Serialize a response DTO to a JSON value (for sparse-field projection).
+/// Serialization is infallible for the generated plain-serde DTOs; fall back to null.
+fn to_response_value<R: Serialize>(r: R) -> serde_json::Value {
+    serde_json::to_value(r).unwrap_or(serde_json::Value::Null)
+}
+
+/// Apply a sparse fieldset to an already-serialized response object: keep only the
+/// requested top-level keys plus the always-on core (`id`). Non-objects and an empty
+/// request are returned unchanged; unknown requested keys are ignored.
+fn project_sparse(mut value: serde_json::Value, fields: &[String]) -> serde_json::Value {
+    if fields.is_empty() {
+        return value;
+    }
+    if let serde_json::Value::Object(map) = &mut value {
+        map.retain(|k, _| k == "id" || fields.iter().any(|f| f == k));
+    }
+    value
+}
+
 /// Hard cap on page size. Mirrors the clamp in
 /// `backbone_orm::PaginationParams::new` (`per_page.clamp(1, 100)`); kept here so
 /// the offset-depth check below computes the same effective offset the DB uses.
@@ -622,15 +659,15 @@ where
             // GET /collection/:id - Get by ID
             .route(&format!("{}/:id", base_path), get({
                 let h = handler.clone();
-                move |path: Path<String>| async move {
-                    Self::get_handler(h, path).await
+                move |path: Path<String>, query: Query<ListQueryParams>| async move {
+                    Self::get_handler(h, path, query).await
                 }
             }))
             // GET /collection/:id/deleted - Get deleted by ID
             .route(&format!("{}/:id/deleted", base_path), get({
                 let h = handler.clone();
-                move |path: Path<String>| async move {
-                    Self::get_deleted_handler(h, path).await
+                move |path: Path<String>, query: Query<ListQueryParams>| async move {
+                    Self::get_deleted_handler(h, path, query).await
                 }
             }))
             // GET /collection/count - Count active entities
@@ -797,11 +834,18 @@ where
         use axum::{http::StatusCode, Json};
 
         if let Some(err) = pagination_depth_error(params.page, params.limit) {
-            return (StatusCode::BAD_REQUEST, Json(PaginatedApiResponse::<R>::error(err)));
+            return (StatusCode::BAD_REQUEST, Json(PaginatedApiResponse::<serde_json::Value>::error(err)));
         }
+
+        // Sparse fieldset (`?fields=a,b,c`) is response-shaping, not a filter — read it,
+        // then drop the reserved keys so they're never passed to the repository.
+        let fields = sparse_fields(&params.filters);
 
         // Merge search and status into filters HashMap
         let mut filters = params.filters.clone();
+        for key in RESERVED_QUERY_KEYS {
+            filters.remove(key);
+        }
         if let Some(search) = params.search {
             filters.insert("search".to_string(), search);
         }
@@ -811,18 +855,21 @@ where
 
         match handler.service.list(params.page, params.limit, filters).await {
             Ok((entities, total)) => {
-                let items: Vec<R> = entities.into_iter().map(R::from).collect();
+                let items: Vec<serde_json::Value> = entities
+                    .into_iter()
+                    .map(|e| project_sparse(to_response_value(R::from(e)), &fields))
+                    .collect();
                 let response = PaginatedApiResponse::ok(items, total, params.page, params.limit);
                 (StatusCode::OK, Json(response))
             }
             Err(e) => {
                 let msg = e.to_string();
                 if is_bad_query_error(&msg) {
-                    (StatusCode::BAD_REQUEST, Json(PaginatedApiResponse::<R>::error(
+                    (StatusCode::BAD_REQUEST, Json(PaginatedApiResponse::<serde_json::Value>::error(
                         format!("Invalid query parameter or filter: {msg}"),
                     )))
                 } else {
-                    (StatusCode::INTERNAL_SERVER_ERROR, Json(PaginatedApiResponse::<R>::error(msg)))
+                    (StatusCode::INTERNAL_SERVER_ERROR, Json(PaginatedApiResponse::<serde_json::Value>::error(msg)))
                 }
             }
         }
@@ -853,19 +900,22 @@ where
     async fn get_handler(
         handler: Arc<Self>,
         axum::extract::Path(id): axum::extract::Path<String>,
+        axum::extract::Query(params): axum::extract::Query<ListQueryParams>,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
 
+        let fields = sparse_fields(&params.filters);
+
         match handler.service.get_by_id(&id).await {
             Ok(Some(entity)) => {
-                let response: R = entity.into();
-                (StatusCode::OK, Json(ApiResponse::ok(response)))
+                let value = project_sparse(to_response_value(R::from(entity)), &fields);
+                (StatusCode::OK, Json(ApiResponse::ok(value)))
             }
             Ok(None) => {
-                (StatusCode::NOT_FOUND, Json(ApiResponse::<R>::not_found(S::entity_name(), &id)))
+                (StatusCode::NOT_FOUND, Json(ApiResponse::<serde_json::Value>::not_found(S::entity_name(), &id)))
             }
             Err(e) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<R>::error(e.to_string())))
+                (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<serde_json::Value>::error(e.to_string())))
             }
         }
     }
@@ -1118,23 +1168,28 @@ where
         use axum::{http::StatusCode, Json};
 
         if let Some(err) = pagination_depth_error(params.page, params.limit) {
-            return (StatusCode::BAD_REQUEST, Json(PaginatedApiResponse::<R>::error(err)));
+            return (StatusCode::BAD_REQUEST, Json(PaginatedApiResponse::<serde_json::Value>::error(err)));
         }
+
+        let fields = sparse_fields(&params.filters);
 
         match handler.service.list_deleted(params.page, params.limit).await {
             Ok((entities, total)) => {
-                let items: Vec<R> = entities.into_iter().map(R::from).collect();
+                let items: Vec<serde_json::Value> = entities
+                    .into_iter()
+                    .map(|e| project_sparse(to_response_value(R::from(e)), &fields))
+                    .collect();
                 let response = PaginatedApiResponse::ok(items, total, params.page, params.limit);
                 (StatusCode::OK, Json(response))
             }
             Err(e) => {
                 let msg = e.to_string();
                 if is_bad_query_error(&msg) {
-                    (StatusCode::BAD_REQUEST, Json(PaginatedApiResponse::<R>::error(
+                    (StatusCode::BAD_REQUEST, Json(PaginatedApiResponse::<serde_json::Value>::error(
                         format!("Invalid query parameter or filter: {msg}"),
                     )))
                 } else {
-                    (StatusCode::INTERNAL_SERVER_ERROR, Json(PaginatedApiResponse::<R>::error(msg)))
+                    (StatusCode::INTERNAL_SERVER_ERROR, Json(PaginatedApiResponse::<serde_json::Value>::error(msg)))
                 }
             }
         }
@@ -1182,19 +1237,22 @@ where
     async fn get_deleted_handler(
         handler: Arc<Self>,
         axum::extract::Path(id): axum::extract::Path<String>,
+        axum::extract::Query(params): axum::extract::Query<ListQueryParams>,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
 
+        let fields = sparse_fields(&params.filters);
+
         match handler.service.get_deleted_by_id(&id).await {
             Ok(Some(entity)) => {
-                let response: R = entity.into();
-                (StatusCode::OK, Json(ApiResponse::ok(response)))
+                let value = project_sparse(to_response_value(R::from(entity)), &fields);
+                (StatusCode::OK, Json(ApiResponse::ok(value)))
             }
             Ok(None) => {
-                (StatusCode::NOT_FOUND, Json(ApiResponse::<R>::not_found(&format!("Deleted {}", S::entity_name()), &id)))
+                (StatusCode::NOT_FOUND, Json(ApiResponse::<serde_json::Value>::not_found(&format!("Deleted {}", S::entity_name()), &id)))
             }
             Err(e) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<R>::error(e.to_string())))
+                (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<serde_json::Value>::error(e.to_string())))
             }
         }
     }
@@ -1514,5 +1572,59 @@ mod tests {
     fn batch_ids_request_parses() {
         let req: BatchIdsRequest = serde_json::from_str(r#"{ "ids": ["x", "y", "z"] }"#).unwrap();
         assert_eq!(req.ids, vec!["x", "y", "z"]);
+    }
+
+    // ── Sparse fieldsets (?fields=a,b,c) ──
+
+    fn fields(q: &[(&str, &str)]) -> Vec<String> {
+        let map: HashMap<String, String> =
+            q.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        sparse_fields(&map)
+    }
+
+    #[test]
+    fn sparse_fields_parses_comma_list_and_trims() {
+        assert_eq!(fields(&[("fields", "id, name ,basePrice")]), vec!["id", "name", "basePrice"]);
+    }
+
+    #[test]
+    fn sparse_fields_absent_or_empty_is_no_projection() {
+        assert!(fields(&[]).is_empty());
+        assert!(fields(&[("fields", "")]).is_empty());
+        assert!(fields(&[("fields", " , ")]).is_empty());
+    }
+
+    #[test]
+    fn project_keeps_requested_keys_plus_id() {
+        let v = serde_json::json!({ "id": "1", "name": "n", "basePrice": 10, "hppPerUnit": 5 });
+        let out = project_sparse(v, &["name".into(), "basePrice".into()]);
+        assert_eq!(out, serde_json::json!({ "id": "1", "name": "n", "basePrice": 10 }));
+    }
+
+    #[test]
+    fn project_always_includes_id_even_if_not_requested() {
+        let v = serde_json::json!({ "id": "1", "name": "n" });
+        let out = project_sparse(v, &["name".into()]);
+        assert_eq!(out, serde_json::json!({ "id": "1", "name": "n" }));
+    }
+
+    #[test]
+    fn project_ignores_unknown_keys() {
+        let v = serde_json::json!({ "id": "1", "name": "n" });
+        let out = project_sparse(v, &["name".into(), "nope".into()]);
+        assert_eq!(out, serde_json::json!({ "id": "1", "name": "n" }));
+    }
+
+    #[test]
+    fn project_empty_fields_returns_full_object() {
+        let v = serde_json::json!({ "id": "1", "name": "n", "x": 2 });
+        let out = project_sparse(v.clone(), &[]);
+        assert_eq!(out, v);
+    }
+
+    #[test]
+    fn project_non_object_returned_unchanged() {
+        let v = serde_json::json!("scalar");
+        assert_eq!(project_sparse(v.clone(), &["name".into()]), v);
     }
 }
