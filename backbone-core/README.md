@@ -1,7 +1,7 @@
 # Backbone Core
 
 **Status:** ✅ FULLY IMPLEMENTED
-**Last Updated:** 2026-06-02
+**Last Updated:** 2026-06-06
 
 🦴 **Foundation for generic CRUD system with 11 standard endpoints**
 
@@ -17,6 +17,16 @@ Backbone Core is a foundational library that provides generic CRUD (Create, Read
 - [Testing](#testing)
 - [Contributing](#contributing)
 
+## 📖 Documentation
+
+In-depth guides live in [`docs/`](docs/README.md):
+
+- [architecture.md](docs/architecture.md) — how the crate is structured
+- [usage.md](docs/usage.md) — wire up CRUD for your entity, with examples
+- [api-reference.md](docs/api-reference.md) — every endpoint, query param, and response shape
+- [configuration.md](docs/configuration.md) — feature flags and runtime limits
+- [openapi.md](docs/openapi.md) — generate & serve an OpenAPI/Swagger spec (feature `openapi`)
+
 ## 🎯 Overview
 
 Backbone Core is a **protocol-agnostic, generic CRUD foundation** that enables any service to automatically get:
@@ -28,6 +38,7 @@ Backbone Core is a **protocol-agnostic, generic CRUD foundation** that enables a
 - ✅ **Type-safe generic implementations**
 - ✅ **JSON or form-encoded request bodies** (auto-detected by `Content-Type`)
 - ✅ **Production-ready error handling**
+- ✅ **Optional OpenAPI/Swagger schema generation** (feature `openapi`, default-off)
 
 ### The 11 Backbone Endpoints
 
@@ -77,6 +88,12 @@ capped at `MAX_BATCH_SIZE` (1,000) items; larger payloads are rejected with
   prompting clients to add filters instead.
 - **Filtering**: HashMap-based field filtering
 - **Sorting**: Multi-field sorting with configurable order
+- **Sparse fieldsets**: read endpoints (`list`, `get_by_id`, `list_deleted`,
+  `get_deleted_by_id`) accept `?fields=a,b,c` to trim each response object to the
+  requested top-level keys plus the always-on `id`. Comma-separated, whitespace-
+  trimmed; unknown keys are ignored and an empty/absent value returns every field.
+  `fields`, `include`, and `with` are reserved query keys — stripped before
+  filters reach the repository, so they never leak into the `WHERE` clause.
 - **Client-error aware**: list/query endpoints return `400 Bad Request` (not
   `500`) when a bad filter or sort key produces a Postgres
   `column "..." does not exist` (SQLSTATE 42703) or `invalid input syntax`
@@ -243,6 +260,18 @@ prost = "0.13"
 axum = "0.7"
 tower = "0.4"
 ```
+
+### Feature flags
+
+All optional capabilities are **off by default** (this crate is plumbing — pull only what
+you need). See [docs/configuration.md](docs/configuration.md) for the full matrix.
+
+| Feature | Enables |
+|---------|---------|
+| `postgres` / `database` | `sqlx`-backed `PostgresRepository` |
+| `prost` | Protobuf well-known types for gRPC |
+| `openapi` | `utoipa::ToSchema` on the HTTP types + `openapi::BackboneComponents` |
+| `full` | `postgres` + `prost` |
 
 ## 🤝 Contributing
 

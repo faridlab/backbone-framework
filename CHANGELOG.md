@@ -15,6 +15,35 @@ back to `## [Unreleased]`.
 
 ## [Unreleased]
 
+### Added
+- `backbone-core`: optional OpenAPI/Swagger support behind a default-off `openapi`
+  feature. Enabling it derives `utoipa::ToSchema` on the shared HTTP envelope/request
+  types (`ApiResponse`, `PaginatedApiResponse`, `PaginationResponse`, `BulkResponse`,
+  `BulkCreateRequest`, `UpsertRequest`, `BatchIdsRequest`, `BulkUpdateItem`,
+  `BulkPatchItem`, `BulkPatchRequest`, `FilterOptions`, `SortOrder`, `ListQueryParams`,
+  `ListRequest`, `PaginationRequest`) and exposes `openapi::BackboneComponents`, a
+  reusable `utoipa::OpenApi` document of the non-generic component schemas that
+  downstream entity crates merge into their own spec. The default build is unchanged —
+  no `utoipa` in the dependency graph without the feature.
+- `backbone-core`: a multi-file `docs/` set — `architecture.md`, `usage.md`,
+  `api-reference.md` (all 21 endpoints, query grammar, response envelopes, status
+  codes), `configuration.md`, `openapi.md` (utoipa + Swagger UI guide), an index
+  `README.md`, and a copy-paste `openapi.template.yaml` (OpenAPI 3.1) for teams not
+  wiring utoipa.
+- `backbone-core`: sparse fieldsets on read endpoints. `list`, `get_by_id`,
+  `list_deleted`, and `get_deleted_by_id` accept `?fields=a,b,c` to project each
+  response object down to the requested top-level keys plus the always-on `id`,
+  letting clients trim response payloads. Field names are comma-separated and
+  whitespace-trimmed; unknown keys are ignored and an absent/empty value returns
+  every field. `fields`, `include`, and `with` are reserved response-shaping
+  query keys — stripped from the filter map before it reaches the repository, so
+  they never leak into the `WHERE` clause.
+
+### Changed
+- `backbone-core`: re-export `PaginatedApiResponse`, `BatchIdsRequest`, `BulkUpdateItem`,
+  `BulkPatchItem`, and `BulkPatchRequest` from the crate root (previously only reachable
+  via `backbone_core::http::…`).
+
 ## [2.3.0]
 
 ### Added
