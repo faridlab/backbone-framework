@@ -136,6 +136,50 @@ fn project_sparse(mut value: serde_json::Value, fields: &[String]) -> serde_json
     value
 }
 
+/// Per-request access scope for field-level security, injected by the application's
+/// auth middleware as an axum `Extension`. `Platform` sees every field (e.g. a
+/// superadmin / root); `Tenant(id)` is scoped to one owner id, compared against an
+/// entity's `@owner` field to decide whether `@private` fields are visible.
+#[derive(Debug, Clone)]
+pub enum AccessScope {
+    /// Full visibility — platform/root caller.
+    Platform,
+    /// Scoped to a single owner/tenant id (e.g. the caller's provider id).
+    Tenant(String),
+}
+
+/// Enforce field-level security on an already-serialized response object: strip the
+/// entity's `@private` fields unless the caller may see them. Visibility rule —
+/// `Platform` → all; `Tenant(id)` → only when the row's `@owner` field equals `id`;
+/// absent scope → treated as non-owner (fail-closed). Runs BEFORE sparse projection
+/// so the security ceiling always beats a `?fields=` request.
+fn apply_field_security(
+    mut value: serde_json::Value,
+    scope: Option<&AccessScope>,
+    private_fields: &[&str],
+    owner_field: Option<&str>,
+) -> serde_json::Value {
+    if private_fields.is_empty() {
+        return value;
+    }
+    let can_see_private = match scope {
+        Some(AccessScope::Platform) => true,
+        Some(AccessScope::Tenant(id)) => owner_field
+            .and_then(|f| value.get(f))
+            .and_then(|v| v.as_str())
+            .is_some_and(|owner| owner == id),
+        None => false,
+    };
+    if !can_see_private {
+        if let serde_json::Value::Object(map) = &mut value {
+            for f in private_fields {
+                map.remove(*f);
+            }
+        }
+    }
+    value
+}
+
 /// Hard cap on page size. Mirrors the clamp in
 /// `backbone_orm::PaginationParams::new` (`per_page.clamp(1, 100)`); kept here so
 /// the offset-depth check below computes the same effective offset the DB uses.
@@ -592,7 +636,7 @@ where
 impl<S, E, C, U, R> BackboneCrudHandler<S, E, C, U, R>
 where
     S: CrudService<E, C, U> + 'static,
-    E: Serialize + Send + Sync + Clone + 'static,
+    E: Serialize + Send + Sync + Clone + backbone_orm::EntityRepoMeta + 'static,
     C: DeserializeOwned + Send + Sync + 'static,
     U: DeserializeOwned + Send + Sync + 'static,
     R: From<E> + Serialize + Send + Sync + 'static,
@@ -655,7 +699,7 @@ where
         use axum::{
             extract::{Path, Query},
             routing::get,
-            Router,
+            Extension, Router,
         };
 
         let handler = Arc::new(Self::new(service));
@@ -664,29 +708,29 @@ where
             // GET /collection - List
             .route(base_path, get({
                 let h = handler.clone();
-                move |query: Query<ListQueryParams>| async move {
-                    Self::list_handler(h, query).await
+                move |query: Query<ListQueryParams>, access: Option<Extension<AccessScope>>| async move {
+                    Self::list_handler(h, query, access).await
                 }
             }))
             // GET /collection/trash - List deleted
             .route(&format!("{}/trash", base_path), get({
                 let h = handler.clone();
-                move |query: Query<ListQueryParams>| async move {
-                    Self::list_deleted_handler(h, query).await
+                move |query: Query<ListQueryParams>, access: Option<Extension<AccessScope>>| async move {
+                    Self::list_deleted_handler(h, query, access).await
                 }
             }))
             // GET /collection/:id - Get by ID
             .route(&format!("{}/:id", base_path), get({
                 let h = handler.clone();
-                move |path: Path<String>, query: Query<ListQueryParams>| async move {
-                    Self::get_handler(h, path, query).await
+                move |path: Path<String>, query: Query<ListQueryParams>, access: Option<Extension<AccessScope>>| async move {
+                    Self::get_handler(h, path, query, access).await
                 }
             }))
             // GET /collection/:id/deleted - Get deleted by ID
             .route(&format!("{}/:id/deleted", base_path), get({
                 let h = handler.clone();
-                move |path: Path<String>, query: Query<ListQueryParams>| async move {
-                    Self::get_deleted_handler(h, path, query).await
+                move |path: Path<String>, query: Query<ListQueryParams>, access: Option<Extension<AccessScope>>| async move {
+                    Self::get_deleted_handler(h, path, query, access).await
                 }
             }))
             // GET /collection/count - Count active entities
@@ -849,6 +893,7 @@ where
     async fn list_handler(
         handler: Arc<Self>,
         axum::extract::Query(params): axum::extract::Query<ListQueryParams>,
+        access: Option<axum::Extension<AccessScope>>,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
 
@@ -859,6 +904,7 @@ where
         // Sparse fieldset (`?fields=a,b,c`) is response-shaping, not a filter — read it,
         // then drop the reserved keys so they're never passed to the repository.
         let fields = sparse_fields(&params.filters);
+        let scope = access.map(|axum::Extension(s)| s);
 
         // Merge search and status into filters HashMap
         let mut filters = params.filters.clone();
@@ -876,7 +922,15 @@ where
             Ok((entities, total)) => {
                 let items: Vec<serde_json::Value> = entities
                     .into_iter()
-                    .map(|e| project_sparse(to_response_value(R::from(e)), &fields))
+                    .map(|e| {
+                        let secured = apply_field_security(
+                            to_response_value(R::from(e)),
+                            scope.as_ref(),
+                            E::private_fields(),
+                            E::owner_field(),
+                        );
+                        project_sparse(secured, &fields)
+                    })
                     .collect();
                 let response = PaginatedApiResponse::ok(items, total, params.page, params.limit);
                 (StatusCode::OK, Json(response))
@@ -920,14 +974,22 @@ where
         handler: Arc<Self>,
         axum::extract::Path(id): axum::extract::Path<String>,
         axum::extract::Query(params): axum::extract::Query<ListQueryParams>,
+        access: Option<axum::Extension<AccessScope>>,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
 
         let fields = sparse_fields(&params.filters);
+        let scope = access.map(|axum::Extension(s)| s);
 
         match handler.service.get_by_id(&id).await {
             Ok(Some(entity)) => {
-                let value = project_sparse(to_response_value(R::from(entity)), &fields);
+                let secured = apply_field_security(
+                    to_response_value(R::from(entity)),
+                    scope.as_ref(),
+                    E::private_fields(),
+                    E::owner_field(),
+                );
+                let value = project_sparse(secured, &fields);
                 (StatusCode::OK, Json(ApiResponse::ok(value)))
             }
             Ok(None) => {
@@ -1183,6 +1245,7 @@ where
     async fn list_deleted_handler(
         handler: Arc<Self>,
         axum::extract::Query(params): axum::extract::Query<ListQueryParams>,
+        access: Option<axum::Extension<AccessScope>>,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
 
@@ -1191,12 +1254,21 @@ where
         }
 
         let fields = sparse_fields(&params.filters);
+        let scope = access.map(|axum::Extension(s)| s);
 
         match handler.service.list_deleted(params.page, params.limit).await {
             Ok((entities, total)) => {
                 let items: Vec<serde_json::Value> = entities
                     .into_iter()
-                    .map(|e| project_sparse(to_response_value(R::from(e)), &fields))
+                    .map(|e| {
+                        let secured = apply_field_security(
+                            to_response_value(R::from(e)),
+                            scope.as_ref(),
+                            E::private_fields(),
+                            E::owner_field(),
+                        );
+                        project_sparse(secured, &fields)
+                    })
                     .collect();
                 let response = PaginatedApiResponse::ok(items, total, params.page, params.limit);
                 (StatusCode::OK, Json(response))
@@ -1257,14 +1329,22 @@ where
         handler: Arc<Self>,
         axum::extract::Path(id): axum::extract::Path<String>,
         axum::extract::Query(params): axum::extract::Query<ListQueryParams>,
+        access: Option<axum::Extension<AccessScope>>,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
 
         let fields = sparse_fields(&params.filters);
+        let scope = access.map(|axum::Extension(s)| s);
 
         match handler.service.get_deleted_by_id(&id).await {
             Ok(Some(entity)) => {
-                let value = project_sparse(to_response_value(R::from(entity)), &fields);
+                let secured = apply_field_security(
+                    to_response_value(R::from(entity)),
+                    scope.as_ref(),
+                    E::private_fields(),
+                    E::owner_field(),
+                );
+                let value = project_sparse(secured, &fields);
                 (StatusCode::OK, Json(ApiResponse::ok(value)))
             }
             Ok(None) => {
@@ -1646,5 +1726,62 @@ mod tests {
     fn project_non_object_returned_unchanged() {
         let v = serde_json::json!("scalar");
         assert_eq!(project_sparse(v.clone(), &["name".into()]), v);
+    }
+
+    // ── Field-level security (@private / @owner) ──
+
+    fn row() -> serde_json::Value {
+        serde_json::json!({ "id": "1", "providerId": "prov-A", "name": "n", "hppPerUnit": 5 })
+    }
+    const PRIV: &[&str] = &["hppPerUnit"];
+
+    #[test]
+    fn security_no_private_fields_is_noop() {
+        let v = row();
+        assert_eq!(apply_field_security(v.clone(), None, &[], Some("providerId")), v);
+    }
+
+    #[test]
+    fn security_platform_sees_private() {
+        let out = apply_field_security(row(), Some(&AccessScope::Platform), PRIV, Some("providerId"));
+        assert!(out.get("hppPerUnit").is_some());
+    }
+
+    #[test]
+    fn security_owner_tenant_sees_private() {
+        let out = apply_field_security(
+            row(),
+            Some(&AccessScope::Tenant("prov-A".into())),
+            PRIV,
+            Some("providerId"),
+        );
+        assert!(out.get("hppPerUnit").is_some());
+    }
+
+    #[test]
+    fn security_other_tenant_stripped() {
+        let out = apply_field_security(
+            row(),
+            Some(&AccessScope::Tenant("prov-B".into())),
+            PRIV,
+            Some("providerId"),
+        );
+        assert!(out.get("hppPerUnit").is_none());
+        assert!(out.get("name").is_some());
+    }
+
+    #[test]
+    fn security_absent_scope_fails_closed() {
+        let out = apply_field_security(row(), None, PRIV, Some("providerId"));
+        assert!(out.get("hppPerUnit").is_none());
+    }
+
+    #[test]
+    fn security_null_owner_only_platform_sees() {
+        let v = serde_json::json!({ "id": "1", "providerId": null, "hppPerUnit": 5 });
+        let tenant = apply_field_security(v.clone(), Some(&AccessScope::Tenant("prov-A".into())), PRIV, Some("providerId"));
+        assert!(tenant.get("hppPerUnit").is_none());
+        let plat = apply_field_security(v, Some(&AccessScope::Platform), PRIV, Some("providerId"));
+        assert!(plat.get("hppPerUnit").is_some());
     }
 }

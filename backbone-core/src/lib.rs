@@ -139,6 +139,8 @@ pub use http::{
     CrudService,
     BackboneCrudHandler,
     BackboneHttpHandler,
+    // Field-level security scope (injected by the app's auth middleware)
+    AccessScope,
     // Response types
     ApiResponse,
     PaginatedResponse,

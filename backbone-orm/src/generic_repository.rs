@@ -64,6 +64,23 @@ pub trait EntityRepoMeta {
     fn column_types() -> HashMap<String, String>;
     /// Text columns to include in full-text / ILIKE search.
     fn search_fields() -> &'static [&'static str];
+
+    // ── Field-level security (response shaping) ──
+    // Names below are RESPONSE JSON keys (camelCase), not DB columns — they are
+    // matched against the serialized response object. Defaults = no restriction.
+
+    /// Response fields visible only to the row owner and platform/root callers
+    /// (`@private`). Stripped for everyone else.
+    fn private_fields() -> &'static [&'static str] {
+        &[]
+    }
+
+    /// The response field (camelCase) holding the owner/tenant id (`@owner`),
+    /// compared against the caller's access scope to decide private-field
+    /// visibility. `None` = the entity has no owner concept.
+    fn owner_field() -> Option<&'static str> {
+        None
+    }
 }
 
 // ─── Delete-mode markers ──────────────────────────────────────────────────────
