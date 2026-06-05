@@ -1,0 +1,339 @@
+# =============================================================================
+# Backbone Core — generic CRUD OpenAPI template (Path B, no compile-time deps)
+#
+# Copy this file per service and replace the placeholders:
+#   {collection}    -> path segment for the resource          e.g. products
+#   {basePath}      -> full mount base                        e.g. /api/v1/products
+#   {ItemSchema}    -> response schema name for one entity    e.g. Product
+#   {CreateSchema}  -> create DTO schema name                 e.g. CreateProduct
+#   {UpdateSchema}  -> update DTO schema name                 e.g. UpdateProduct
+#
+# Then define {ItemSchema}/{CreateSchema}/{UpdateSchema} under components.schemas.
+# Covers all 21 endpoints produced by BackboneCrudHandler::routes.
+# See docs/openapi.md and docs/api-reference.md.
+# =============================================================================
+openapi: 3.1.0
+info:
+  title: "{collection} API"
+  version: "1.0.0"
+  description: "Generic Backbone CRUD surface for the {collection} resource."
+
+paths:
+  "{basePath}":
+    get:
+      summary: List active {collection}
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/SortBy"
+        - $ref: "#/components/parameters/SortOrder"
+        - $ref: "#/components/parameters/Search"
+        - $ref: "#/components/parameters/Status"
+        - $ref: "#/components/parameters/Fields"
+      responses:
+        "200": { $ref: "#/components/responses/PaginatedItem" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+    post:
+      summary: Create one {collection}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/{CreateSchema}" }
+      responses:
+        "201": { $ref: "#/components/responses/SingleItem" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  "{basePath}/{id}":
+    parameters: [ { $ref: "#/components/parameters/Id" } ]
+    get:
+      summary: Get one active {collection}
+      parameters: [ { $ref: "#/components/parameters/Fields" } ]
+      responses:
+        "200": { $ref: "#/components/responses/SingleItem" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      summary: Full update one {collection}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/{UpdateSchema}" }
+      responses:
+        "200": { $ref: "#/components/responses/SingleItem" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      summary: Partial update one {collection}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200": { $ref: "#/components/responses/SingleItem" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      summary: Soft-delete one {collection}
+      responses:
+        "200": { $ref: "#/components/responses/SingleItem" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  "{basePath}/{id}/restore":
+    parameters: [ { $ref: "#/components/parameters/Id" } ]
+    post:
+      summary: Restore one soft-deleted {collection}
+      responses:
+        "200": { $ref: "#/components/responses/SingleItem" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  "{basePath}/{id}/deleted":
+    parameters: [ { $ref: "#/components/parameters/Id" } ]
+    get:
+      summary: Get one soft-deleted {collection}
+      parameters: [ { $ref: "#/components/parameters/Fields" } ]
+      responses:
+        "200": { $ref: "#/components/responses/SingleItem" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  "{basePath}/trash":
+    get:
+      summary: List soft-deleted {collection}
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Fields"
+      responses:
+        "200": { $ref: "#/components/responses/PaginatedItem" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  "{basePath}/count":
+    get:
+      summary: Count active {collection}
+      responses:
+        "200": { $ref: "#/components/responses/CountResponse" }
+
+  "{basePath}/trash/count":
+    get:
+      summary: Count soft-deleted {collection}
+      responses:
+        "200": { $ref: "#/components/responses/CountResponse" }
+
+  "{basePath}/bulk":
+    post:
+      summary: Create many {collection}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                items:
+                  type: array
+                  items: { $ref: "#/components/schemas/{CreateSchema}" }
+      responses:
+        "201": { $ref: "#/components/responses/PaginatedItem" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+    put:
+      summary: Full-update many {collection} (atomic)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                allOf:
+                  - type: object
+                    properties: { id: { type: string } }
+                    required: [id]
+                  - $ref: "#/components/schemas/{UpdateSchema}"
+      responses:
+        "200": { $ref: "#/components/responses/PaginatedItem" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+    patch:
+      summary: Partial-update many {collection} (atomic; shared or per-id)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BulkPatchRequest" }
+      responses:
+        "200": { $ref: "#/components/responses/PaginatedItem" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  "{basePath}/upsert":
+    post:
+      summary: Create or update one {collection}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/{CreateSchema}" }
+      responses:
+        "201": { $ref: "#/components/responses/SingleItem" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  "{basePath}/delete/bulk":
+    post:
+      summary: Soft-delete many {collection} by id (atomic)
+      requestBody: { $ref: "#/components/requestBodies/BatchIds" }
+      responses:
+        "200": { $ref: "#/components/responses/CountResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  "{basePath}/restore/bulk":
+    post:
+      summary: Restore many soft-deleted {collection} by id (atomic)
+      requestBody: { $ref: "#/components/requestBodies/BatchIds" }
+      responses:
+        "200": { $ref: "#/components/responses/PaginatedItem" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  "{basePath}/restore/all":
+    post:
+      summary: Restore all soft-deleted {collection} (atomic)
+      responses:
+        "200": { $ref: "#/components/responses/CountResponse" }
+
+  "{basePath}/trash/bulk":
+    delete:
+      summary: Permanently delete many trashed {collection} by id (atomic)
+      requestBody: { $ref: "#/components/requestBodies/BatchIds" }
+      responses:
+        "200": { $ref: "#/components/responses/CountResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  "{basePath}/trash/{id}":
+    parameters: [ { $ref: "#/components/parameters/Id" } ]
+    delete:
+      summary: Permanently delete one trashed {collection}
+      responses:
+        "204": { description: Deleted (no content) }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  "{basePath}/empty":
+    delete:
+      summary: Empty the {collection} trash (permanent)
+      responses:
+        "200": { $ref: "#/components/responses/CountResponse" }
+
+components:
+  parameters:
+    Id:        { name: id, in: path, required: true, schema: { type: string } }
+    Page:      { name: page, in: query, schema: { type: integer, default: 1, minimum: 1 } }
+    Limit:     { name: limit, in: query, schema: { type: integer, default: 20, maximum: 100 } }
+    SortBy:    { name: sort_by, in: query, schema: { type: string } }
+    SortOrder: { name: sort_order, in: query, schema: { type: string, enum: [asc, desc] } }
+    Search:    { name: search, in: query, schema: { type: string } }
+    Status:    { name: status, in: query, schema: { type: string } }
+    Fields:
+      name: fields
+      in: query
+      description: "Sparse fieldset, comma-separated. `id` is always included."
+      schema: { type: string }
+      example: "id,name"
+
+  requestBodies:
+    BatchIds:
+      required: true
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/BatchIdsRequest" }
+
+  responses:
+    SingleItem:
+      description: Single resource
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              success: { type: boolean }
+              data: { $ref: "#/components/schemas/{ItemSchema}" }
+              message: { type: string }
+    PaginatedItem:
+      description: Paginated list
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              success: { type: boolean }
+              data:
+                type: array
+                items: { $ref: "#/components/schemas/{ItemSchema}" }
+              meta: { $ref: "#/components/schemas/PaginationResponse" }
+    CountResponse:
+      description: Count / affected-row result
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              success: { type: boolean }
+              data: { type: integer, format: int64 }
+    BadRequest:
+      description: Invalid query, filter, pagination depth, or batch size
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    Conflict:
+      description: Conflicts with an existing resource
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  schemas:
+    PaginationResponse:
+      type: object
+      properties:
+        total: { type: integer, format: int64 }
+        page: { type: integer }
+        limit: { type: integer }
+        total_pages: { type: integer }
+    ErrorEnvelope:
+      type: object
+      properties:
+        success: { type: boolean, example: false }
+        error: { type: string }
+    BatchIdsRequest:
+      type: object
+      required: [ids]
+      properties:
+        ids: { type: array, items: { type: string } }
+    BulkPatchRequest:
+      oneOf:
+        - type: object
+          required: [ids, patch]
+          properties:
+            ids: { type: array, items: { type: string } }
+            patch: { type: object, additionalProperties: true }
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items:
+                type: object
+                required: [id, patch]
+                properties:
+                  id: { type: string }
+                  patch: { type: object, additionalProperties: true }
+
+    # ---- Define your entity-specific schemas below ----
+    # {ItemSchema}:
+    #   type: object
+    #   properties: { id: { type: string }, ... }
+    # {CreateSchema}:
+    #   type: object
+    #   properties: { ... }
+    # {UpdateSchema}:
+    #   type: object
+    #   properties: { ... }
