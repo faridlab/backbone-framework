@@ -99,8 +99,18 @@ is why the bulk and trash endpoints can coexist with id-based ones.
   Repository ── storage (single transaction for atomic batch ops)
       │
       ▼
-  Response ── ApiResponse / PaginatedApiResponse, optionally sparse-projected (?fields=)
+  Response ── ApiResponse / PaginatedApiResponse
+      │       ── field security (strip @private unless AccessScope allows) ──┐
+      │       ── then sparse projection (?fields=) ──────────────────────────┘
 ```
+
+Field security runs **before** sparse projection, so the `AccessScope` ceiling
+always wins over a `?fields=` request — a stripped `@private` field cannot be
+recovered by naming it. The `AccessScope` (`Platform` | `Tenant(id)`) is read
+from an axum `Extension` injected by the app's auth middleware; an absent scope
+fails closed. Entities opt in via `EntityRepoMeta::private_fields()` /
+`owner_field()` (both default to no-op). See
+[api-reference.md](api-reference.md#field-level-security-private--owner).
 
 ### Lifecycle hooks & events
 

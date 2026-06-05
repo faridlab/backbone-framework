@@ -16,6 +16,19 @@ back to `## [Unreleased]`.
 ## [Unreleased]
 
 ### Added
+- `backbone-core`: field-level security (`@private` / `@owner`) on the read
+  endpoints (`list`, `get_by_id`, `list_deleted`, `get_deleted_by_id`).
+  `backbone-orm::EntityRepoMeta` gains two defaulted hooks — `private_fields()`
+  (response JSON keys, camelCase, visible only to the row owner or platform/root)
+  and `owner_field()` (the response key holding the owner/tenant id). A new
+  `backbone_core::AccessScope` enum (`Platform` | `Tenant(String)`) is read from
+  an axum `Extension`, injected by the application's auth middleware: `Platform`
+  sees every field; `Tenant(id)` sees `@private` fields only when the row's
+  `@owner` equals `id`; an absent scope **fails closed** (private fields stripped).
+  Security runs **before** sparse projection, so the visibility ceiling always
+  beats a `?fields=` request. Defaults are no-ops — entities that don't override
+  the hooks behave exactly as before. (`backbone-orm` is now a normal dependency
+  of `backbone-core`, not dev-only.)
 - `backbone-core`: optional OpenAPI/Swagger support behind a default-off `openapi`
   feature. Enabling it derives `utoipa::ToSchema` on the shared HTTP envelope/request
   types (`ApiResponse`, `PaginatedApiResponse`, `PaginationResponse`, `BulkResponse`,

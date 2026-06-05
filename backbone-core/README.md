@@ -94,6 +94,15 @@ capped at `MAX_BATCH_SIZE` (1,000) items; larger payloads are rejected with
   trimmed; unknown keys are ignored and an empty/absent value returns every field.
   `fields`, `include`, and `with` are reserved query keys — stripped before
   filters reach the repository, so they never leak into the `WHERE` clause.
+- **Field-level security (`@private` / `@owner`)**: read endpoints strip an
+  entity's `@private` response fields unless the caller may see them. An
+  injectable `AccessScope` (`Platform` | `Tenant(id)`, read from an axum
+  `Extension` set by your auth middleware) decides visibility: `Platform` sees
+  all, `Tenant(id)` sees private fields only when the row's `@owner` field equals
+  `id`, and an absent scope **fails closed**. Opt in per entity via the
+  `EntityRepoMeta::private_fields()` / `owner_field()` hooks (default no-op).
+  Enforced **before** sparse projection, so it always beats a `?fields=` request.
+  See [docs/api-reference.md](docs/api-reference.md#field-level-security-private--owner).
 - **Client-error aware**: list/query endpoints return `400 Bad Request` (not
   `500`) when a bad filter or sort key produces a Postgres
   `column "..." does not exist` (SQLSTATE 42703) or `invalid input syntax`

@@ -66,6 +66,33 @@ absent/empty value returns every field. `fields`, `include`, and `with` are **re
 response-shaping keys — stripped before filters reach the repository, so they never leak
 into the `WHERE` clause.
 
+### Field-level security (`@private` / `@owner`)
+
+Read endpoints strip an entity's `@private` fields from the serialized response
+unless the caller is allowed to see them. Visibility is decided by an
+`AccessScope` (`backbone_core::AccessScope`) that the application's auth
+middleware injects as an axum `Extension`:
+
+| Scope | Sees `@private` fields |
+|-------|------------------------|
+| `Platform` | Always (superadmin / root) |
+| `Tenant(id)` | Only when the row's `@owner` field equals `id` |
+| *(no extension)* | Never — **fails closed** |
+
+An entity opts in by overriding two `backbone_orm::EntityRepoMeta` hooks (both
+default to no-op, so existing entities are unaffected):
+
+```rust
+fn private_fields() -> &'static [&'static str] { &["hppPerUnit"] } // response keys (camelCase)
+fn owner_field() -> Option<&'static str> { Some("providerId") }    // response key holding the owner id
+```
+
+Security runs **before** sparse projection, so the visibility ceiling always
+beats a `?fields=` request — a client cannot recover a stripped `@private` field
+by naming it in `?fields=`. Names are matched against the **response JSON keys**
+(camelCase), not DB columns. A `Tenant` scope against a row whose `@owner` is
+`null` is treated as non-owner (only `Platform` sees private fields).
+
 ### Pagination depth
 
 The effective offset is `max(page-1, 0) * clamp(limit, 1, 100)`. If it exceeds
