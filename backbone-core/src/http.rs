@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 /// Standard API response wrapper
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ApiResponse<T> {
     pub success: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -77,6 +78,7 @@ impl<T> ApiResponse<T> {
 
 /// Generic list query parameters
 #[derive(Debug, Deserialize, Default, Clone)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ListQueryParams {
     #[serde(default = "default_page")]
     pub page: u32,
@@ -199,6 +201,7 @@ fn is_bad_query_error(msg: &str) -> bool {
 
 /// Pagination response metadata
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct PaginationResponse {
     pub total: u64,
     pub page: u32,
@@ -215,6 +218,7 @@ impl PaginationResponse {
 
 /// Generic paginated response (without success wrapper)
 #[derive(Debug, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct PaginatedResponse<T> {
     pub data: Vec<T>,
     pub meta: PaginationResponse,
@@ -223,6 +227,7 @@ pub struct PaginatedResponse<T> {
 /// Paginated API response with success flag, data array, and metadata at top level
 /// This is the preferred response format for list endpoints
 #[derive(Debug, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct PaginatedApiResponse<T> {
     pub success: bool,
     pub data: Vec<T>,
@@ -265,12 +270,14 @@ impl<T> PaginatedApiResponse<T> {
 
 /// Bulk request for multiple entities
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct BulkCreateRequest<T> {
     pub items: Vec<T>,
 }
 
 /// Bulk response
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct BulkResponse<T> {
     pub items: Vec<T>,
     pub total: usize,
@@ -280,6 +287,7 @@ pub struct BulkResponse<T> {
 
 /// Upsert request (update or insert)
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct UpsertRequest<T> {
     pub entity: T,
     pub create_if_not_exists: bool,
@@ -288,6 +296,7 @@ pub struct UpsertRequest<T> {
 /// Request body carrying a list of entity ids — used by bulk soft-delete, bulk
 /// restore, and bulk permanent-delete endpoints.
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct BatchIdsRequest {
     pub ids: Vec<String>,
 }
@@ -296,14 +305,20 @@ pub struct BatchIdsRequest {
 /// full update DTO for that row.
 #[derive(Debug, Deserialize)]
 #[serde(bound = "U: DeserializeOwned")]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct BulkUpdateItem<U> {
     pub id: String,
+    // The flattened DTO is opaque to the schema (it is generic over the concrete
+    // update type); documented as an open object — downstream specs reference the
+    // concrete `Update<Entity>` schema directly.
     #[serde(flatten)]
+    #[cfg_attr(feature = "openapi", schema(value_type = Object))]
     pub data: U,
 }
 
 /// One element of the per-id form of a bulk PATCH request.
 #[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct BulkPatchItem {
     pub id: String,
     pub patch: HashMap<String, serde_json::Value>,
@@ -313,6 +328,7 @@ pub struct BulkPatchItem {
 /// many ids, or a distinct patch per id. Shape is auto-detected.
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub enum BulkPatchRequest {
     /// `{ "ids": [..], "patch": { .. } }` — same change applied to every id.
     Shared {
@@ -339,6 +355,7 @@ impl BulkPatchRequest {
 
 /// Filtering and sorting options
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct FilterOptions {
     pub filters: HashMap<String, String>,
     pub sort_by: Option<String>,
@@ -348,6 +365,7 @@ pub struct FilterOptions {
 /// Sort order enum
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub enum SortOrder {
     #[default]
     Asc,
@@ -356,6 +374,7 @@ pub enum SortOrder {
 
 /// Extended pagination request with filtering and sorting
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ListRequest {
     pub page: Option<u32>,
     pub limit: Option<u32>,
@@ -1395,6 +1414,7 @@ pub trait BackboneHttpHandler<T>: Send + Sync {
 
 /// Pagination request (legacy)
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct PaginationRequest {
     pub page: u32,
     pub limit: u32,

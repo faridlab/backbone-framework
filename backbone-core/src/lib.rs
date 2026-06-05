@@ -91,6 +91,10 @@ pub mod flow;
 pub mod projection;
 pub mod state_machine;
 
+/// OpenAPI/Swagger schema generation (feature `openapi`).
+#[cfg(feature = "openapi")]
+pub mod openapi;
+
 pub use trigger::{
     TriggerHandler, TriggerEvent, TriggerContext, TriggerContextMut,
     ActionExecutor, TriggerRegistry,
@@ -138,6 +142,7 @@ pub use http::{
     // Response types
     ApiResponse,
     PaginatedResponse,
+    PaginatedApiResponse,
     PaginationResponse,
     BulkResponse,
     BulkCreateRequest,
@@ -147,9 +152,17 @@ pub use http::{
     UpsertRequest,
     FilterOptions,
     SortOrder,
+    BatchIdsRequest,
+    BulkUpdateItem,
+    BulkPatchItem,
+    BulkPatchRequest,
     // Legacy
     PaginationRequest,
 };
+
+// OpenAPI component template (feature `openapi`)
+#[cfg(feature = "openapi")]
+pub use openapi::BackboneComponents;
 
 // Utility exports
 pub use utils::{
