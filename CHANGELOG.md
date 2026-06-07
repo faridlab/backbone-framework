@@ -16,6 +16,22 @@ back to `## [Unreleased]`.
 ## [Unreleased]
 
 ### Added
+- `backbone-core`: relation expansion on read endpoints. `list` and `get_by_id`
+  accept `?include=<rel>` (alias `?with=`) to hydrate declared to-one relations,
+  injecting each related row as a sibling object keyed by the relation name.
+  Comma-separated; only relations an entity declares are honored and unknown
+  names are ignored. Expansion is **batched** — one `WHERE id = ANY(...)` per
+  relation across all rows in the page (no N+1) — and the target table is taken
+  from generator-emitted metadata, never client input, so it is not an injection
+  vector. Entities opt in via a new defaulted `backbone_orm::EntityRepoMeta::relations()`
+  hook returning `(relation_name, target_table, local_fk_field)` tuples; the
+  generated Postgres repos hydrate via `backbone_orm::fetch_by_ids_as_json`
+  (newly exported). Expanded objects have their top-level keys camelCased to read
+  consistently with the response. Runs **after** field-security and **before**
+  sparse projection. *v1 limitation:* the expanded object is the raw related row,
+  **not** run through the target's response DTO or its `@private` field-security —
+  do not enable `?include=` for a target that has private fields. Defaults are
+  no-ops, so entities that don't override `relations()` are unaffected.
 - `backbone-core`: field-level security (`@private` / `@owner`) on the read
   endpoints (`list`, `get_by_id`, `list_deleted`, `get_deleted_by_id`).
   `backbone-orm::EntityRepoMeta` gains two defaulted hooks — `private_fields()`

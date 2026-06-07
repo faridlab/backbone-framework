@@ -101,6 +101,7 @@ is why the bulk and trash endpoints can coexist with id-based ones.
       ▼
   Response ── ApiResponse / PaginatedApiResponse
       │       ── field security (strip @private unless AccessScope allows) ──┐
+      │       ── then relation expansion (?include=, batched) ───────────────┤
       │       ── then sparse projection (?fields=) ──────────────────────────┘
 ```
 
@@ -111,6 +112,14 @@ from an axum `Extension` injected by the app's auth middleware; an absent scope
 fails closed. Entities opt in via `EntityRepoMeta::private_fields()` /
 `owner_field()` (both default to no-op). See
 [api-reference.md](api-reference.md#field-level-security-private--owner).
+
+Relation expansion (`?include=`) runs between the two: declared to-one relations
+are hydrated in one batched `WHERE id = ANY(...)` per relation (no N+1) and
+injected as sibling objects, then sparse projection can keep or drop those keys.
+The target table comes from `EntityRepoMeta::relations()` (generator-emitted),
+never client input. *v1:* expanded rows bypass the target's response DTO and its
+`@private` security — see
+[api-reference.md](api-reference.md#relation-expansion-include).
 
 ### Lifecycle hooks & events
 

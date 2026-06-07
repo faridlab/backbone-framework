@@ -94,6 +94,17 @@ capped at `MAX_BATCH_SIZE` (1,000) items; larger payloads are rejected with
   trimmed; unknown keys are ignored and an empty/absent value returns every field.
   `fields`, `include`, and `with` are reserved query keys — stripped before
   filters reach the repository, so they never leak into the `WHERE` clause.
+- **Relation expansion (`?include=`)**: `list` and `get_by_id` accept
+  `?include=<rel>` (alias `?with=`) to hydrate declared to-one relations,
+  injecting each related row as a sibling object keyed by the relation name.
+  Comma-separated; only relations the entity declares are honored, unknown names
+  are ignored. Batched — one `WHERE id = ANY(...)` per relation across the whole
+  page (no N+1). Opt in per entity via the `EntityRepoMeta::relations()` hook
+  (default none). Runs **after** field security and **before** sparse projection.
+  *v1 limitation:* the expanded object is the raw related row (keys camelCased),
+  not run through the target's response DTO or its `@private` security — don't
+  enable it for a target with private fields. See
+  [docs/api-reference.md](docs/api-reference.md#relation-expansion-include).
 - **Field-level security (`@private` / `@owner`)**: read endpoints strip an
   entity's `@private` response fields unless the caller may see them. An
   injectable `AccessScope` (`Platform` | `Tenant(id)`, read from an axum

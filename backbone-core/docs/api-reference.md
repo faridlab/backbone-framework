@@ -12,8 +12,8 @@ below are relative to `{base}` (e.g. `/api/v1/products`). All request bodies acc
 
 | Method | Path | Purpose | Success | Response |
 |--------|------|---------|---------|----------|
-| GET | `{base}` | List active (paginate / filter / sort / search / `?fields=`) | 200 | `PaginatedApiResponse<R>` |
-| GET | `{base}/:id` | Get one active by id (`?fields=`) | 200 | `ApiResponse<R>` |
+| GET | `{base}` | List active (paginate / filter / sort / search / `?fields=` / `?include=`) | 200 | `PaginatedApiResponse<R>` |
+| GET | `{base}/:id` | Get one active by id (`?fields=` / `?include=`) | 200 | `ApiResponse<R>` |
 | GET | `{base}/trash` | List soft-deleted (paginate / filter / `?fields=`) | 200 | `PaginatedApiResponse<R>` |
 | GET | `{base}/:id/deleted` | Get one soft-deleted by id (`?fields=`) | 200 | `ApiResponse<R>` |
 | GET | `{base}/count` | Count active entities | 200 | `ApiResponse<u64>` |
@@ -56,6 +56,7 @@ single-get endpoints.
 | `search` | `string` | — | Free-text search term |
 | `status` | `string` | — | Common status filter |
 | `fields` | `string` | — | Sparse fieldset (reserved, see below) |
+| `include` | `string` | — | Relation expansion (reserved; alias `with`, see below) |
 | *(any other key)* | `string` | — | Becomes a filter passed to the repository |
 
 ### Sparse fieldsets (`?fields=`)
@@ -65,6 +66,53 @@ always-on `id`**. Comma-separated, whitespace-trimmed; unknown keys are ignored;
 absent/empty value returns every field. `fields`, `include`, and `with` are **reserved**
 response-shaping keys — stripped before filters reach the repository, so they never leak
 into the `WHERE` clause.
+
+### Relation expansion (`?include=`)
+
+`?include=<rel>` (alias `?with=`) hydrates declared **to-one** relations, injecting
+the related row into each response object as a sibling keyed by the relation name.
+Comma-separated and whitespace-trimmed; only relations the entity declares are
+honored — unknown names are silently ignored. Applies to `GET {base}` and
+`GET {base}/:id` (not the trash/deleted reads).
+
+```bash
+curl "http://localhost:8080/api/v1/products?include=provider,category"
+```
+
+```jsonc
+{
+  "id": "p_1",
+  "name": "Widget",
+  "providerId": "pr_9",
+  "provider": { "id": "pr_9", "businessName": "Acme" }   // ← injected
+}
+```
+
+An entity opts in by overriding the `backbone_orm::EntityRepoMeta::relations()`
+hook (defaults to none, so existing entities are unaffected):
+
+```rust
+fn relations() -> &'static [(&'static str, &'static str, &'static str)] {
+    // (relation name in the response, target DB table, local FK response key)
+    &[("provider", "providers", "providerId")]
+}
+```
+
+Expansion is **batched**: for each requested relation, the handler collects the
+FK values across every row on the page and issues one `WHERE id = ANY(...)` —
+no N+1. The target table comes from the (generator-emitted) `relations()`
+metadata, **never** client input, so it is not an injection vector. The expanded
+object's top-level keys are camelCased to match the response; a row whose FK has
+no match (or is null) gets `null` for that relation.
+
+Ordering: relation expansion runs **after** field-level security and **before**
+sparse projection — so `?fields=` can include or omit an expanded relation key
+like any other field.
+
+> **v1 limitation:** the expanded object is the raw related row, **not** run
+> through the target entity's response DTO or its `@private` field-security. Do
+> not enable `?include=` for a target that has private fields until this is
+> revisited.
 
 ### Field-level security (`@private` / `@owner`)
 

@@ -118,6 +118,27 @@ curl "http://localhost:8080/api/v1/products?status=active&search=widget"
 > `?fields=` keeps the requested top-level keys **plus `id`**. `fields`, `include`, and
 > `with` are reserved — they shape the response and never reach the filter/`WHERE` layer.
 
+### Expand relations with `?include=`
+
+```bash
+# inject each product's provider as a sibling object (batched, no N+1)
+curl "http://localhost:8080/api/v1/products?include=provider,category"
+```
+
+```jsonc
+{
+  "id": "p_1",
+  "name": "Widget",
+  "providerId": "pr_9",
+  "provider": { "id": "pr_9", "businessName": "Acme" }   // ← hydrated by ?include=
+}
+```
+
+> Only relations the entity declares via `EntityRepoMeta::relations()` are honored
+> (unknown names are ignored). Works on `list` and `get_by_id`. See
+> [api-reference.md](api-reference.md#relation-expansion-include) — including the
+> v1 caveat that expanded targets bypass the target's `@private` security.
+
 ### Create / read / update
 
 ```bash
