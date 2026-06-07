@@ -81,6 +81,14 @@ pub trait EntityRepoMeta {
     fn owner_field() -> Option<&'static str> {
         None
     }
+
+    /// To-one relations expandable via `?include=<name>`, as
+    /// `(relation_name, target_table, local_fk_field)` — all response keys
+    /// (relation_name/local_fk in camelCase; target_table is the DB table).
+    /// Default: none.
+    fn relations() -> &'static [(&'static str, &'static str, &'static str)] {
+        &[]
+    }
 }
 
 // ─── Delete-mode markers ──────────────────────────────────────────────────────
@@ -828,6 +836,25 @@ where
     pub async fn bulk_update(&self, entities: &[T]) -> Result<Vec<T>> {
         bulk_update_rows(self.pool(), self.table_name(), "", entities).await
     }
+}
+
+/// Fetch rows from an arbitrary table by id list, as JSON — hydrates `?include=`
+/// relations in the generic CRUD handler without a typed repository for the
+/// target entity. `table` is a generator-emitted collection name (from
+/// `EntityRepoMeta::relations()`), NEVER client input, so the interpolation is
+/// not an injection vector. One batched `WHERE id = ANY(...)` per relation.
+/// Returns `row_to_json` objects keyed by raw (snake_case) column names.
+pub async fn fetch_by_ids_as_json(
+    pool: &PgPool,
+    table: &str,
+    ids: &[String],
+) -> Result<Vec<serde_json::Value>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let query = format!("SELECT row_to_json(t) AS j FROM {table} t WHERE t.id = ANY($1::uuid[])");
+    let rows: Vec<(serde_json::Value,)> = sqlx::query_as(&query).bind(ids).fetch_all(pool).await?;
+    Ok(rows.into_iter().map(|(j,)| j).collect())
 }
 
 /// Shared transactional bulk-update used by both delete modes. Each entity is

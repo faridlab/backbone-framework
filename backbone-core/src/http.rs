@@ -180,6 +180,103 @@ fn apply_field_security(
     value
 }
 
+/// Parse the reserved `include` (or `with`) key — comma-separated relation names.
+fn include_relations(query: &HashMap<String, String>) -> Vec<String> {
+    query
+        .get("include")
+        .or_else(|| query.get("with"))
+        .map(|s| {
+            s.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn snake_to_camel(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut upper = false;
+    for c in s.chars() {
+        if c == '_' {
+            upper = true;
+        } else if upper {
+            out.extend(c.to_uppercase());
+            upper = false;
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Shallow-camelCase an object's top-level keys so an expanded relation (fetched
+/// as a raw `row_to_json`) reads consistently with the camelCase response.
+fn camelize_keys(v: serde_json::Value) -> serde_json::Value {
+    match v {
+        serde_json::Value::Object(m) => serde_json::Value::Object(
+            m.into_iter().map(|(k, val)| (snake_to_camel(&k), val)).collect(),
+        ),
+        other => other,
+    }
+}
+
+/// Expand requested `?include=<rel>` relations into each row's JSON as a sibling
+/// object keyed by the relation name. Batched: one fetch per relation, keyed by
+/// the rows' foreign-key values. Only relations declared by the entity (via
+/// `EntityRepoMeta::relations()`) are honored; unknown names are ignored. Runs
+/// after field-security and before sparse projection.
+///
+/// v1 limitation: the expanded object is the raw related row (camelCased keys),
+/// NOT run through the target's response DTO or `@private` field-security — fine
+/// while no includable target has private fields. Revisit if that changes.
+async fn expand_includes<S, E, C, U>(
+    service: &S,
+    rows: &mut [serde_json::Value],
+    includes: &[String],
+) where
+    S: CrudService<E, C, U>,
+    E: backbone_orm::EntityRepoMeta + Send + Sync + 'static,
+    C: Send + Sync + 'static,
+    U: Send + Sync + 'static,
+{
+    if includes.is_empty() || rows.is_empty() {
+        return;
+    }
+    for (rel_name, table, fk_field) in E::relations() {
+        if !includes.iter().any(|i| i == rel_name) {
+            continue;
+        }
+        let mut ids: Vec<String> = rows
+            .iter()
+            .filter_map(|r| r.get(fk_field).and_then(|v| v.as_str()).map(str::to_string))
+            .collect();
+        ids.sort();
+        ids.dedup();
+        if ids.is_empty() {
+            continue;
+        }
+        let related = service.fetch_related_json(table, &ids).await;
+        let mut by_id: HashMap<String, serde_json::Value> = HashMap::new();
+        for obj in related {
+            if let Some(id) = obj.get("id").and_then(|v| v.as_str()).map(str::to_string) {
+                by_id.insert(id, camelize_keys(obj));
+            }
+        }
+        for r in rows.iter_mut() {
+            let related_obj = r
+                .get(fk_field)
+                .and_then(|v| v.as_str())
+                .and_then(|id| by_id.get(id).cloned())
+                .unwrap_or(serde_json::Value::Null);
+            if let serde_json::Value::Object(m) = r {
+                m.insert((*rel_name).to_string(), related_obj);
+            }
+        }
+    }
+}
+
 /// Hard cap on page size. Mirrors the clamp in
 /// `backbone_orm::PaginationParams::new` (`per_page.clamp(1, 100)`); kept here so
 /// the offset-depth check below computes the same effective offset the DB uses.
@@ -476,6 +573,16 @@ where
 
     /// Entity name for error messages (e.g., "User", "Role")
     fn entity_name() -> &'static str;
+
+    /// Hydrate `?include=` relations: fetch rows from `table` by id list, as JSON.
+    /// Default: no expansion. `GenericCrudService` delegates to its repository.
+    async fn fetch_related_json(
+        &self,
+        _table: &str,
+        _ids: &[String],
+    ) -> Vec<serde_json::Value> {
+        Vec::new()
+    }
 
     /// 1. List entities with pagination and filters
     async fn list(&self, page: u32, limit: u32, filters: HashMap<String, String>) -> Result<(Vec<Entity>, u64), Self::Error>;
@@ -904,6 +1011,7 @@ where
         // Sparse fieldset (`?fields=a,b,c`) is response-shaping, not a filter — read it,
         // then drop the reserved keys so they're never passed to the repository.
         let fields = sparse_fields(&params.filters);
+        let includes = include_relations(&params.filters);
         let scope = access.map(|axum::Extension(s)| s);
 
         // Merge search and status into filters HashMap
@@ -920,18 +1028,22 @@ where
 
         match handler.service.list(params.page, params.limit, filters).await {
             Ok((entities, total)) => {
-                let items: Vec<serde_json::Value> = entities
+                // Security ceiling first, then relation expansion (batched across all
+                // rows), then sparse projection.
+                let mut rows: Vec<serde_json::Value> = entities
                     .into_iter()
                     .map(|e| {
-                        let secured = apply_field_security(
+                        apply_field_security(
                             to_response_value(R::from(e)),
                             scope.as_ref(),
                             E::private_fields(),
                             E::owner_field(),
-                        );
-                        project_sparse(secured, &fields)
+                        )
                     })
                     .collect();
+                expand_includes::<S, E, C, U>(&*handler.service, &mut rows, &includes).await;
+                let items: Vec<serde_json::Value> =
+                    rows.into_iter().map(|r| project_sparse(r, &fields)).collect();
                 let response = PaginatedApiResponse::ok(items, total, params.page, params.limit);
                 (StatusCode::OK, Json(response))
             }
@@ -979,6 +1091,7 @@ where
         use axum::{http::StatusCode, Json};
 
         let fields = sparse_fields(&params.filters);
+        let includes = include_relations(&params.filters);
         let scope = access.map(|axum::Extension(s)| s);
 
         match handler.service.get_by_id(&id).await {
@@ -989,6 +1102,9 @@ where
                     E::private_fields(),
                     E::owner_field(),
                 );
+                let mut rows = [secured];
+                expand_includes::<S, E, C, U>(&*handler.service, &mut rows, &includes).await;
+                let [secured] = rows;
                 let value = project_sparse(secured, &fields);
                 (StatusCode::OK, Json(ApiResponse::ok(value)))
             }
@@ -1774,6 +1890,35 @@ mod tests {
     fn security_absent_scope_fails_closed() {
         let out = apply_field_security(row(), None, PRIV, Some("providerId"));
         assert!(out.get("hppPerUnit").is_none());
+    }
+
+    // ── Relation expansion (?include=) helpers ──
+
+    #[test]
+    fn include_relations_parses_include_and_with() {
+        let mut q = HashMap::new();
+        q.insert("include".to_string(), "provider, outlet ".to_string());
+        assert_eq!(include_relations(&q), vec!["provider", "outlet"]);
+        let mut q2 = HashMap::new();
+        q2.insert("with".to_string(), "category".to_string());
+        assert_eq!(include_relations(&q2), vec!["category"]);
+        assert!(include_relations(&HashMap::new()).is_empty());
+    }
+
+    #[test]
+    fn snake_to_camel_converts() {
+        assert_eq!(snake_to_camel("provider_id"), "providerId");
+        assert_eq!(snake_to_camel("business_name"), "businessName");
+        assert_eq!(snake_to_camel("id"), "id");
+    }
+
+    #[test]
+    fn camelize_keys_top_level_only() {
+        let v = serde_json::json!({ "provider_id": "1", "meta_data": { "created_at": "x" } });
+        let out = camelize_keys(v);
+        assert!(out.get("providerId").is_some());
+        // nested keys are left untouched (per-struct camelCase, shallow).
+        assert!(out.get("metaData").unwrap().get("created_at").is_some());
     }
 
     #[test]

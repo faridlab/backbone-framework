@@ -204,6 +204,18 @@ where
         self.list(page, limit).await
     }
 
+    /// Hydrate `?include=` relations: fetch rows from `table` by id list, as JSON
+    /// (raw `row_to_json`). `table` comes from `EntityRepoMeta::relations()`
+    /// (generator-emitted), never client input. Default: no expansion. The
+    /// Postgres-backed generated repos override this via `impl_crud_repository!`.
+    async fn fetch_related_json(
+        &self,
+        _table: &str,
+        _ids: &[String],
+    ) -> Vec<serde_json::Value> {
+        Vec::new()
+    }
+
     /// Check if an entity exists by ID
     async fn exists(&self, id: &str) -> Result<bool, RepositoryError> {
         Ok(self.find_by_id(id).await?.is_some())

@@ -741,6 +741,10 @@ where
         std::any::type_name::<E>()
     }
 
+    async fn fetch_related_json(&self, table: &str, ids: &[String]) -> Vec<serde_json::Value> {
+        self.repository().fetch_related_json(table, ids).await
+    }
+
     async fn list(
         &self,
         page: u32,

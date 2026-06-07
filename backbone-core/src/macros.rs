@@ -59,6 +59,16 @@ macro_rules! impl_crud_repository {
     ($repo:ty, $entity:ty, soft_delete) => {
         #[async_trait::async_trait]
         impl backbone_core::CrudRepository<$entity> for $repo {
+            async fn fetch_related_json(
+                &self,
+                table: &str,
+                ids: &[String],
+            ) -> Vec<serde_json::Value> {
+                backbone_orm::fetch_by_ids_as_json((&**self).pool(), table, ids)
+                    .await
+                    .unwrap_or_default()
+            }
+
             // ── NOTE on method resolution ─────────────────────────────────────
             // This repo is a newtype wrapping `GenericCrudRepository<E, SoftDelete>`
             // and implements `Deref` to it.  Inside a trait impl, unqualified `self.foo()`
@@ -257,6 +267,16 @@ macro_rules! impl_crud_repository {
     ($repo:ty, $entity:ty, no_soft_delete) => {
         #[async_trait::async_trait]
         impl backbone_core::CrudRepository<$entity> for $repo {
+            async fn fetch_related_json(
+                &self,
+                table: &str,
+                ids: &[String],
+            ) -> Vec<serde_json::Value> {
+                backbone_orm::fetch_by_ids_as_json((&**self).pool(), table, ids)
+                    .await
+                    .unwrap_or_default()
+            }
+
             async fn create(
                 &self,
                 entity: $entity,
