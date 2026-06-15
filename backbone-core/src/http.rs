@@ -1370,22 +1370,28 @@ where
         }
 
         let fields = sparse_fields(&params.filters);
+        let includes = include_relations(&params.filters);
         let scope = access.map(|axum::Extension(s)| s);
 
         match handler.service.list_deleted(params.page, params.limit).await {
             Ok((entities, total)) => {
-                let items: Vec<serde_json::Value> = entities
+                // Mirror `list_handler`: field-security ceiling, then batched
+                // relation expansion (`?include=`), then sparse projection — so the
+                // trash view hydrates relations exactly like the active list does.
+                let mut rows: Vec<serde_json::Value> = entities
                     .into_iter()
                     .map(|e| {
-                        let secured = apply_field_security(
+                        apply_field_security(
                             to_response_value(R::from(e)),
                             scope.as_ref(),
                             E::private_fields(),
                             E::owner_field(),
-                        );
-                        project_sparse(secured, &fields)
+                        )
                     })
                     .collect();
+                expand_includes::<S, E, C, U>(&*handler.service, &mut rows, &includes).await;
+                let items: Vec<serde_json::Value> =
+                    rows.into_iter().map(|r| project_sparse(r, &fields)).collect();
                 let response = PaginatedApiResponse::ok(items, total, params.page, params.limit);
                 (StatusCode::OK, Json(response))
             }
