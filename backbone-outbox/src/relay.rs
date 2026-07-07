@@ -36,32 +36,39 @@ impl OutboxRow {
 }
 
 /// Drain up to `batch` un-published events from `schema.outbox_events`, hand each to `publish`, and mark
-/// the successfully-published ones. **At-least-once**: a locked row is marked `published_at` only if
-/// `publish` returned `Ok`; if the relay crashes after `publish` succeeds but before the mark commits,
-/// the row is redelivered on the next drain (the consumer's inbox dedups it). Rows are locked
-/// `FOR UPDATE SKIP LOCKED`, so multiple relay workers scale without contending. Returns the number
-/// published this pass.
+/// the successfully-published ones. Returns the number published this pass.
 ///
-/// `publish` is the transport seam — wire it to the in-proc `backbone-messaging` bus today, or a broker
-/// later, without touching producers or consumers. A `publish` error leaves that row for the next pass.
+/// **The relay never holds a transaction across `publish`.** The batch is read with a short-lived
+/// connection that is returned before any `publish` runs; each record is then published while holding
+/// *no* relay connection, and marked with an idempotent per-row UPDATE (`… WHERE id=$1 AND published_at
+/// IS NULL`). This is deliberate: the shipped consumers reborrow the *same* pool inside `publish` (their
+/// own tx), so a relay that held its connection + the outbox row locks across `publish` would need two
+/// pool connections per in-flight event and self-deadlock on a bounded pool (maturity council
+/// 2026-07-07). By not spanning `publish`, each DB step borrows and returns a connection independently —
+/// safe even at `max_connections = 1`.
+///
+/// **At-least-once**: `published_at` is set only after `publish` returns `Ok`; a crash between publish
+/// and mark redelivers the row (the consumer's inbox dedups it). Concurrent relay workers are not row-
+/// locked, so they may double-*deliver* a row — harmless (the inbox makes the *effect* exactly-once);
+/// a lease-based claim to trim duplicate deliveries is a future optimization. A `publish` error leaves
+/// the row for the next pass.
 pub async fn drain_once<F, Fut>(pool: &PgPool, schema: &str, batch: i64, publish: F) -> Result<usize>
 where
     F: Fn(OutboxRecord) -> Fut,
     Fut: std::future::Future<Output = std::result::Result<(), OutboxError>>,
 {
     validate_schema(schema)?;
-    let mut tx = pool.begin().await?;
+    // Short-lived read: borrows a connection only for the SELECT, then returns it to the pool.
     let rows: Vec<OutboxRow> = sqlx::query_as(&format!(
         r#"SELECT id, event_type, aggregate_type, aggregate_id, payload, occurred_at,
                   correlation_id, causation_id, version
            FROM {schema}.outbox_events
            WHERE published_at IS NULL
            ORDER BY occurred_at, id
-           LIMIT $1
-           FOR UPDATE SKIP LOCKED"#
+           LIMIT $1"#
     ))
     .bind(batch)
-    .fetch_all(&mut *tx)
+    .fetch_all(pool)
     .await?;
 
     let mut published = 0usize;
@@ -69,12 +76,13 @@ where
         let rec = row.into_record();
         let id = rec.id;
         match publish(rec).await {
+            // No relay connection is held here — the consumer may freely reborrow the pool.
             Ok(()) => {
                 sqlx::query(&format!(
-                    "UPDATE {schema}.outbox_events SET published_at=now() WHERE id=$1"
+                    "UPDATE {schema}.outbox_events SET published_at=now() WHERE id=$1 AND published_at IS NULL"
                 ))
                 .bind(id)
-                .execute(&mut *tx)
+                .execute(pool)
                 .await?;
                 published += 1;
             }
@@ -83,7 +91,6 @@ where
             Err(e) => return Err(e),
         }
     }
-    tx.commit().await?;
     Ok(published)
 }
 

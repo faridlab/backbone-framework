@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use backbone_outbox::{inbox, outbox, relay, OutboxError, OutboxRecord};
 use chrono::Utc;
+use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -108,6 +109,44 @@ async fn m4_inbox_once_dedups_per_consumer() {
     // A different consumer still gets its own first-time for the same event.
     assert!(inbox::once(&mut *tx, &schema, "analytics", id).await.unwrap(), "independent consumer processes once");
     tx.commit().await.unwrap();
+}
+
+/// M6 (maturity council 2026-07-07) — the relay must NOT hold a connection across `publish`. A consumer
+/// that reborrows the SAME pool inside `publish` (as the shipped rollout does) would need two pool
+/// connections per in-flight event; the old relay held its tx + row locks across publish and
+/// self-deadlocked on a bounded pool. On a `max_connections = 1` pool with a short acquire timeout, a
+/// drain whose consumer does `pool.begin()` must SUCCEED (not block/timeout).
+#[tokio::test]
+async fn m6_relay_does_not_deadlock_a_reborrowing_consumer() {
+    let url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5433/backbone_outbox".into());
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(std::time::Duration::from_secs(3))
+        .connect(&url)
+        .await
+        .expect("connect");
+    let schema = fresh_schema(&pool).await;
+    sqlx::query(&format!("CREATE TABLE {schema}.marks (id text PRIMARY KEY)")).execute(&pool).await.unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    outbox::stage(&mut *tx, &schema, &rec("A", "1")).await.unwrap();
+    tx.commit().await.unwrap();
+
+    // The consumer reborrows the SAME single-connection pool inside publish (the shipped shape).
+    let cpool = pool.clone();
+    let cschema = schema.clone();
+    let published = relay::drain_once(&pool, &schema, 100, move |r: OutboxRecord| {
+        let (pool, schema) = (cpool.clone(), cschema.clone());
+        async move {
+            let mut tx = pool.begin().await.map_err(OutboxError::from)?; // <- would deadlock if relay held the conn
+            sqlx::query(&format!("INSERT INTO {schema}.marks VALUES ($1) ON CONFLICT DO NOTHING"))
+                .bind(r.id.to_string()).execute(&mut *tx).await.map_err(OutboxError::from)?;
+            tx.commit().await.map_err(OutboxError::from)?;
+            Ok(())
+        }
+    }).await.unwrap();
+    assert_eq!(published, 1, "the reborrowing consumer ran without a pool deadlock");
+    assert_eq!(outbox::pending_count(&pool, &schema).await.unwrap(), 0, "and the row was marked published");
 }
 
 /// M5 — END-TO-END crash-window exactly-once (settlement-shaped): a producer commits state + stages the

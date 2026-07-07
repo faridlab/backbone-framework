@@ -48,6 +48,8 @@ pub mod inbox;
 pub mod outbox;
 pub mod record;
 pub mod relay;
+#[cfg(feature = "runner")]
+pub mod runner;
 
 pub use error::{OutboxError, Result};
 pub use record::OutboxRecord;
