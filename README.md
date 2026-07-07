@@ -25,9 +25,11 @@ A modular Rust framework for building production-grade backend services. Backbon
 | [backbone-jobs](backbone-jobs/) | Scheduled jobs: cron, pg_cron, in-memory and persistent storage |
 | [backbone-search](backbone-search/) | Search abstraction with Elasticsearch and Algolia backends |
 | [backbone-graphql](backbone-graphql/) | GraphQL helpers: pagination, error mapping |
-| [backbone-rate-limit](backbone-rate-limit/) | Rate limiting with Redis storage and HTTP middleware |
+| [backbone-rate-limit](backbone-rate-limit/) | Rate limiting with in-memory and Redis storage (dual, with fallback) and HTTP middleware |
 | [backbone-health](backbone-health/) | Health checks and readiness/liveness endpoints |
 | [backbone-observability](backbone-observability/) | Logging, tracing, metrics, and middleware |
+| [backbone-outbox](backbone-outbox/) | Transactional outbox + relay + inbox over Postgres for exactly-once event delivery (no broker) |
+| [backbone-maintenance](backbone-maintenance/) | Maintenance-mode gate: rejects requests with `503` + `Retry-After` unless the path is allow-listed |
 
 ## Getting Started
 
@@ -106,7 +108,9 @@ backbone-framework/
 ├── backbone-graphql/       # GraphQL helpers
 ├── backbone-rate-limit/    # rate limiting
 ├── backbone-health/        # health checks
-└── backbone-observability/ # logging, tracing, metrics
+├── backbone-observability/ # logging, tracing, metrics
+├── backbone-outbox/        # transactional outbox + relay + inbox
+└── backbone-maintenance/   # maintenance-mode 503 gate
 ```
 
 ## License
