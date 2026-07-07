@@ -13,6 +13,7 @@ members = [
     "backbone-messaging",
     "backbone-observability",
     "backbone-orm",
+    "backbone-outbox",
     "backbone-queue",
     "backbone-rate-limit",
     "backbone-search",
