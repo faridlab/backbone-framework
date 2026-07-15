@@ -41,6 +41,8 @@ pub mod middleware;
 pub mod token_generator;
 pub mod traits;
 pub mod resource_policy;
+#[cfg(feature = "axum")]
+pub mod tenant;
 
 // Re-export commonly used types
 pub use audit::AuditEvent;
@@ -53,6 +55,10 @@ pub use password::*;
 // resolves to exactly one type at this crate's root.
 pub use middleware::{AuthMiddleware, AuthExtractor, AuthContext};
 pub use token_generator::TokenGenerator;
+
+/// The HTTP tenant guard (feature `axum`): derive `company_id` from a signed token, never a request body.
+#[cfg(feature = "axum")]
+pub use tenant::{tenant_auth, TenantClaims, TenantContext, TenantVerifier};
 
 // Re-export generic traits
 pub use permissions::{
