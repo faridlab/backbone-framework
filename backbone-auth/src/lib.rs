@@ -47,7 +47,11 @@ pub use audit::AuditEvent;
 pub use auth_service::*;
 pub use jwt::*;
 pub use password::*;
-pub use middleware::{AuthMiddleware, AuthExtractor};
+// `AuthContext` here is the IDENTITY context (`user_id` / `roles` / `permissions`) — the one
+// `ResourcePolicy` and every generated `*_auth.rs` checks against. `traits` has a same-named struct
+// carrying request forensics; it is re-exported below as `RequestAuthContext` so `AuthContext`
+// resolves to exactly one type at this crate's root.
+pub use middleware::{AuthMiddleware, AuthExtractor, AuthContext};
 pub use token_generator::TokenGenerator;
 
 // Re-export generic traits
@@ -65,9 +69,17 @@ pub use traits::{
     User,
     // Other types
     RefreshTokenClaims, DeviceInfo, SecurityFlags, SecurityAlertType,
-    AuthContext, PasswordPolicy, TwoFactorMethod, TwoFactorChallenge,
+    PasswordPolicy, TwoFactorMethod, TwoFactorChallenge,
     PasswordResetRequest, PasswordResetConfirmation, AuthRequest, AuthResultEnhanced,
 };
+
+/// Request forensics (IP, user agent, device fingerprint, session) captured at authentication time.
+///
+/// Renamed on re-export: this used to be exported as `AuthContext`, which collided with the identity
+/// context of the same name in `middleware` and silently shadowed it at the crate root — code that
+/// wrote `use backbone_auth::AuthContext` and then read `.permissions` did not compile. Reach for
+/// `AuthContext` for *who the caller is*, and this for *where the request came from*.
+pub use traits::AuthContext as RequestAuthContext;
 
 pub use resource_policy::{
     ResourceAction, ResourcePolicy, AccessDenied,
