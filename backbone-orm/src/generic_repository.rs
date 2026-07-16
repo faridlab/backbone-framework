@@ -75,19 +75,19 @@ pub trait EntityRepoMeta {
         &[]
     }
 
-    /// The response field (camelCase) holding the owner/tenant id (`@owner`),
+    /// The response field (camelCase) holding the owner/company id (`@owner`),
     /// compared against the caller's access scope to decide private-field
     /// visibility. `None` = the entity has no owner concept.
     fn owner_field() -> Option<&'static str> {
         None
     }
 
-    // ── Row-level tenant isolation ──
+    // ── Row-level company isolation ──
 
-    /// The DB column that scopes rows to a tenant (snake_case, e.g. `company_id`).
+    /// The DB column that scopes rows to a company (snake_case, e.g. `company_id`).
     /// `None` = the entity is global (reference data) and is not fenced.
     ///
-    /// The generator emits this **structurally** — from the presence of the tenant
+    /// The generator emits this **structurally** — from the presence of the company
     /// column, a fact it cannot forget — and an entity opts OUT with `@global`.
     /// The polarity is deliberate: `owner_field()` above is opt-IN via `@owner`, and
     /// in a year of generated entities not one model ever declared it, so the whole
@@ -97,7 +97,7 @@ pub trait EntityRepoMeta {
     ///
     /// This is a *row-visibility fence*, the same category as `SoftDelete`'s
     /// unconditional `deleted_at IS NULL` — not domain logic.
-    fn tenant_field() -> Option<&'static str> {
+    fn company_field() -> Option<&'static str> {
         None
     }
 
@@ -112,24 +112,24 @@ pub trait EntityRepoMeta {
 
 // ─── Delete-mode markers ──────────────────────────────────────────────────────
 
-// ─── Row-level tenant fence ───────────────────────────────────────────────────
+// ─── Row-level company fence ───────────────────────────────────────────────────
 
-/// The caller could not be scoped to a tenant for an entity that requires one.
+/// The caller could not be scoped to a company for an entity that requires one.
 ///
 /// Deliberately an error and not an empty result: an empty list is a silent lie that
 /// looks identical to "no data" and gets debugged for days, whereas this names the
 /// wiring bug. Callers should surface it as 403.
 #[derive(Debug, thiserror::Error)]
-#[error("entity is tenant-scoped ({column}) but the request carries no tenant scope")]
-pub struct MissingTenantScope {
+#[error("entity is company-scoped ({column}) but the request carries no company scope")]
+pub struct MissingCompanyScope {
     /// The column that would have fenced the query.
     pub column: &'static str,
 }
 
 /// Build the SQL fence for `T`, or fail closed.
 ///
-/// - entity is global (`tenant_field() == None`) → no fence, reference data reads freely
-/// - entity is fenced but the request has no tenant → **`Err`**, never an unfenced query
+/// - entity is global (`company_field() == None`) → no fence, reference data reads freely
+/// - entity is fenced but the request has no company → **`Err`**, never an unfenced query
 /// - both present → `col = '<uuid>'`, ANDed into the WHERE by the caller
 ///
 /// The literal is safe to interpolate: `column` is generator-emitted (never client
@@ -137,27 +137,27 @@ pub struct MissingTenantScope {
 /// carry a quote. The ORM's filter layer has no typed-parameter slot for a base
 /// condition — `__base_condition` is injected verbatim — so this is the seam the
 /// design already established for `SoftDelete`.
-pub fn tenant_fence<T: EntityRepoMeta>(tenant: Option<Uuid>) -> Result<Option<String>, MissingTenantScope> {
-    match (T::tenant_field(), tenant) {
+pub fn company_fence<T: EntityRepoMeta>(company: Option<Uuid>) -> Result<Option<String>, MissingCompanyScope> {
+    match (T::company_field(), company) {
         (None, _) => Ok(None),
-        (Some(column), None) => Err(MissingTenantScope { column }),
+        (Some(column), None) => Err(MissingCompanyScope { column }),
         (Some(column), Some(id)) => Ok(Some(format!("{column} = '{id}'"))),
     }
 }
 
-/// Remove any caller-supplied filter on the tenant column.
+/// Remove any caller-supplied filter on the company column.
 ///
 /// The HTTP filter map is `#[serde(flatten)]`, so `?company_id=<victim>` arrives as an
 /// ordinary filter and the builder honours it. The fence is ANDed, so a client cannot
-/// widen past its own tenant — but leaving the key in lets a caller AND a *second*,
-/// contradictory tenant predicate and turn every list into an empty-vs-nonempty oracle
-/// for "does tenant X have rows matching Y". Strip it: a client may narrow **within**
-/// its tenant, never speak about the tenant at all.
+/// widen past its own company — but leaving the key in lets a caller AND a *second*,
+/// contradictory company predicate and turn every list into an empty-vs-nonempty oracle
+/// for "does company X have rows matching Y". Strip it: a client may narrow **within**
+/// its company, never speak about the company at all.
 ///
 /// Handles the snake_case column, its camelCase response key, and both operator forms
 /// (`company_id[eq]=…`).
-pub fn strip_client_tenant_filters<T: EntityRepoMeta>(filters: &mut HashMap<String, String>) {
-    let Some(column) = T::tenant_field() else {
+pub fn strip_client_company_filters<T: EntityRepoMeta>(filters: &mut HashMap<String, String>) {
+    let Some(column) = T::company_field() else {
         return;
     };
     let camel = snake_to_camel(column);
@@ -169,7 +169,7 @@ pub fn strip_client_tenant_filters<T: EntityRepoMeta>(filters: &mut HashMap<Stri
 
 /// AND two optional SQL conditions into the single `__base_condition` slot.
 ///
-/// `__base_condition` is one HashMap key, so the soft-delete guard and the tenant fence
+/// `__base_condition` is one HashMap key, so the soft-delete guard and the company fence
 /// have to arrive as a single string rather than two independent predicates.
 pub fn and_conditions(a: Option<&str>, b: Option<String>) -> Option<String> {
     match (a, b) {
@@ -348,7 +348,7 @@ where
     /// filters.
     ///
     /// NOTE: prefer the `*_scoped` entry points for anything a client can reach —
-    /// they compose the tenant fence into this condition. This raw form applies no
+    /// they compose the company fence into this condition. This raw form applies no
     /// fence and is for internal/job callers that have already established scope.
     pub async fn run_filtered_query(
         &self,
@@ -426,11 +426,11 @@ where
         ).await
     }
 
-    /// Paginate active entities, fenced to `tenant`.
+    /// Paginate active entities, fenced to `company`.
     ///
-    /// The tenant-scoped counterpart of [`Self::list_paginated_filtered`] and the one any
-    /// client-reachable read should use. Fails closed: a fenced entity with no tenant
-    /// returns [`MissingTenantScope`] rather than every tenant's rows.
+    /// The company-scoped counterpart of [`Self::list_paginated_filtered`] and the one any
+    /// client-reachable read should use. Fails closed: a fenced entity with no company
+    /// returns [`MissingCompanyScope`] rather than every company's rows.
     ///
     /// The fence is ANDed into the same `__base_condition` the soft-delete guard uses, so
     /// it lands in SQL — which is what keeps `total` honest. A post-filter in the handler
@@ -440,14 +440,14 @@ where
         &self,
         pagination: PaginationParams,
         filters: Option<&HashMap<String, String>>,
-        tenant: Option<Uuid>,
+        company: Option<Uuid>,
     ) -> Result<PaginatedResult<T>>
     where
         T: EntityRepoMeta + Send + Sync,
     {
-        let fence = tenant_fence::<T>(tenant)?;
+        let fence = company_fence::<T>(company)?;
         let mut filters_map = filters.cloned().unwrap_or_default();
-        strip_client_tenant_filters::<T>(&mut filters_map);
+        strip_client_company_filters::<T>(&mut filters_map);
         let column_types = T::column_types();
         let search_fields_owned: Vec<&'static str> = T::search_fields().iter().copied().collect();
         self.run_filtered_query(
@@ -460,7 +460,7 @@ where
         .await
     }
 
-    /// Paginate soft-deleted entities, fenced to `tenant`.
+    /// Paginate soft-deleted entities, fenced to `company`.
     ///
     /// `/trash` is the worse leak of the two: it serves rows whose owners were told the
     /// data is gone. Same fence, same fail-closed contract.
@@ -468,14 +468,14 @@ where
         &self,
         pagination: PaginationParams,
         filters: Option<&HashMap<String, String>>,
-        tenant: Option<Uuid>,
+        company: Option<Uuid>,
     ) -> Result<PaginatedResult<T>>
     where
         T: EntityRepoMeta + Send + Sync,
     {
-        let fence = tenant_fence::<T>(tenant)?;
+        let fence = company_fence::<T>(company)?;
         let mut filters_map = filters.cloned().unwrap_or_default();
-        strip_client_tenant_filters::<T>(&mut filters_map);
+        strip_client_company_filters::<T>(&mut filters_map);
         let column_types = T::column_types();
         let empty: &[&str] = &[];
         self.run_filtered_query(

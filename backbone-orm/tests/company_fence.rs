@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use backbone_orm::{and_conditions, strip_client_tenant_filters, tenant_fence, EntityRepoMeta};
+use backbone_orm::{and_conditions, strip_client_company_filters, company_fence, EntityRepoMeta};
 use uuid::Uuid;
 
 /// A tenant-scoped entity — what the generator emits for any model carrying `company_id`.
@@ -26,7 +26,7 @@ impl EntityRepoMeta for Fenced {
     fn search_fields() -> &'static [&'static str] {
         &[]
     }
-    fn tenant_field() -> Option<&'static str> {
+    fn company_field() -> Option<&'static str> {
         Some("company_id")
     }
 }
@@ -44,22 +44,22 @@ impl EntityRepoMeta for Global {
 
 #[test]
 fn tf1_global_entity_is_not_fenced() {
-    assert!(tenant_fence::<Global>(None).unwrap().is_none());
-    assert!(tenant_fence::<Global>(Some(Uuid::new_v4())).unwrap().is_none());
+    assert!(company_fence::<Global>(None).unwrap().is_none());
+    assert!(company_fence::<Global>(Some(Uuid::new_v4())).unwrap().is_none());
 }
 
 #[test]
 fn tf2_fenced_entity_without_scope_fails_closed() {
     // The whole point. Before this, an unscoped read returned every tenant's rows; it must
     // now be impossible to build the query at all.
-    let err = tenant_fence::<Fenced>(None).expect_err("must not produce an unfenced query");
+    let err = company_fence::<Fenced>(None).expect_err("must not produce an unfenced query");
     assert_eq!(err.column, "company_id");
 }
 
 #[test]
 fn tf3_fenced_entity_with_scope_yields_the_predicate() {
     let id = Uuid::new_v4();
-    let cond = tenant_fence::<Fenced>(Some(id)).unwrap().expect("fenced");
+    let cond = company_fence::<Fenced>(Some(id)).unwrap().expect("fenced");
     assert_eq!(cond, format!("company_id = '{id}'"));
     // A Uuid can only render hex and dashes, so the literal cannot carry a quote.
     assert!(!cond.contains('"'));
@@ -78,7 +78,7 @@ fn tf4_client_supplied_tenant_filters_are_stripped() {
         ("customer_id".to_string(), Uuid::new_v4().to_string()),
     ]);
 
-    strip_client_tenant_filters::<Fenced>(&mut filters);
+    strip_client_company_filters::<Fenced>(&mut filters);
 
     assert!(
         !filters.keys().any(|k| k.to_lowercase().starts_with("company")),
@@ -92,7 +92,7 @@ fn tf4_client_supplied_tenant_filters_are_stripped() {
 #[test]
 fn tf5_global_entity_filters_are_untouched() {
     let mut filters = HashMap::from([("company_id".to_string(), "anything".to_string())]);
-    strip_client_tenant_filters::<Global>(&mut filters);
+    strip_client_company_filters::<Global>(&mut filters);
     // `Global` has no tenant column, so `company_id` here is an ordinary field, not a fence
     // to defend — stripping it would silently break a legitimate query.
     assert_eq!(filters.len(), 1);
@@ -101,7 +101,7 @@ fn tf5_global_entity_filters_are_untouched() {
 #[test]
 fn tf6_fence_ands_with_the_soft_delete_guard() {
     let id = Uuid::new_v4();
-    let fence = tenant_fence::<Fenced>(Some(id)).unwrap();
+    let fence = company_fence::<Fenced>(Some(id)).unwrap();
     let combined = and_conditions(Some("metadata->>'deleted_at' IS NULL"), fence)
         .expect("both present");
     assert_eq!(

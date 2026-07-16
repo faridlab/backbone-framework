@@ -35,8 +35,8 @@ mod raw_query_tests;
 // Re-export commonly used types
 pub use repository::*;
 pub use generic_repository::{
-    and_conditions, fetch_by_ids_as_json, strip_client_tenant_filters, tenant_fence,
-    EntityRepoMeta, GenericCrudRepository, HardDelete, MissingTenantScope, SoftDelete,
+    and_conditions, fetch_by_ids_as_json, strip_client_company_filters, company_fence,
+    EntityRepoMeta, GenericCrudRepository, HardDelete, MissingCompanyScope, SoftDelete,
 };
 pub use migrations::*;
 pub use query_builder::*;

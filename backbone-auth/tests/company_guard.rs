@@ -1,4 +1,4 @@
-//! Contract tests for the HTTP tenant guard (feature `axum`).
+//! Contract tests for the HTTP company guard (feature `axum`).
 //!
 //! The guard's whole job is to be **fail-closed**: a request that cannot prove which tenant it acts for
 //! must never reach a handler. These drive the real router in-process via `tower::ServiceExt::oneshot`;
@@ -22,7 +22,7 @@ use axum::{
     routing::post,
     Router,
 };
-use backbone_auth::tenant::{tenant_auth, TenantContext, TenantVerifier};
+use backbone_auth::company::{company_auth, CompanyContext, CompanyVerifier};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use serde::Serialize;
 use tower::ServiceExt;
@@ -52,7 +52,7 @@ fn token_with(secret: &[u8], exp: usize, company_id: Option<Uuid>, branch_id: Op
 }
 
 /// Echoes the tenant the guard proved, so a 200 also asserts the extractor wired the right values.
-async fn guarded_handler(tenant: TenantContext) -> axum::response::Response {
+async fn guarded_handler(tenant: CompanyContext) -> axum::response::Response {
     axum::response::Response::builder()
         .status(StatusCode::OK)
         .header("x-company-id", tenant.company_id.to_string())
@@ -68,7 +68,7 @@ async fn guarded_handler(tenant: TenantContext) -> axum::response::Response {
 fn app() -> Router {
     Router::new()
         .route("/guarded", post(guarded_handler))
-        .layer(from_fn_with_state(TenantVerifier::hs256(SECRET), tenant_auth))
+        .layer(from_fn_with_state(CompanyVerifier::hs256(SECRET), company_auth))
 }
 
 async fn call(bearer: Option<&str>) -> axum::response::Response {

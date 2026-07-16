@@ -137,22 +137,22 @@ fn project_sparse(mut value: serde_json::Value, fields: &[String]) -> serde_json
 }
 
 /// Per-request access scope, injected by the application's auth middleware as an axum
-/// `Extension`. `Platform` sees everything (a superadmin / root caller); `Tenant(id)` is
+/// `Extension`. `Platform` sees everything (a superadmin / root caller); `Company(id)` is
 /// scoped to one tenant.
 ///
 /// It governs two boundaries, and they must agree:
-/// - **row visibility** — the SQL fence (`EntityRepoMeta::tenant_field`), which decides
+/// - **row visibility** — the SQL fence (`EntityRepoMeta::company_field`), which decides
 ///   which rows exist for this caller at all;
 /// - **field visibility** — `@private` fields, gated on the row's `@owner` matching.
 ///
 /// # Deriving it
 ///
 /// There must be exactly ONE answer to "who is the tenant" per request. Build this
-/// **from** the authenticated principal — `backbone_auth::tenant::TenantContext`, whose
+/// **from** the authenticated principal — `backbone_auth::company::CompanyContext`, whose
 /// `company_id` comes from a signed claim — never populate it independently:
 ///
 /// ```rust,ignore
-/// let scope = AccessScope::Tenant(tenant_ctx.company_id);
+/// let scope = AccessScope::Company(tenant_ctx.company_id);
 /// ```
 ///
 /// Two independently-populated identities can disagree under partial wiring, and the
@@ -160,29 +160,29 @@ fn project_sparse(mut value: serde_json::Value, fields: &[String]) -> serde_json
 /// the writer cannot drift on formatting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccessScope {
-    /// Full visibility — platform/root caller. No tenant fence is applied.
+    /// Full visibility — platform/root caller. No company fence is applied.
     Platform,
-    /// Scoped to a single tenant; only this tenant's rows are visible.
-    Tenant(uuid::Uuid),
+    /// Scoped to a single company (legal entity); only this company's rows are visible.
+    Company(uuid::Uuid),
 }
 
 impl AccessScope {
-    /// The tenant to fence queries by, or `None` for a platform caller.
+    /// The company to fence queries by, or `None` for a platform caller.
     ///
     /// Feed this to the ORM's scoped read paths. Note `None` here means "platform, no
     /// fence" — it is NOT the same as an absent `AccessScope`, which means the request was
-    /// never scoped and must be refused for a tenant-scoped entity.
-    pub fn tenant_id(&self) -> Option<uuid::Uuid> {
+    /// never scoped and must be refused for a company-scoped entity.
+    pub fn company(&self) -> Option<uuid::Uuid> {
         match self {
             AccessScope::Platform => None,
-            AccessScope::Tenant(id) => Some(*id),
+            AccessScope::Company(id) => Some(*id),
         }
     }
 }
 
 /// Enforce field-level security on an already-serialized response object: strip the
 /// entity's `@private` fields unless the caller may see them. Visibility rule —
-/// `Platform` → all; `Tenant(id)` → only when the row's `@owner` field equals `id`;
+/// `Platform` → all; `Company(id)` → only when the row's `@owner` field equals `id`;
 /// absent scope → treated as non-owner (fail-closed). Runs BEFORE sparse projection
 /// so the security ceiling always beats a `?fields=` request.
 fn apply_field_security(
@@ -196,7 +196,7 @@ fn apply_field_security(
     }
     let can_see_private = match scope {
         Some(AccessScope::Platform) => true,
-        Some(AccessScope::Tenant(id)) => owner_field
+        Some(AccessScope::Company(id)) => owner_field
             .and_then(|f| value.get(f))
             .and_then(|v| v.as_str())
             // Parse rather than compare strings: the row's owner key is serialized JSON and
@@ -1918,7 +1918,7 @@ mod tests {
     fn security_owner_tenant_sees_private() {
         let out = apply_field_security(
             row(),
-            Some(&AccessScope::Tenant(owner_a())),
+            Some(&AccessScope::Company(owner_a())),
             PRIV,
             Some("providerId"),
         );
@@ -1929,7 +1929,7 @@ mod tests {
     fn security_other_tenant_stripped() {
         let out = apply_field_security(
             row(),
-            Some(&AccessScope::Tenant(owner_b())),
+            Some(&AccessScope::Company(owner_b())),
             PRIV,
             Some("providerId"),
         );
@@ -1975,7 +1975,7 @@ mod tests {
     #[test]
     fn security_null_owner_only_platform_sees() {
         let v = serde_json::json!({ "id": "1", "providerId": null, "hppPerUnit": 5 });
-        let tenant = apply_field_security(v.clone(), Some(&AccessScope::Tenant(owner_a())), PRIV, Some("providerId"));
+        let tenant = apply_field_security(v.clone(), Some(&AccessScope::Company(owner_a())), PRIV, Some("providerId"));
         assert!(tenant.get("hppPerUnit").is_none());
         let plat = apply_field_security(v, Some(&AccessScope::Platform), PRIV, Some("providerId"));
         assert!(plat.get("hppPerUnit").is_some());
