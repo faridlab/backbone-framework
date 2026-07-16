@@ -150,8 +150,15 @@ pub async fn company_auth(
     };
     match verifier.verify(token) {
         Some(ctx) => {
+            // Bind the request's company for the whole downstream handler so the RLS read fence
+            // (ADR-0008) returns this company's rows: every ORM statement issued while handling the
+            // request runs with `app.company_id` set to `ctx.company_id`. This is the same signed
+            // `company_id` the write guard trusts — reads and writes fence to one identity. The scope
+            // is transaction-local per statement, so it never rides a pooled connection into the next
+            // request.
+            let company_id = ctx.company_id;
             req.extensions_mut().insert(ctx);
-            next.run(req).await
+            backbone_orm::with_company_scope(Some(company_id), next.run(req)).await
         }
         None => unauthorized("invalid token or missing company_id claim"),
     }
