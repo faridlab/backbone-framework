@@ -41,6 +41,9 @@ use std::sync::Arc;
 
 use tokio::sync::{Mutex, OnceCell};
 
+#[cfg(feature = "provision")]
+pub mod provision;
+
 /// A tenant's stable identifier — a subdomain (`acme`) or an opaque id, whatever the router resolves.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TenantId(pub String);
