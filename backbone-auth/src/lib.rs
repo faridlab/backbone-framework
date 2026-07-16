@@ -60,6 +60,26 @@ pub use token_generator::TokenGenerator;
 #[cfg(feature = "axum")]
 pub use company::{company_auth, CompanyClaims, CompanyContext, CompanyVerifier};
 
+// ── Backward-compatibility aliases (deprecated) ──
+//
+// These were `Tenant*` until ADR-0005 established that `company_id` is a legal-entity/books boundary,
+// not the tenant (the tenant is the database). The rename is a breaking change for downstream
+// consumers pinned to `main` — e.g. serpa-posman-service references `TenantVerifier`. These aliases
+// keep such consumers compiling on sync, with a deprecation warning and a migration path. Remove them
+// once no consumer references the old names.
+#[cfg(feature = "axum")]
+#[deprecated(note = "renamed to CompanyContext (ADR-0005: company_id is a legal-entity boundary, not the tenant)")]
+pub use company::CompanyContext as TenantContext;
+#[cfg(feature = "axum")]
+#[deprecated(note = "renamed to CompanyVerifier (ADR-0005)")]
+pub use company::CompanyVerifier as TenantVerifier;
+#[cfg(feature = "axum")]
+#[deprecated(note = "renamed to CompanyClaims (ADR-0005)")]
+pub use company::CompanyClaims as TenantClaims;
+#[cfg(feature = "axum")]
+#[deprecated(note = "renamed to company_auth (ADR-0005)")]
+pub use company::company_auth as tenant_auth;
+
 // Re-export generic traits
 pub use permissions::{
     PermissionLike, RoleLike, PermissionChecker,
