@@ -12,6 +12,16 @@
 //! (open a pool to `tenant_<id>`, run the module builders); this crate never imports `sqlx` or a
 //! module.
 //!
+//! ## Scope boundary — what does NOT belong here
+//!
+//! This is **routing plumbing that sits ABOVE modules** (it dispatches a request into a tenant's
+//! module graph), so it is a framework crate, not a `module`. The tenant **domain** — the `Tenant`
+//! entity, membership, plans, provisioning lifecycle, billing — is a *separate* schema-driven module
+//! (the "control plane" of [ADR-0006](../../docs/handbook/adr/0006-per-tenant-database-isolation.md)),
+//! under its own name. Do not grow entities, persistence, or business rules in here: a crate must
+//! stay plumbing (`backbone-framework/CLAUDE.md`), and the router cannot depend on the domain it
+//! routes to without inverting the layering.
+//!
 //! ## Guarantees
 //!
 //! - **Build-once under concurrency.** Two simultaneous first requests for the same tenant build the
