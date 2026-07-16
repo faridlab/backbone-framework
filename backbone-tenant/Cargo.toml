@@ -1,0 +1,18 @@
+[package]
+name = "backbone-tenant"
+version = "0.1.0"
+edition = "2021"
+description = "Per-tenant runtime registry: resolve a request to its tenant's runtime (pool + built modules), building each tenant once and caching it (ADR-0006)."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+async-trait = "0.1"
+thiserror = "1.0"
+tokio = { version = "1.0", features = ["sync"] }
+
+[dev-dependencies]
+tokio = { version = "1.0", features = ["sync", "macros", "rt", "rt-multi-thread", "time"] }
+async-trait = "0.1"
+thiserror = "1.0"

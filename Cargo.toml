@@ -18,6 +18,7 @@ members = [
     "backbone-rate-limit",
     "backbone-search",
     "backbone-storage",
+    "backbone-tenant",
 ]
 
 # Each member crate keeps its own dependency declarations. There is intentionally
