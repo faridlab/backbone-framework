@@ -256,7 +256,7 @@ impl<T: for<'a> FromRow<'a, PgRow> + Send + Unpin> PostgresRepository<T> {
         for param in &filter_params {
             count_query_builder = count_query_builder.bind(param);
         }
-        let total = count_query_builder.fetch_one(&self.pool).await? as u64;
+        let total = crate::company_scope::fetch_one_scalar_scoped(&self.pool, count_query_builder).await? as u64;
 
         // Data query
         let data_query = format!(
@@ -273,7 +273,7 @@ impl<T: for<'a> FromRow<'a, PgRow> + Send + Unpin> PostgresRepository<T> {
             data_query_builder = data_query_builder.bind(param);
         }
 
-        let data = data_query_builder.fetch_all(&self.pool).await?;
+        let data = crate::company_scope::fetch_all_scoped(&self.pool, data_query_builder).await?;
 
         Ok(PaginatedResult {
             data,
@@ -352,7 +352,7 @@ impl<T: for<'a> FromRow<'a, PgRow> + Send + Unpin> PostgresRepository<T> {
         for param in &filter_params {
             count_query_builder = count_query_builder.bind(param);
         }
-        let total = count_query_builder.fetch_one(&self.pool).await? as u64;
+        let total = crate::company_scope::fetch_one_scalar_scoped(&self.pool, count_query_builder).await? as u64;
 
         // Data query
         let data_query = format!(
@@ -369,7 +369,7 @@ impl<T: for<'a> FromRow<'a, PgRow> + Send + Unpin> PostgresRepository<T> {
             data_query_builder = data_query_builder.bind(param);
         }
 
-        let data = data_query_builder.fetch_all(&self.pool).await?;
+        let data = crate::company_scope::fetch_all_scoped(&self.pool, data_query_builder).await?;
 
         Ok(PaginatedResult {
             data,
@@ -407,10 +407,11 @@ where
             table = self.table_name
         );
 
-        let result = sqlx::query_as::<_, T>(&query)
-            .bind(&json_str)
-            .fetch_one(&self.pool)
-            .await?;
+        let result = crate::company_scope::fetch_one_scoped(
+            &self.pool,
+            sqlx::query_as::<_, T>(&query).bind(&json_str),
+        )
+        .await?;
 
         Ok(result)
     }
@@ -418,18 +419,21 @@ where
     async fn find_by_id(&self, id: &str) -> anyhow::Result<Option<T>> {
         // Cast text to UUID for PostgreSQL UUID columns
         let query = format!("SELECT * FROM {} WHERE id = $1::uuid", self.table_name);
-        let result = sqlx::query_as::<Postgres, T>(&query)
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await?;
+        let result = crate::company_scope::fetch_optional_scoped(
+            &self.pool,
+            sqlx::query_as::<Postgres, T>(&query).bind(id),
+        )
+        .await?;
         Ok(result)
     }
 
     async fn find_all(&self) -> anyhow::Result<Vec<T>> {
         let query = format!("SELECT * FROM {}", self.table_name);
-        let results = sqlx::query_as::<Postgres, T>(&query)
-            .fetch_all(&self.pool)
-            .await?;
+        let results = crate::company_scope::fetch_all_scoped(
+            &self.pool,
+            sqlx::query_as::<Postgres, T>(&query),
+        )
+        .await?;
         Ok(results)
     }
 
@@ -469,45 +473,51 @@ where
             columns = column_names
         );
 
-        let result = sqlx::query_as::<_, T>(&query)
-            .bind(&json_str)
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await?;
+        let result = crate::company_scope::fetch_optional_scoped(
+            &self.pool,
+            sqlx::query_as::<_, T>(&query).bind(&json_str).bind(id),
+        )
+        .await?;
 
         Ok(result)
     }
 
     async fn delete(&self, id: &str) -> anyhow::Result<bool> {
         let query = format!("DELETE FROM {} WHERE id = $1::uuid", self.table_name);
-        let result = sqlx::query(&query)
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        let result = crate::company_scope::execute_scoped(
+            &self.pool,
+            sqlx::query(&query).bind(id),
+        )
+        .await?;
         Ok(result.rows_affected() > 0)
     }
 
     async fn count(&self) -> anyhow::Result<u64> {
         let query = format!("SELECT COUNT(*) FROM {}", self.table_name);
-        let count = sqlx::query_scalar::<_, i64>(&query)
-            .fetch_one(&self.pool)
-            .await? as u64;
+        let count = crate::company_scope::fetch_one_scalar_scoped(
+            &self.pool,
+            sqlx::query_scalar::<_, i64>(&query),
+        )
+        .await? as u64;
         Ok(count)
     }
 
     async fn exists(&self, id: &str) -> anyhow::Result<bool> {
         let query = format!("SELECT 1 FROM {} WHERE id = $1::uuid LIMIT 1", self.table_name);
-        let result = sqlx::query_scalar::<_, i32>(&query)
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await?;
+        let result = crate::company_scope::fetch_optional_scalar_scoped(
+            &self.pool,
+            sqlx::query_scalar::<_, i32>(&query).bind(id),
+        )
+        .await?;
         Ok(result.is_some())
     }
 
     async fn execute_query(&self, query: &str) -> anyhow::Result<u64> {
-        let result = sqlx::query(query)
-            .execute(&self.pool)
-            .await?;
+        let result = crate::company_scope::execute_scoped(
+            &self.pool,
+            sqlx::query(query),
+        )
+        .await?;
         Ok(result.rows_affected())
     }
 }

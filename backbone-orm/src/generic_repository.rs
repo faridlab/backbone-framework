@@ -279,10 +279,11 @@ where
             "SELECT * FROM {} WHERE {} = $1{}",
             self.table_name(), field, extra
         );
-        let result = sqlx::query_as::<_, T>(&query)
-            .bind(value)
-            .fetch_optional(self.pool())
-            .await?;
+        let result = crate::company_scope::fetch_optional_scoped(
+            self.pool(),
+            sqlx::query_as::<_, T>(&query).bind(value),
+        )
+        .await?;
         Ok(result)
     }
 
@@ -297,10 +298,11 @@ where
             "SELECT 1 FROM {} WHERE {} = $1{} LIMIT 1",
             self.table_name(), field, extra
         );
-        let result = sqlx::query_scalar::<_, i32>(&query)
-            .bind(value)
-            .fetch_optional(self.pool())
-            .await?;
+        let result = crate::company_scope::fetch_optional_scalar_scoped(
+            self.pool(),
+            sqlx::query_scalar::<_, i32>(&query).bind(value),
+        )
+        .await?;
         Ok(result.is_some())
     }
 
@@ -315,10 +317,11 @@ where
             "SELECT * FROM {} WHERE {} = $1{}",
             self.table_name(), field, extra
         );
-        let result = sqlx::query_as::<_, T>(&query)
-            .bind(value)
-            .fetch_optional(self.pool())
-            .await?;
+        let result = crate::company_scope::fetch_optional_scoped(
+            self.pool(),
+            sqlx::query_as::<_, T>(&query).bind(value),
+        )
+        .await?;
         Ok(result)
     }
 
@@ -333,10 +336,11 @@ where
             "SELECT 1 FROM {} WHERE {} = $1{} LIMIT 1",
             self.table_name(), field, extra
         );
-        let result = sqlx::query_scalar::<_, i32>(&query)
-            .bind(value)
-            .fetch_optional(self.pool())
-            .await?;
+        let result = crate::company_scope::fetch_optional_scalar_scoped(
+            self.pool(),
+            sqlx::query_scalar::<_, i32>(&query).bind(value),
+        )
+        .await?;
         Ok(result.is_some())
     }
 
@@ -515,10 +519,11 @@ where
             "SELECT * FROM {} WHERE id = $1::uuid AND metadata->>'deleted_at' IS NULL",
             self.table_name()
         );
-        let result = sqlx::query_as::<_, T>(&query)
-            .bind(id)
-            .fetch_optional(self.pool())
-            .await?;
+        let result = crate::company_scope::fetch_optional_scoped(
+            self.pool(),
+            sqlx::query_as::<_, T>(&query).bind(id),
+        )
+        .await?;
         Ok(result)
     }
 
@@ -528,9 +533,11 @@ where
             "SELECT * FROM {} WHERE metadata->>'deleted_at' IS NULL",
             self.table_name()
         );
-        let results = sqlx::query_as::<_, T>(&query)
-            .fetch_all(self.pool())
-            .await?;
+        let results = crate::company_scope::fetch_all_scoped(
+            self.pool(),
+            sqlx::query_as::<_, T>(&query),
+        )
+        .await?;
         Ok(results)
     }
 
@@ -561,10 +568,11 @@ where
             "SELECT 1 FROM {} WHERE id = $1::uuid AND metadata->>'deleted_at' IS NULL LIMIT 1",
             self.table_name()
         );
-        let result = sqlx::query_scalar::<_, i32>(&query)
-            .bind(id)
-            .fetch_optional(self.pool())
-            .await?;
+        let result = crate::company_scope::fetch_optional_scalar_scoped(
+            self.pool(),
+            sqlx::query_scalar::<_, i32>(&query).bind(id),
+        )
+        .await?;
         Ok(result.is_some())
     }
 
@@ -577,11 +585,11 @@ where
              ORDER BY id DESC LIMIT $1 OFFSET $2",
             self.table_name()
         );
-        let data = sqlx::query_as::<_, T>(&query)
-            .bind(limit as i64)
-            .bind(offset as i64)
-            .fetch_all(self.pool())
-            .await?;
+        let data = crate::company_scope::fetch_all_scoped(
+            self.pool(),
+            sqlx::query_as::<_, T>(&query).bind(limit as i64).bind(offset as i64),
+        )
+        .await?;
         let total = self.count_active().await?;
         Ok(PaginatedResult {
             data,
@@ -601,10 +609,11 @@ where
              ) WHERE id = $1::uuid AND (metadata->>'deleted_at') IS NULL",
             self.table_name()
         );
-        let result = sqlx::query(&query)
-            .bind(id)
-            .execute(self.pool())
-            .await?;
+        let result = crate::company_scope::execute_scoped(
+            self.pool(),
+            sqlx::query(&query).bind(id),
+        )
+        .await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -616,10 +625,11 @@ where
              RETURNING *",
             self.table_name()
         );
-        let result = sqlx::query_as::<_, T>(&query)
-            .bind(id)
-            .fetch_optional(self.pool())
-            .await?;
+        let result = crate::company_scope::fetch_optional_scoped(
+            self.pool(),
+            sqlx::query_as::<_, T>(&query).bind(id),
+        )
+        .await?;
         Ok(result)
     }
 
@@ -632,18 +642,20 @@ where
              ORDER BY (metadata->>'deleted_at') DESC LIMIT $1 OFFSET $2",
             self.table_name()
         );
-        let data = sqlx::query_as::<_, T>(&query)
-            .bind(limit as i64)
-            .bind(offset as i64)
-            .fetch_all(self.pool())
-            .await?;
+        let data = crate::company_scope::fetch_all_scoped(
+            self.pool(),
+            sqlx::query_as::<_, T>(&query).bind(limit as i64).bind(offset as i64),
+        )
+        .await?;
         let count_query = format!(
             "SELECT COUNT(*) FROM {} WHERE (metadata->>'deleted_at') IS NOT NULL",
             self.table_name()
         );
-        let total = sqlx::query_scalar::<_, i64>(&count_query)
-            .fetch_one(self.pool())
-            .await? as u64;
+        let total = crate::company_scope::fetch_one_scalar_scoped(
+            self.pool(),
+            sqlx::query_scalar::<_, i64>(&count_query),
+        )
+        .await? as u64;
         Ok(PaginatedResult {
             data,
             pagination: PaginationInfo::new(pagination.page, pagination.per_page, total),
@@ -656,7 +668,7 @@ where
             "DELETE FROM {} WHERE (metadata->>'deleted_at') IS NOT NULL",
             self.table_name()
         );
-        let result = sqlx::query(&query).execute(self.pool()).await?;
+        let result = crate::company_scope::execute_scoped(self.pool(), sqlx::query(&query)).await?;
         Ok(result.rows_affected())
     }
 
@@ -666,10 +678,11 @@ where
             "SELECT * FROM {} WHERE id = $1::uuid AND (metadata->>'deleted_at') IS NOT NULL",
             self.table_name()
         );
-        let result = sqlx::query_as::<_, T>(&query)
-            .bind(id)
-            .fetch_optional(self.pool())
-            .await?;
+        let result = crate::company_scope::fetch_optional_scoped(
+            self.pool(),
+            sqlx::query_as::<_, T>(&query).bind(id),
+        )
+        .await?;
         Ok(result)
     }
 
@@ -679,7 +692,11 @@ where
             "DELETE FROM {} WHERE id = $1::uuid AND (metadata->>'deleted_at') IS NOT NULL",
             self.table_name()
         );
-        let result = sqlx::query(&query).bind(id).execute(self.pool()).await?;
+        let result = crate::company_scope::execute_scoped(
+            self.pool(),
+            sqlx::query(&query).bind(id),
+        )
+        .await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -689,9 +706,11 @@ where
             "SELECT COUNT(*) FROM {} WHERE (metadata->>'deleted_at') IS NULL",
             self.table_name()
         );
-        let count = sqlx::query_scalar::<_, i64>(&query)
-            .fetch_one(self.pool())
-            .await? as u64;
+        let count = crate::company_scope::fetch_one_scalar_scoped(
+            self.pool(),
+            sqlx::query_scalar::<_, i64>(&query),
+        )
+        .await? as u64;
         Ok(count)
     }
 
@@ -701,9 +720,11 @@ where
             "SELECT COUNT(*) FROM {} WHERE (metadata->>'deleted_at') IS NOT NULL",
             self.table_name()
         );
-        let count = sqlx::query_scalar::<_, i64>(&query)
-            .fetch_one(self.pool())
-            .await? as u64;
+        let count = crate::company_scope::fetch_one_scalar_scoped(
+            self.pool(),
+            sqlx::query_scalar::<_, i64>(&query),
+        )
+        .await? as u64;
         Ok(count)
     }
 
@@ -727,6 +748,7 @@ where
             self.table_name()
         );
         let mut tx = self.pool().begin().await?;
+        crate::company_scope::bind_current_company(&mut tx).await?;
         let mut q = sqlx::query(&query);
         for id in ids {
             q = q.bind(id);
@@ -757,6 +779,7 @@ where
             self.table_name()
         );
         let mut tx = self.pool().begin().await?;
+        crate::company_scope::bind_current_company(&mut tx).await?;
         let mut q = sqlx::query_as::<_, T>(&query);
         for id in ids {
             q = q.bind(id);
@@ -784,6 +807,7 @@ where
             self.table_name()
         );
         let mut tx = self.pool().begin().await?;
+        crate::company_scope::bind_current_company(&mut tx).await?;
         let mut q = sqlx::query(&query);
         for id in ids {
             q = q.bind(id);
@@ -810,7 +834,11 @@ where
              RETURNING *",
             self.table_name()
         );
-        let rows = sqlx::query_as::<_, T>(&query).fetch_all(self.pool()).await?;
+        let rows = crate::company_scope::fetch_all_scoped(
+            self.pool(),
+            sqlx::query_as::<_, T>(&query),
+        )
+        .await?;
         Ok(rows)
     }
 
@@ -914,9 +942,11 @@ where
     /// Return all entities.
     pub async fn find_all(&self) -> Result<Vec<T>> {
         let query = format!("SELECT * FROM {}", self.table_name());
-        let results = sqlx::query_as::<_, T>(&query)
-            .fetch_all(self.pool())
-            .await?;
+        let results = crate::company_scope::fetch_all_scoped(
+            self.pool(),
+            sqlx::query_as::<_, T>(&query),
+        )
+        .await?;
         Ok(results)
     }
 
@@ -933,9 +963,11 @@ where
     /// Count all entities.
     pub async fn count(&self) -> Result<u64> {
         let query = format!("SELECT COUNT(*) FROM {}", self.table_name());
-        let count = sqlx::query_scalar::<_, i64>(&query)
-            .fetch_one(self.pool())
-            .await? as u64;
+        let count = crate::company_scope::fetch_one_scalar_scoped(
+            self.pool(),
+            sqlx::query_scalar::<_, i64>(&query),
+        )
+        .await? as u64;
         Ok(count)
     }
 
@@ -945,10 +977,11 @@ where
             "SELECT 1 FROM {} WHERE id = $1::uuid LIMIT 1",
             self.table_name()
         );
-        let result = sqlx::query_scalar::<_, i32>(&query)
-            .bind(id)
-            .fetch_optional(self.pool())
-            .await?;
+        let result = crate::company_scope::fetch_optional_scalar_scoped(
+            self.pool(),
+            sqlx::query_scalar::<_, i32>(&query).bind(id),
+        )
+        .await?;
         Ok(result.is_some())
     }
 
@@ -960,11 +993,11 @@ where
             "SELECT * FROM {} ORDER BY id DESC LIMIT $1 OFFSET $2",
             self.table_name()
         );
-        let data = sqlx::query_as::<_, T>(&query)
-            .bind(limit as i64)
-            .bind(offset as i64)
-            .fetch_all(self.pool())
-            .await?;
+        let data = crate::company_scope::fetch_all_scoped(
+            self.pool(),
+            sqlx::query_as::<_, T>(&query).bind(limit as i64).bind(offset as i64),
+        )
+        .await?;
         let total = self.count().await?;
         Ok(PaginatedResult {
             data,
@@ -985,6 +1018,7 @@ where
             self.table_name()
         );
         let mut tx = self.pool().begin().await?;
+        crate::company_scope::bind_current_company(&mut tx).await?;
         let mut q = sqlx::query(&query);
         for id in ids {
             q = q.bind(id);
@@ -1022,7 +1056,10 @@ pub async fn fetch_by_ids_as_json(
         return Ok(Vec::new());
     }
     let query = format!("SELECT row_to_json(t) AS j FROM {table} t WHERE t.id = ANY($1::uuid[])");
-    let rows: Vec<(serde_json::Value,)> = sqlx::query_as(&query).bind(ids).fetch_all(pool).await?;
+    // Scoped too: an `?include=` hydration of a company-fenced relation must obey the same fence,
+    // so a cross-company related row is never leaked through the expansion.
+    let rows: Vec<(serde_json::Value,)> =
+        crate::company_scope::fetch_all_scoped(pool, sqlx::query_as(&query).bind(ids)).await?;
     Ok(rows.into_iter().map(|(j,)| j).collect())
 }
 
@@ -1043,6 +1080,7 @@ where
         return Ok(Vec::new());
     }
     let mut tx = pool.begin().await?;
+    crate::company_scope::bind_current_company(&mut tx).await?;
     let mut out = Vec::with_capacity(entities.len());
     for entity in entities {
         let (id, json_str, column_names) = build_update_parts(entity)?;

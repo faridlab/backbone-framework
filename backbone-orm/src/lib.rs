@@ -11,6 +11,7 @@
 //! - In-memory store for testing
 
 pub mod repository;
+pub mod company_scope;
 pub mod generic_repository;
 pub mod migrations;
 pub mod query_builder;
@@ -34,6 +35,7 @@ mod raw_query_tests;
 
 // Re-export commonly used types
 pub use repository::*;
+pub use company_scope::{current_company, with_company_scope};
 pub use generic_repository::{
     and_conditions, fetch_by_ids_as_json, strip_client_company_filters, company_fence,
     EntityRepoMeta, GenericCrudRepository, HardDelete, MissingCompanyScope, SoftDelete,
