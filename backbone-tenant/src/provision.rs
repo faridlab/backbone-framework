@@ -18,9 +18,10 @@
 
 use std::str::FromStr;
 
-use sqlx::{Connection, Executor, PgConnection};
+use sqlx::postgres::PgPoolOptions;
+use sqlx::{Connection, Executor, PgConnection, PgPool};
 
-use crate::TenantId;
+use crate::{TenantId, TenantRuntimeFactory};
 
 /// The Postgres identifier length limit (`NAMEDATALEN - 1`).
 const MAX_IDENT_LEN: usize = 63;
@@ -175,6 +176,56 @@ impl TenantProvisioner {
         let stmt = format!("DROP DATABASE IF EXISTS \"{db}\"");
         let res = conn.execute(stmt.as_str()).await?;
         Ok(res.rows_affected() > 0 || self.exists(tenant).await.map(|e| !e).unwrap_or(false))
+    }
+}
+
+/// A [`TenantRuntimeFactory`] that resolves a tenant to a connection pool on its own database.
+///
+/// This is the pool half of a tenant runtime — the load-bearing part, since the pool *is* the
+/// tenant's database boundary (ADR-0005). A composition root that also needs a per-tenant module
+/// graph wraps this: build the pool here, then build modules over it. Put it behind a
+/// [`crate::TenantRegistry`] to get build-once-per-tenant, caching, and LRU eviction for free:
+///
+/// ```rust,ignore
+/// let factory = PgPoolFactory::new(provisioner).max_connections(8);
+/// let registry = TenantRegistry::new(factory, 256);
+/// let pool = registry.get_or_build(&tenant).await?; // Arc<PgPool> on tenant_<id>
+/// ```
+///
+/// The tenant's database must already exist ([`TenantProvisioner::provision`]); if it does not, the
+/// connect fails and the registry leaves the slot empty for a retry.
+#[derive(Debug, Clone)]
+pub struct PgPoolFactory {
+    provisioner: TenantProvisioner,
+    max_connections: u32,
+}
+
+impl PgPoolFactory {
+    /// Resolve tenants using `provisioner`'s DSN + naming (so pool DSNs share the id-safety guard).
+    pub fn new(provisioner: TenantProvisioner) -> Self {
+        Self { provisioner, max_connections: 8 }
+    }
+
+    /// Cap connections per tenant pool (default 8). With database-per-tenant, this × resident tenants
+    /// is the real connection budget — keep it modest.
+    pub fn max_connections(mut self, n: u32) -> Self {
+        self.max_connections = n;
+        self
+    }
+}
+
+#[async_trait::async_trait]
+impl TenantRuntimeFactory for PgPoolFactory {
+    type Runtime = PgPool;
+    type Error = ProvisionError;
+
+    async fn build(&self, tenant: &TenantId) -> Result<PgPool, ProvisionError> {
+        let dsn = self.provisioner.tenant_dsn(tenant)?; // validated slug → safe DSN
+        let pool = PgPoolOptions::new()
+            .max_connections(self.max_connections)
+            .connect(&dsn)
+            .await?;
+        Ok(pool)
     }
 }
 

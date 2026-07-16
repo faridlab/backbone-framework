@@ -63,6 +63,54 @@ async fn provisions_migrates_and_deprovisions_a_real_tenant() {
 }
 
 #[tokio::test]
+async fn registry_routes_each_tenant_to_its_own_isolated_database() {
+    // The end-to-end proof of the routing model: two provisioned tenants, resolved through one
+    // TenantRegistry<PgPoolFactory>, each land on their OWN database — a write to one is invisible to
+    // the other. This is Seam A (provision) + Seam B (registry + factory) working together.
+    use backbone_tenant::provision::PgPoolFactory;
+    use backbone_tenant::TenantRegistry;
+
+    let Some(dsn) = admin_dsn() else {
+        eprintln!("skipping: set BACKBONE_TENANT_ADMIN_DSN to run the live isolation test");
+        return;
+    };
+    let p = TenantProvisioner::new(dsn);
+    let (a, b) = (TenantId::from("provtest_a"), TenantId::from("provtest_b"));
+
+    // Clean slate, then provision both with the same schema.
+    for t in [&a, &b] {
+        let _ = p.deprovision(t).await;
+        p.provision(t, &["CREATE TABLE note (who text)"]).await.expect("provision");
+    }
+
+    // Route through the registry: one factory, both tenants built once and cached.
+    let registry = TenantRegistry::new(PgPoolFactory::new(p.clone()).max_connections(2), 16);
+    let pool_a = registry.get_or_build(&a).await.expect("resolve a");
+    let pool_b = registry.get_or_build(&b).await.expect("resolve b");
+    assert_eq!(registry.len().await, 2);
+
+    // Write only into A's database via A's pool.
+    sqlx::query("INSERT INTO note (who) VALUES ('A')").execute(&*pool_a).await.expect("write A");
+
+    // A sees its row; B's database is untouched — isolation holds across the pool boundary.
+    let a_rows: Vec<(String,)> = sqlx::query_as("SELECT who FROM note").fetch_all(&*pool_a).await.unwrap();
+    let b_rows: Vec<(String,)> = sqlx::query_as("SELECT who FROM note").fetch_all(&*pool_b).await.unwrap();
+    assert_eq!(a_rows, vec![("A".to_string(),)], "tenant A must see its own write");
+    assert!(b_rows.is_empty(), "tenant B's database must NOT see tenant A's write");
+
+    // Resolving A again returns the cached pool (same instance), not a rebuild.
+    let pool_a2 = registry.get_or_build(&a).await.unwrap();
+    assert!(std::sync::Arc::ptr_eq(&pool_a, &pool_a2), "the registry must serve A from cache");
+
+    // Teardown.
+    drop((pool_a, pool_a2, pool_b));
+    registry.evict_all().await;
+    for t in [&a, &b] {
+        p.deprovision(t).await.expect("deprovision");
+    }
+}
+
+#[tokio::test]
 async fn an_unsafe_tenant_id_never_touches_the_database() {
     // The safety guard must fire before any connection is opened — no DSN required.
     let p = TenantProvisioner::new("postgresql://u:p@localhost:5432/postgres");
