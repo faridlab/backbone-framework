@@ -116,6 +116,19 @@ async fn bind_company(conn: &mut sqlx::PgConnection, company: Uuid) -> Result<()
     Ok(())
 }
 
+/// Bind an EXPLICIT company onto an already-open transaction/connection.
+///
+/// For call sites that know their company directly (it is on the DTO, or was just read off the row)
+/// and open their own transaction — the common shape in hand-written write services. Prefer this over
+/// [`bind_current_company`] when the company is known: it does not depend on an ambient task-local, so
+/// it is correct for non-request callers (event subscribers, jobs) too.
+pub async fn bind_company_on(
+    conn: &mut sqlx::PgConnection,
+    company: Uuid,
+) -> Result<(), sqlx::Error> {
+    bind_company(conn, company).await
+}
+
 /// Bind the current task's company onto an already-open transaction/connection.
 ///
 /// For call sites that manage their own transaction (batch operations run all-or-nothing inside one
