@@ -9,7 +9,7 @@
 //! company A sees only A's rows, an unscoped read sees nothing (fail-closed), and a write forging
 //! another company's id is rejected by `WITH CHECK`.
 
-use backbone_orm::company_scope::with_company_scope;
+use backbone_orm::company_scope::{with_company_scope, with_request_scope};
 use backbone_orm::repository::{DatabaseOperations, PostgresRepository};
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
@@ -123,6 +123,23 @@ async fn orm_reads_and_writes_are_company_fenced() {
     let forged = Widget { id: Uuid::new_v4(), company_id: b, name: "forged".into() };
     let err = with_company_scope(Some(a), repo.create(&forged)).await;
     assert!(err.is_err(), "a caller scoped to A must not be able to write a B-owned row");
+
+    // ── Request-scoped connection: fences an ID-ONLY lookup (the `add_tender` pattern) ──
+    // A lookup by primary key alone, with no `company_id` in the query. `with_request_scope` sets
+    // `app.company_id` on a request-dedicated connection, so RLS fences the row even though the
+    // query never mentions the company — the case per-query scoping cannot cover.
+    let (b_id,): (Uuid,) = sqlx::query_as(&format!("SELECT id FROM {TABLE} WHERE name = 'b-1'"))
+        .fetch_one(&admin).await.expect("read B's id");
+    let (a_id,): (Uuid,) = sqlx::query_as(&format!("SELECT id FROM {TABLE} WHERE name = 'a-1'"))
+        .fetch_one(&admin).await.expect("read A's id");
+
+    let seen_a = with_request_scope(&pool, a, repo.find_by_id(&a_id.to_string()))
+        .await.expect("request scope A").expect("find_by_id A");
+    assert!(seen_a.is_some(), "A must fetch its own row by id under its request scope");
+
+    let seen_b = with_request_scope(&pool, a, repo.find_by_id(&b_id.to_string()))
+        .await.expect("request scope A").expect("find_by_id B");
+    assert!(seen_b.is_none(), "A must NOT fetch B's row by id — the request scope fences the ID-only lookup");
 
     // Cleanup.
     drop(pool);

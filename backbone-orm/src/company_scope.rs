@@ -18,16 +18,68 @@
 //! helpers exist so the ORM read path returns the caller's rows instead of empty — correctness, not
 //! safety.
 
+use sqlx::pool::PoolConnection;
 use sqlx::postgres::{PgArguments, PgRow};
 use sqlx::query::{Query, QueryAs, QueryScalar};
 use sqlx::{FromRow, PgPool, Postgres};
 use std::future::Future;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 tokio::task_local! {
     /// The company the current request is scoped to. `Platform` callers and unscoped code leave
     /// this unset; `None` inside the scope means an explicit platform (no-fence) caller.
     static COMPANY: Option<Uuid>;
+
+    /// A connection dedicated to the current request, with `app.company_id` already set at the
+    /// SESSION level. When present, every scoped execute helper runs on it — so an ID-only lookup in
+    /// a hand-written service (e.g. `SELECT … WHERE id = $1`, with no `company_id` in the query) is
+    /// still fenced, because the scope rides the connection rather than the query text. This is the
+    /// path that makes custom write services RLS-correct without threading a company argument through
+    /// every method. Set by [`with_request_scope`].
+    static REQUEST_CONN: Arc<Mutex<PoolConnection<Postgres>>>;
+}
+
+/// Run `f` with a request-dedicated connection whose `app.company_id` is set to `company`.
+///
+/// Acquires one connection from `pool`, sets the session variable on it, and binds it as the
+/// request connection for the duration of `f`. Every scoped execute helper called inside `f` — from
+/// the ORM or a hand-written service — runs on this connection, so the whole request shares one
+/// company scope set exactly once (no per-statement transaction, and ID-only lookups are fenced
+/// too). The variable is reset before the connection returns to the pool, so it can never ride into
+/// the next request.
+///
+/// Trade-off: this pins a pooled connection for the request's lifetime (vs. connection-per-statement),
+/// so size the pool for peak concurrent requests. Prefer this at the HTTP composition root; leave
+/// non-request callers (jobs) on [`with_company_scope`] (per-statement scoping).
+pub async fn with_request_scope<F, R>(pool: &PgPool, company: Uuid, f: F) -> Result<R, sqlx::Error>
+where
+    F: Future<Output = R>,
+{
+    let mut conn = pool.acquire().await?;
+    sqlx::query("SELECT set_config('app.company_id', $1, false)")
+        .bind(company.to_string())
+        .execute(&mut *conn)
+        .await?;
+
+    let holder = Arc::new(Mutex::new(conn));
+    let result = REQUEST_CONN.scope(holder.clone(), f).await;
+
+    // The scoped clone is dropped when the scope ends, so we reclaim the sole reference, clear the
+    // session var, and only then let the connection return to the pool — clean, never leaking scope.
+    if let Ok(mutex) = Arc::try_unwrap(holder) {
+        let mut conn = mutex.into_inner();
+        let _ = sqlx::query("SELECT set_config('app.company_id', '', false)")
+            .execute(&mut *conn)
+            .await;
+    }
+    Ok(result)
+}
+
+/// The request-dedicated connection, if [`with_request_scope`] set one for this task.
+fn request_conn() -> Option<Arc<Mutex<PoolConnection<Postgres>>>> {
+    REQUEST_CONN.try_with(|c| c.clone()).ok()
 }
 
 /// Run `f` with the request's company scope bound to the current async task.
@@ -91,6 +143,10 @@ pub async fn fetch_all_scoped<'q, T>(
 where
     T: for<'r> FromRow<'r, PgRow> + Send + Unpin,
 {
+    if let Some(conn) = request_conn() {
+        let mut g = conn.lock().await;
+        return query.fetch_all(&mut **g).await;
+    }
     match current_company() {
         None => query.fetch_all(pool).await,
         Some(company) => {
@@ -111,6 +167,10 @@ pub async fn fetch_one_scoped<'q, T>(
 where
     T: for<'r> FromRow<'r, PgRow> + Send + Unpin,
 {
+    if let Some(conn) = request_conn() {
+        let mut g = conn.lock().await;
+        return query.fetch_one(&mut **g).await;
+    }
     match current_company() {
         None => query.fetch_one(pool).await,
         Some(company) => {
@@ -131,6 +191,10 @@ pub async fn fetch_optional_scoped<'q, T>(
 where
     T: for<'r> FromRow<'r, PgRow> + Send + Unpin,
 {
+    if let Some(conn) = request_conn() {
+        let mut g = conn.lock().await;
+        return query.fetch_optional(&mut **g).await;
+    }
     match current_company() {
         None => query.fetch_optional(pool).await,
         Some(company) => {
@@ -152,6 +216,10 @@ where
     S: Send + Unpin,
     (S,): for<'r> FromRow<'r, PgRow>,
 {
+    if let Some(conn) = request_conn() {
+        let mut g = conn.lock().await;
+        return query.fetch_one(&mut **g).await;
+    }
     match current_company() {
         None => query.fetch_one(pool).await,
         Some(company) => {
@@ -173,6 +241,10 @@ where
     S: Send + Unpin,
     (S,): for<'r> FromRow<'r, PgRow>,
 {
+    if let Some(conn) = request_conn() {
+        let mut g = conn.lock().await;
+        return query.fetch_optional(&mut **g).await;
+    }
     match current_company() {
         None => query.fetch_optional(pool).await,
         Some(company) => {
@@ -194,6 +266,10 @@ pub async fn execute_scoped<'q>(
     pool: &PgPool,
     query: Query<'q, Postgres, PgArguments>,
 ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error> {
+    if let Some(conn) = request_conn() {
+        let mut g = conn.lock().await;
+        return query.execute(&mut **g).await;
+    }
     match current_company() {
         None => query.execute(pool).await,
         Some(company) => {
