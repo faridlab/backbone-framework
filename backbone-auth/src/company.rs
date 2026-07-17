@@ -129,6 +129,14 @@ fn unauthorized(message: &str) -> Response {
         .into_response()
 }
 
+fn internal_error(message: &str) -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(serde_json::json!({ "error": "internal_error", "message": message })),
+    )
+        .into_response()
+}
+
 /// Middleware: validate the Bearer token and insert a [`CompanyContext`]; reject with 401 otherwise.
 ///
 /// Mount on guarded write routes via `from_fn_with_state(verifier, company_auth)`.
@@ -150,15 +158,34 @@ pub async fn company_auth(
     };
     match verifier.verify(token) {
         Some(ctx) => {
-            // Bind the request's company for the whole downstream handler so the RLS read fence
-            // (ADR-0008) returns this company's rows: every ORM statement issued while handling the
-            // request runs with `app.company_id` set to `ctx.company_id`. This is the same signed
-            // `company_id` the write guard trusts — reads and writes fence to one identity. The scope
-            // is transaction-local per statement, so it never rides a pooled connection into the next
-            // request.
+            // Bind the request's company for the whole downstream handler so the RLS fence (ADR-0008)
+            // returns this company's rows: every ORM statement runs with `app.company_id` set to
+            // `ctx.company_id` — the same signed id the write guard trusts.
+            //
+            // If the app inserted its `PgPool` as an extension, upgrade to a request-DEDICATED
+            // connection (`with_request_scope`): the scope rides one connection for the whole request,
+            // so even raw-`sqlx` custom services and ID-only lookups (`WHERE id = $1`, no company in
+            // the query) are fenced. Without the pool extension, fall back to per-statement scoping —
+            // correct for the ORM path, but custom raw services would fail closed. This keeps the
+            // middleware backward-compatible: apps opt into the stronger scope by inserting the pool.
             let company_id = ctx.company_id;
+            let pool = req.extensions().get::<backbone_orm::PgPool>().cloned();
             req.extensions_mut().insert(ctx);
-            backbone_orm::with_company_scope(Some(company_id), next.run(req)).await
+            match pool {
+                Some(pool) => {
+                    match backbone_orm::company_scope::with_request_scope(
+                        &pool,
+                        company_id,
+                        next.run(req),
+                    )
+                    .await
+                    {
+                        Ok(resp) => resp,
+                        Err(_) => internal_error("could not establish the request database scope"),
+                    }
+                }
+                None => backbone_orm::with_company_scope(Some(company_id), next.run(req)).await,
+            }
         }
         None => unauthorized("invalid token or missing company_id claim"),
     }
