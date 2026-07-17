@@ -257,6 +257,72 @@ where
     }
 }
 
+/// `fetch_optional` for an untyped row query (`sqlx::query(..)` → `PgRow`), company-scoped.
+///
+/// Hand-written services commonly read ad-hoc column sets as raw rows rather than a typed struct;
+/// these mirror the typed helpers so such a service can be scoped without restructuring its queries.
+pub async fn fetch_optional_row_scoped<'q>(
+    pool: &PgPool,
+    query: Query<'q, Postgres, PgArguments>,
+) -> Result<Option<PgRow>, sqlx::Error> {
+    if let Some(conn) = request_conn() {
+        let mut g = conn.lock().await;
+        return query.fetch_optional(&mut **g).await;
+    }
+    match current_company() {
+        None => query.fetch_optional(pool).await,
+        Some(company) => {
+            let mut tx = pool.begin().await?;
+            bind_company(&mut tx, company).await?;
+            let row = query.fetch_optional(&mut *tx).await?;
+            tx.commit().await?;
+            Ok(row)
+        }
+    }
+}
+
+/// `fetch_one` for an untyped row query (`sqlx::query(..)` → `PgRow`), company-scoped.
+pub async fn fetch_one_row_scoped<'q>(
+    pool: &PgPool,
+    query: Query<'q, Postgres, PgArguments>,
+) -> Result<PgRow, sqlx::Error> {
+    if let Some(conn) = request_conn() {
+        let mut g = conn.lock().await;
+        return query.fetch_one(&mut **g).await;
+    }
+    match current_company() {
+        None => query.fetch_one(pool).await,
+        Some(company) => {
+            let mut tx = pool.begin().await?;
+            bind_company(&mut tx, company).await?;
+            let row = query.fetch_one(&mut *tx).await?;
+            tx.commit().await?;
+            Ok(row)
+        }
+    }
+}
+
+/// `fetch_all` for an untyped row query (`sqlx::query(..)` → `Vec<PgRow>`), company-scoped.
+pub async fn fetch_all_rows_scoped<'q>(
+    pool: &PgPool,
+    query: Query<'q, Postgres, PgArguments>,
+) -> Result<Vec<PgRow>, sqlx::Error> {
+    if let Some(conn) = request_conn() {
+        let mut g = conn.lock().await;
+        return query.fetch_all(&mut **g).await;
+    }
+    match current_company() {
+        None => query.fetch_all(pool).await,
+        Some(company) => {
+            let mut tx = pool.begin().await?;
+            bind_company(&mut tx, company).await?;
+            let rows = query.fetch_all(&mut *tx).await?;
+            tx.commit().await?;
+            Ok(rows)
+        }
+    }
+}
+
 /// `execute` for a write/DDL query (INSERT/UPDATE/DELETE), company-scoped.
 ///
 /// Writes are scoped too so the RLS `WITH CHECK` clause sees `app.company_id` and accepts the row
