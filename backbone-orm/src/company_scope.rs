@@ -66,13 +66,36 @@ where
     let holder = Arc::new(Mutex::new(conn));
     let result = REQUEST_CONN.scope(holder.clone(), f).await;
 
-    // The scoped clone is dropped when the scope ends, so we reclaim the sole reference, clear the
-    // session var, and only then let the connection return to the pool — clean, never leaking scope.
-    if let Ok(mutex) = Arc::try_unwrap(holder) {
-        let mut conn = mutex.into_inner();
-        let _ = sqlx::query("SELECT set_config('app.company_id', '', false)")
-            .execute(&mut *conn)
-            .await;
+    // Unconditional reset. We do NOT gate on `Arc::try_unwrap(holder)` (sole-reference check):
+    // `REQUEST_CONN` is a clonable `Arc`, and every scoped helper takes a clone via `request_conn()`.
+    // A clone that outlives the scope (a `tokio::spawn` capturing it, a value held across an `.await`
+    // that outlives the request future, or cancellation with a lingering task) would make `try_unwrap`
+    // return `Err`, skipping this block entirely and leaving `app.company_id` set at SESSION level —
+    // the connection then returns to the pool dirty, and the next acquire reads the PREVIOUS tenant's
+    // rows. That is a non-deterministic cross-tenant leak, not fail-closed. (Regression test:
+    // `lingering_request_conn_clone_does_not_dirty_the_pooled_connection`.)
+    //
+    // Locking the mutex here serializes behind any in-flight clone query, then clears the session var
+    // regardless of how many clones exist or when they drop. The `PoolConnection` only returns to the
+    // pool when the LAST `Arc` reference drops — by which point the var is already cleared here. A
+    // clone that runs further queries after this reset does so unscoped (fail-closed), which is the
+    // correct behaviour for work that outlived its request scope.
+    {
+        let mut guard = holder.lock().await;
+        if let Err(e) = sqlx::query("SELECT set_config('app.company_id', '', false)")
+            .execute(&mut **guard)
+            .await
+        {
+            // A reset failure (transient DB error) could leave the session var set. We cannot `detach`
+            // the connection from a `&mut` borrow, so log loud at ERROR — this must surface in ops as
+            // a fence-hygiene alert, not be swallowed silently. (Previously `let _ =` hid this.)
+            tracing::error!(
+                target: "backbone_orm::company_scope",
+                error = %e,
+                "failed to reset app.company_id on request connection; the pool connection may carry \
+                 the previous tenant's company_id — treat as a fence-hygiene incident",
+            );
+        }
     }
     Ok(result)
 }
@@ -358,5 +381,92 @@ pub async fn execute_scoped<'q>(
             tx.commit().await?;
             Ok(res)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Regression: the request-scope connection's `app.company_id` MUST be reset even when a clone
+    //! of the task-local `REQUEST_CONN` Arc outlives the scope (a `tokio::spawn`, a value held across
+    //! an `.await` that outlives the request future, cancellation). Before the fix, the reset was
+    //! gated on `Arc::try_unwrap` succeeding; a lingering clone made it return `Err`, the reset was
+    //! skipped SILENTLY, and the pooled connection returned dirty — leaking the previous tenant's
+    //! `company_id` to the next acquire (a non-deterministic cross-tenant leak).
+    //!
+    //! Gated on `BACKBONE_ORM_RLS_DSN` (a superuser DSN). Skips when unset.
+    use super::{request_conn, with_request_scope};
+    use sqlx::postgres::PgPoolOptions;
+    use sqlx::PgPool;
+    use uuid::Uuid;
+
+    fn dsn() -> Option<String> {
+        std::env::var("BACKBONE_ORM_RLS_DSN").ok()
+    }
+
+    async fn admin_pool(dsn: &str) -> PgPool {
+        PgPoolOptions::new().max_connections(4).connect(dsn).await.unwrap()
+    }
+
+    /// A single-connection pool as the non-super `rls_reset_app` role. max_connections=1 forces a
+    /// re-acquire after the leaked clone drops to land on the SAME connection the scope dirtied.
+    async fn app_pool(dsn: &str) -> PgPool {
+        let after_at = dsn.rsplit('@').next().unwrap();
+        let url = format!("postgresql://rls_reset_app:rlspw@{after_at}");
+        PgPoolOptions::new().max_connections(1).connect(&url).await.unwrap()
+    }
+
+    async fn setup(admin: &PgPool) {
+        sqlx::raw_sql(
+            "DROP SCHEMA IF EXISTS rls_reset_test CASCADE; \
+             DROP ROLE IF EXISTS rls_reset_app; \
+             CREATE SCHEMA rls_reset_test; \
+             CREATE ROLE rls_reset_app LOGIN PASSWORD 'rlspw'; \
+             GRANT USAGE ON SCHEMA rls_reset_test TO rls_reset_app; \
+             CREATE TABLE rls_reset_test.t (id uuid PRIMARY KEY, company_id uuid NOT NULL); \
+             GRANT SELECT, INSERT, UPDATE, DELETE ON rls_reset_test.t TO rls_reset_app;",
+        )
+        .execute(admin).await.unwrap();
+    }
+
+    /// Hold a clone of REQUEST_CONN past the scope, then verify the pooled connection comes back clean.
+    #[tokio::test]
+    async fn lingering_request_conn_clone_does_not_dirty_the_pooled_connection() {
+        let Some(dsn) = dsn() else { eprintln!("skipping: set BACKBONE_ORM_RLS_DSN"); return; };
+        let admin = admin_pool(&dsn).await;
+        setup(&admin).await;
+        let pool = app_pool(&dsn).await;
+        let company_a = Uuid::new_v4();
+
+        // Smuggle a clone of REQUEST_CONN OUT of the scope via a channel, so it outlives `f`.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        // Drive a request scope for company A; inside it, capture a clone of the request connection
+        // (the exact thing a `tokio::spawn` or a held-across-await would do) and hand it out.
+        with_request_scope(&pool, company_a, async {
+            if let Some(conn) = request_conn() {
+                let _ = tx.send(conn);
+            }
+        })
+        .await
+        .unwrap();
+
+        // The clone now outlives the scope. With the OLD (try_unwrap-gated) code the reset was
+        // skipped here and the connection would return to the pool dirty. Hold then drop the clone so
+        // the single pooled connection is returned, then re-acquire that SAME connection.
+        let held = rx.await.unwrap();
+        drop(held);
+
+        let mut conn = pool.acquire().await.unwrap();
+        let setting: String =
+            sqlx::query_scalar("SELECT current_setting('app.company_id', true)")
+                .fetch_one(&mut *conn)
+                .await
+                .unwrap();
+        // Before the fix this was `company_a.to_string()` (cross-tenant LEAK). It must be empty now.
+        assert_eq!(
+            setting, "",
+            "app.company_id leaked onto the pooled connection after scope exit — a lingering \
+             REQUEST_CONN clone must not bypass the session-var reset (cross-tenant leak)"
+        );
     }
 }
