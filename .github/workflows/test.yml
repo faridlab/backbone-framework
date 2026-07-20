@@ -1,0 +1,55 @@
+name: Test
+
+# Runs the live Postgres-gated tests so the ADR-0008 RLS fence cannot silently regress.
+# The two gate-bearing suites:
+#   - `cargo test --lib` on backbone-orm  → the `lingering_request_conn_clone_*` regression
+#     (proves a lingering REQUEST_CONN clone can't leave a pooled connection dirty / leak the
+#      previous tenant's company_id — bidirectionally: fails on the old try_unwrap code, passes on the fix)
+#   - `cargo test --test rls_scope_live`   → the end-to-end ORM RLS proof (scoped isolation, fail-closed, forgery rejected)
+# Both are gated on BACKBONE_ORM_RLS_DSN (a superuser DSN); the postgres service below provides it.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  rls-fence:
+    name: RLS fence (backbone-orm live tests)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # Superuser DSN — the tests bootstrap their own non-super role + schema/policy from this.
+      BACKBONE_ORM_RLS_DSN: postgresql://postgres:postgres@localhost:5432/postgres
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+
+      - name: backbone-orm lib tests (incl. reset-leak regression)
+        working-directory: .
+        run: cargo test --lib -p backbone-orm
+
+      - name: backbone-orm live RLS harness
+        working-directory: .
+        run: cargo test --test rls_scope_live -p backbone-orm -- --nocapture
