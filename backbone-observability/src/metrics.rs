@@ -113,11 +113,15 @@ pub fn init_metrics(config: &MetricsConfig) -> Result<MetricsHandle, MetricsErro
 /// Initialize Prometheus exporter with HTTP server
 #[cfg(feature = "prometheus-metrics")]
 fn init_prometheus(config: &MetricsConfig) -> Result<MetricsHandle, MetricsError> {
-    use prometheus::Registry;
     use std::net::SocketAddr;
 
-    // Create a Prometheus registry
-    let registry = Registry::new();
+    // Serve the GLOBAL default registry. The HTTP observability middleware
+    // (`ObservabilityLayer` → `record_http_metrics`) registers its counters /
+    // histograms on `prometheus::default_registry()` via `prometheus::register`,
+    // so the metrics server MUST serve that same registry or the middleware's
+    // observations land in a registry nothing scrapes (every HTTP metric stays
+    // flat at zero). Registry is Clone (cheap — inner Arc), so clone the static.
+    let registry = prometheus::default_registry().clone();
 
     // Create default metrics
     setup_default_metrics(&registry)?;
@@ -193,24 +197,13 @@ fn setup_default_metrics(registry: &Registry) -> Result<(), MetricsError> {
         Opts, HistogramOpts,
     };
 
-    // HTTP request counter
-    let _http_requests_total = IntCounterVec::new(
-        Opts::new("http_requests_total", "Total number of HTTP requests"),
-        &["method", "path", "status"]
-    )
-    .map_err(|e| MetricsError::SetupError(format!("Failed to create http_requests_total: {}", e)))?;
-    registry.register(Box::new(_http_requests_total.clone()))
-        .map_err(|e| MetricsError::SetupError(format!("Failed to register http_requests_total: {}", e)))?;
-
-    // HTTP request duration histogram
-    let _http_request_duration_seconds = Histogram::with_opts(
-        HistogramOpts::new("http_request_duration_seconds", "HTTP request latency in seconds")
-            .buckets(vec![0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0])
-            .into(),
-    )
-    .map_err(|e| MetricsError::SetupError(format!("Failed to create http_request_duration_seconds: {}", e)))?;
-    registry.register(Box::new(_http_request_duration_seconds.clone()))
-        .map_err(|e| MetricsError::SetupError(format!("Failed to register http_request_duration_seconds: {}", e)))?;
+    // NOTE: the LIVE HTTP metrics (`http_requests_total` counter and
+    // `http_request_duration_seconds` histogram) are NOT registered here.
+    // They are owned by the observability middleware (`record_http_metrics`),
+    // which registers + observes them on `prometheus::default_registry()`.
+    // Registering dead copies here would (a) never be observed and (b) conflict
+    // with the middleware's live registrations on the now-shared global registry.
+    // This function registers only the db / connection metrics below.
 
     // Database query counter
     let _db_queries_total = IntCounterVec::new(
