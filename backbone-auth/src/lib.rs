@@ -43,6 +43,7 @@ pub mod traits;
 pub mod resource_policy;
 #[cfg(feature = "axum")]
 pub mod company;
+pub mod idempotency;
 
 // Re-export commonly used types
 pub use audit::AuditEvent;
@@ -59,6 +60,7 @@ pub use token_generator::TokenGenerator;
 /// The HTTP company guard (feature `axum`): derive `company_id` from a signed token, never a request body.
 #[cfg(feature = "axum")]
 pub use company::{company_auth, CompanyClaims, CompanyContext, CompanyVerifier};
+pub use idempotency::{IdempotencyState, idempotency_middleware, migrate as migrate_idempotency};
 
 // ── Backward-compatibility aliases (deprecated) ──
 //

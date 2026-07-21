@@ -23,6 +23,8 @@ axum = { version = "0.7", optional = true }
 # The company guard sets the request's company scope (backbone-orm's task-local) so the RLS read
 # fence (ADR-0008) returns the caller's rows. Only the HTTP guard needs it → gated behind `axum`.
 backbone-orm = { path = "../backbone-orm", optional = true }
+# Idempotency-Key dedup table (idempotency middleware) — gated behind `axum`.
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "uuid"], optional = true }
 
 # Error handling
 anyhow = "1.0"
@@ -51,7 +53,7 @@ zeroize = { version = "1", features = ["zeroize_derive"] }
 default = []
 # The HTTP tenant guard: `TenantContext` / `TenantVerifier` / `tenant_auth`.
 # Off by default — only a crate that serves HTTP needs axum.
-axum = ["dep:axum", "dep:backbone-orm"]
+axum = ["dep:axum", "dep:backbone-orm", "dep:sqlx"]
 
 [dev-dependencies]
 # `ServiceExt::oneshot` — drives the real router in-process in tests/tenant_guard.rs.

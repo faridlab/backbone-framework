@@ -110,7 +110,7 @@ impl CompanyVerifier {
 
     /// Validate a raw token → a company context, or `None` if the signature/expiry is bad or the
     /// `company_id` claim is absent.
-    fn verify(&self, token: &str) -> Option<CompanyContext> {
+    pub fn verify(&self, token: &str) -> Option<CompanyContext> {
         let data = decode::<CompanyClaims>(token, &self.key, &self.validation).ok()?;
         let c = data.claims;
         Some(CompanyContext {
