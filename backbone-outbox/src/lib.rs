@@ -26,7 +26,7 @@
 //! // Producer: stage in the same tx as the state change.
 //! let mut tx = pool.begin().await?;
 //! // ... mutate state on &mut *tx ...
-//! let rec = OutboxRecord::new("PaymentSettled", "Payment", "pay-1",
+//! let rec = OutboxRecord::new("PaymentSettled", "Payment", "pay-1", company_id,
 //!     serde_json::json!({"invoice": "INV-1", "amount": "100.00"}), Utc::now());
 //! outbox::stage(&mut *tx, "payment", &rec).await?;
 //! tx.commit().await?;

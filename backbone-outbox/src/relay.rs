@@ -13,6 +13,7 @@ struct OutboxRow {
     event_type: String,
     aggregate_type: String,
     aggregate_id: String,
+    company_id: Uuid,
     payload: serde_json::Value,
     occurred_at: DateTime<Utc>,
     correlation_id: Option<String>,
@@ -26,6 +27,7 @@ impl OutboxRow {
             event_type: self.event_type,
             aggregate_type: self.aggregate_type,
             aggregate_id: self.aggregate_id,
+            company_id: self.company_id,
             payload: self.payload,
             occurred_at: self.occurred_at,
             correlation_id: self.correlation_id,
@@ -60,7 +62,7 @@ where
     validate_schema(schema)?;
     // Short-lived read: borrows a connection only for the SELECT, then returns it to the pool.
     let rows: Vec<OutboxRow> = sqlx::query_as(&format!(
-        r#"SELECT id, event_type, aggregate_type, aggregate_id, payload, occurred_at,
+        r#"SELECT id, event_type, aggregate_type, aggregate_id, company_id, payload, occurred_at,
                   correlation_id, causation_id, version
            FROM {schema}.outbox_events
            WHERE published_at IS NULL

@@ -24,7 +24,7 @@ async fn fresh_schema(pool: &PgPool) -> String {
     s
 }
 fn rec(kind: &str, agg: &str) -> OutboxRecord {
-    OutboxRecord::new(kind, "Payment", agg, serde_json::json!({"k": kind}), Utc::now())
+    OutboxRecord::new(kind, "Payment", agg, Uuid::new_v4(), serde_json::json!({"k": kind}), Utc::now())
 }
 /// A no-op publish sink (success).
 async fn ok_publish(_r: OutboxRecord) -> Result<(), OutboxError> {
@@ -167,7 +167,7 @@ async fn m5_crash_window_exactly_once_draw() {
     // (Here the "state" is trivial; the point is stage() rides the same tx, so a crash right after
     // commit cannot lose the event — it is already durable in the outbox.)
     let event = OutboxRecord::new(
-        "PaymentSettled", "Payment", "PAY-1",
+        "PaymentSettled", "Payment", "PAY-1", Uuid::new_v4(),
         serde_json::json!({"invoice": "INV-1", "amount": "40"}), Utc::now());
     let mut tx = pool.begin().await.unwrap();
     outbox::stage(&mut *tx, &schema, &event).await.unwrap();

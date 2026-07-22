@@ -17,6 +17,7 @@ pub async fn migrate(pool: &PgPool, schema: &str) -> Result<()> {
              event_type     text NOT NULL,
              aggregate_type text NOT NULL,
              aggregate_id   text NOT NULL,
+             company_id     uuid NOT NULL,
              payload        jsonb NOT NULL,
              occurred_at    timestamptz NOT NULL,
              correlation_id text,
@@ -60,15 +61,16 @@ where
     validate_schema(schema)?;
     let done = sqlx::query(&format!(
         r#"INSERT INTO {schema}.outbox_events
-             (id, event_type, aggregate_type, aggregate_id, payload, occurred_at,
+             (id, event_type, aggregate_type, aggregate_id, company_id, payload, occurred_at,
               correlation_id, causation_id, version)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
            ON CONFLICT (id) DO NOTHING"#
     ))
     .bind(rec.id)
     .bind(&rec.event_type)
     .bind(&rec.aggregate_type)
     .bind(&rec.aggregate_id)
+    .bind(rec.company_id)
     .bind(&rec.payload)
     .bind(rec.occurred_at)
     .bind(&rec.correlation_id)

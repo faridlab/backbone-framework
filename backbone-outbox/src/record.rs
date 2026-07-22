@@ -18,6 +18,9 @@ pub struct OutboxRecord {
     pub aggregate_type: String,
     /// The aggregate id (as a string — aggregates key on uuid, code, or number).
     pub aggregate_id: String,
+    /// The owning tenant — the outbox_events table is fenced by this (ADR-0011). Every staged event
+    /// carries the company it belongs to so the RLS policy can isolate tenant event streams.
+    pub company_id: Uuid,
     /// The serialized domain event payload.
     pub payload: serde_json::Value,
     /// When the event occurred in the domain.
@@ -32,11 +35,13 @@ pub struct OutboxRecord {
 
 impl OutboxRecord {
     /// Build a record with a fresh id, no correlation/causation, version 1, `occurred_at = now`.
-    /// (`now` is passed in so callers stay deterministic under test.)
+    /// (`now` is passed in so callers stay deterministic under test.) `company_id` is the owning
+    /// tenant — required, since the outbox_events table is fenced by it (ADR-0011).
     pub fn new(
         event_type: impl Into<String>,
         aggregate_type: impl Into<String>,
         aggregate_id: impl Into<String>,
+        company_id: Uuid,
         payload: serde_json::Value,
         occurred_at: DateTime<Utc>,
     ) -> Self {
@@ -45,6 +50,7 @@ impl OutboxRecord {
             event_type: event_type.into(),
             aggregate_type: aggregate_type.into(),
             aggregate_id: aggregate_id.into(),
+            company_id,
             payload,
             occurred_at,
             correlation_id: None,

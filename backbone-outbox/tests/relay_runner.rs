@@ -66,7 +66,7 @@ async fn runner_delivers_then_stops() {
 
     // Producer stages two settlement events (in-tx).
     for (inv, amt, ev) in [("INV-1", "40", "e1"), ("INV-2", "20", "e2")] {
-        let rec = OutboxRecord::new("Settled", "Payment", ev,
+        let rec = OutboxRecord::new("Settled", "Payment", ev, Uuid::new_v4(),
             serde_json::json!({"invoice": inv, "amount": amt}), Utc::now());
         let mut tx = pool.begin().await.unwrap();
         outbox::stage(&mut *tx, &schema, &rec).await.unwrap();
