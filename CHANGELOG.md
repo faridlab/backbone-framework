@@ -15,6 +15,13 @@ back to `## [Unreleased]`.
 
 ## [Unreleased]
 
+### Changed
+- `backbone-outbox`: **breaking** — `OutboxRecord::new` now takes a required `company_id: Uuid`
+  (4th arg), the `stage()` INSERT + `migrate()` table template carry a `company_id` column, and the
+  relay reads it. This lets each module's `outbox_events` table be fenced by tenant (ADR-0011).
+  Callers must pass the owning company; modules that don't bump to this tag are unaffected (they pin
+  the older tag).
+
 ### Added
 - `backbone-core`: relation expansion on read endpoints. `list` and `get_by_id`
   accept `?include=<rel>` (alias `?with=`) to hydrate declared to-one relations,
