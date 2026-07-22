@@ -1,0 +1,1532 @@
+{
+  "backbone-auth/examples/advanced_usage.rs": {
+    "mtime": 1775918594.0792446,
+    "ast_hash": "f5b3edfaeec007aaa784bc15866af99e",
+    "semantic_hash": ""
+  },
+  "backbone-auth/examples/api_integration.rs": {
+    "mtime": 1775918594.0795872,
+    "ast_hash": "c82fcd0a6fbd49714ae820e8ff5f10e2",
+    "semantic_hash": ""
+  },
+  "backbone-auth/examples/basic_usage.rs": {
+    "mtime": 1775918594.0786989,
+    "ast_hash": "7fe5f27bb9cf8369852e5f51d9f3a6c9",
+    "semantic_hash": ""
+  },
+  "backbone-auth/examples/database_integration.rs": {
+    "mtime": 1775918594.0778291,
+    "ast_hash": "e3f21a54e978d3a5af0ebfff99ab6db6",
+    "semantic_hash": ""
+  },
+  "backbone-auth/examples/security_scenarios.rs": {
+    "mtime": 1775918594.0799356,
+    "ast_hash": "52f1d2104ac8f0451c4b6b4bab92a7bd",
+    "semantic_hash": ""
+  },
+  "backbone-auth/examples/session_management.rs": {
+    "mtime": 1775918594.0765305,
+    "ast_hash": "556945783b7e02ccc498bb53df724e11",
+    "semantic_hash": ""
+  },
+  "backbone-auth/src/audit.rs": {
+    "mtime": 1775918594.0825756,
+    "ast_hash": "f4ca54f33a5409c18f9d7cd38de1952e",
+    "semantic_hash": ""
+  },
+  "backbone-auth/src/auth_service.rs": {
+    "mtime": 1775918594.0834649,
+    "ast_hash": "7b9cab64bb1ae6ef6de5814a6ffeb982",
+    "semantic_hash": ""
+  },
+  "backbone-auth/src/company.rs": {
+    "mtime": 1784275659.9467926,
+    "ast_hash": "56873a1871bf6057659db7e06e0dc6bc",
+    "semantic_hash": ""
+  },
+  "backbone-auth/src/jwt.rs": {
+    "mtime": 1775918594.0839372,
+    "ast_hash": "401df962f6f3f2d03e5665719bddd1bb",
+    "semantic_hash": ""
+  },
+  "backbone-auth/src/lib.rs": {
+    "mtime": 1784217221.6695495,
+    "ast_hash": "65d2ee58b5afeb35477a381c3f7f270d",
+    "semantic_hash": ""
+  },
+  "backbone-auth/src/middleware.rs": {
+    "mtime": 1775918594.084257,
+    "ast_hash": "753b493b07e2d05e4a921adb8912b173",
+    "semantic_hash": ""
+  },
+  "backbone-auth/src/password.rs": {
+    "mtime": 1775918594.0849848,
+    "ast_hash": "829c1cdc221590955ecd5c2791162f68",
+    "semantic_hash": ""
+  },
+  "backbone-auth/src/permissions.rs": {
+    "mtime": 1775918594.085827,
+    "ast_hash": "5096adfd34f02c23aa85cd71f0ff2e94",
+    "semantic_hash": ""
+  },
+  "backbone-auth/src/resource_policy.rs": {
+    "mtime": 1775918594.0807612,
+    "ast_hash": "073ed07f3253fdfdaa898f9240604a92",
+    "semantic_hash": ""
+  },
+  "backbone-auth/src/token_generator.rs": {
+    "mtime": 1775918594.0814521,
+    "ast_hash": "9a86a78a8648276e4d9fffd8a9b4f2d7",
+    "semantic_hash": ""
+  },
+  "backbone-auth/src/traits.rs": {
+    "mtime": 1775918594.0854027,
+    "ast_hash": "195cb756e8207c5de776664a545f13bb",
+    "semantic_hash": ""
+  },
+  "backbone-auth/tests/auth_service_tests.rs": {
+    "mtime": 1775918594.0740633,
+    "ast_hash": "f73e00569fa42bfa2127d9480643ff4d",
+    "semantic_hash": ""
+  },
+  "backbone-auth/tests/company_guard.rs": {
+    "mtime": 1784205671.6245158,
+    "ast_hash": "d780b23e14c894a2b91971e32309c782",
+    "semantic_hash": ""
+  },
+  "backbone-authorization/src/cache.rs": {
+    "mtime": 1775918594.0900269,
+    "ast_hash": "78a1e048e5fa25bf3f16184bcc774e66",
+    "semantic_hash": ""
+  },
+  "backbone-authorization/src/lib.rs": {
+    "mtime": 1775918594.090855,
+    "ast_hash": "670e8ee82a1b11e28ef7bbaa6d5e1862",
+    "semantic_hash": ""
+  },
+  "backbone-authorization/src/middleware.rs": {
+    "mtime": 1778980893.7525518,
+    "ast_hash": "a7c68abeda4b93f24001a80d265e56c7",
+    "semantic_hash": ""
+  },
+  "backbone-authorization/src/redis_cache.rs": {
+    "mtime": 1775918594.0916557,
+    "ast_hash": "7e3c81493a9fbcee738cefcb5279be45",
+    "semantic_hash": ""
+  },
+  "backbone-authorization/src/service.rs": {
+    "mtime": 1775918594.0913212,
+    "ast_hash": "e02c522d920e95da4f6efbff75142fd3",
+    "semantic_hash": ""
+  },
+  "backbone-authorization/src/traits.rs": {
+    "mtime": 1775918594.0926666,
+    "ast_hash": "3ebc510c3dd3be2327ec32377db93e63",
+    "semantic_hash": ""
+  },
+  "backbone-authorization/src/types.rs": {
+    "mtime": 1775918594.0906036,
+    "ast_hash": "2e51f3c1e5b63d95665bc9824909c8e1",
+    "semantic_hash": ""
+  },
+  "backbone-authorization/tests/redis_cache_tests.rs": {
+    "mtime": 1775918594.0891917,
+    "ast_hash": "17a8e0c132c4f557ec5d907a4adc9341",
+    "semantic_hash": ""
+  },
+  "backbone-cache/examples/advanced_usage.rs": {
+    "mtime": 1775918594.0980694,
+    "ast_hash": "e0fd20a62006ac5e1dcaa533feed64cd",
+    "semantic_hash": ""
+  },
+  "backbone-cache/examples/basic_usage.rs": {
+    "mtime": 1775918594.09753,
+    "ast_hash": "242c2d8e2f7fa68a5b8d49fdecc8c452",
+    "semantic_hash": ""
+  },
+  "backbone-cache/examples/error_handling.rs": {
+    "mtime": 1775918594.0987241,
+    "ast_hash": "c70be6d0d990de03f6ea8f183a211153",
+    "semantic_hash": ""
+  },
+  "backbone-cache/examples/performance_testing.rs": {
+    "mtime": 1775918594.098288,
+    "ast_hash": "0768b797191dc62a5eb78d543eaf295a",
+    "semantic_hash": ""
+  },
+  "backbone-cache/examples/real_world_scenarios.rs": {
+    "mtime": 1775918594.0985188,
+    "ast_hash": "b5abe1b891fc46425e41b6b5da9d4b4c",
+    "semantic_hash": ""
+  },
+  "backbone-cache/src/lib.rs": {
+    "mtime": 1778981544.6780787,
+    "ast_hash": "f56945ac4e89ba4f8d75f5a7deaccef7",
+    "semantic_hash": ""
+  },
+  "backbone-cache/src/memory.rs": {
+    "mtime": 1778980960.0693178,
+    "ast_hash": "a6aba579590f63c41a36acf101254620",
+    "semantic_hash": ""
+  },
+  "backbone-cache/src/redis.rs": {
+    "mtime": 1775918594.1003838,
+    "ast_hash": "cdf3ded41c9bbe26a39c4a02611b946c",
+    "semantic_hash": ""
+  },
+  "backbone-cache/src/traits.rs": {
+    "mtime": 1775918594.1000226,
+    "ast_hash": "46b96134e0df644211cedab9974b22a3",
+    "semantic_hash": ""
+  },
+  "backbone-cache/tests/cache_tests.rs": {
+    "mtime": 1775918594.0965464,
+    "ast_hash": "c686e3afc1423a4570a0b74859e426b6",
+    "semantic_hash": ""
+  },
+  "backbone-cache/tests/redis_tests.rs": {
+    "mtime": 1775918594.0959916,
+    "ast_hash": "db7d76389c2c568c8a73159060805d2b",
+    "semantic_hash": ""
+  },
+  "backbone-core/examples/advanced_pagination.rs": {
+    "mtime": 1778979562.3728971,
+    "ast_hash": "b733dafb97022c8031e5d01306e2fe82",
+    "semantic_hash": ""
+  },
+  "backbone-core/examples/basic_usage.rs": {
+    "mtime": 1778979601.3897579,
+    "ast_hash": "78228f4cacd55a6477e13e6a1766cdb4",
+    "semantic_hash": ""
+  },
+  "backbone-core/examples/error_handling.rs": {
+    "mtime": 1778979689.920076,
+    "ast_hash": "a5498f866210758d14358c4000e4ce10",
+    "semantic_hash": ""
+  },
+  "backbone-core/examples/scenario_ecommerce.rs": {
+    "mtime": 1778979779.6083388,
+    "ast_hash": "bbf8a8357658e4709561f7f0af8b7603",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/aggregate.rs": {
+    "mtime": 1778979371.369034,
+    "ast_hash": "ad94d7f33bfcbf23155d9a3a9010acc2",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/builder.rs": {
+    "mtime": 1775918594.1285925,
+    "ast_hash": "fa64be346fa9f571a0f5b0e3fcb50b42",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/bulk.rs": {
+    "mtime": 1775918594.1107924,
+    "ast_hash": "7e10a46b2b276e3da890a1c7474e1c36",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/command.rs": {
+    "mtime": 1775918594.1173213,
+    "ast_hash": "f790e3392c0e4379a3d095a2427e4950",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/config/app_config.rs": {
+    "mtime": 1775918594.1135983,
+    "ast_hash": "24f0c69de8d78d604f82415200c4a0e3",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/config/bus.rs": {
+    "mtime": 1775918594.1164308,
+    "ast_hash": "ff81edb14163fd9fb8f55e4c62bda42f",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/config/contexts_config.rs": {
+    "mtime": 1775918594.1166577,
+    "ast_hash": "6c35fb3079977e1053253d6cc81c3255",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/config/database_config.rs": {
+    "mtime": 1775918594.112923,
+    "ast_hash": "71f3f83697e870d5ed16e920d99f9093",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/config/error.rs": {
+    "mtime": 1775918594.112247,
+    "ast_hash": "10ac4dcf46463f8ce6162b7a51653d0a",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/config/features_config.rs": {
+    "mtime": 1775918594.1153562,
+    "ast_hash": "372185517c3c0197c7abb0ddda4ebfc2",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/config/loader.rs": {
+    "mtime": 1775918594.1157513,
+    "ast_hash": "a58a82307bd214aff2ee76d0b1cf876f",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/config/logging_config.rs": {
+    "mtime": 1775918594.1126273,
+    "ast_hash": "bb32b6d525bff39320de5d4ca8afd6b8",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/config/mod.rs": {
+    "mtime": 1775918594.1133108,
+    "ast_hash": "b3526283da89a163260fbf2f1230b9e3",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/config/modules_config.rs": {
+    "mtime": 1775918594.1151183,
+    "ast_hash": "108c67950536691a6f36830749912ad4",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/config/monitoring_config.rs": {
+    "mtime": 1775918594.1160426,
+    "ast_hash": "2b3b3e8fd843e35a986c014e64092d60",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/config/schema.rs": {
+    "mtime": 1775918594.114166,
+    "ast_hash": "d097c89514741f68fe9cdcbe2abf1420",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/config/security_config.rs": {
+    "mtime": 1775918594.1145027,
+    "ast_hash": "84165cc0d1bf7dfc89b0c7ff6e4ce2f1",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/config/server_config.rs": {
+    "mtime": 1775918594.111851,
+    "ast_hash": "1543d47bcdcd48008f15368358152683",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/cqrs.rs": {
+    "mtime": 1775918594.109956,
+    "ast_hash": "3c04cbb9b079679e43d322b2775dd861",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/crud.rs": {
+    "mtime": 1775918594.1221025,
+    "ast_hash": "4be7cdd21e7e7c7556c58a728b03474a",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/domain_service.rs": {
+    "mtime": 1775918594.1111612,
+    "ast_hash": "bb0eff58b442c07163a4d0b85253b34b",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/entity.rs": {
+    "mtime": 1775918594.1277084,
+    "ast_hash": "0a6e1461a2979bc8c20c2fe7abacc6fd",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/error.rs": {
+    "mtime": 1775918594.116984,
+    "ast_hash": "34f3a49c94479a808034f74c3f4f4cf3",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/extractors.rs": {
+    "mtime": 1780414494.183764,
+    "ast_hash": "0963e3854c13077f3fdbcd232ae7d5a9",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/flow.rs": {
+    "mtime": 1775918594.107719,
+    "ast_hash": "b0e17150eeac96b10a77af656c97669c",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/graphql.rs": {
+    "mtime": 1775918594.1190004,
+    "ast_hash": "8e00687162edf035100d338c5eff0438",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/grpc.rs": {
+    "mtime": 1775918594.1185188,
+    "ast_hash": "33f3bed2557682258da995e492620dde",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/http.rs": {
+    "mtime": 1784205772.4511817,
+    "ast_hash": "9e16699bbffa09031e3a2f4f841fb417",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/integration.rs": {
+    "mtime": 1775918594.128985,
+    "ast_hash": "6b723a4fc4ef6c9c5e0bace00186a07c",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/lib.rs": {
+    "mtime": 1780683550.5309978,
+    "ast_hash": "605785d0413acb5376df29f9df88ef97",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/macros.rs": {
+    "mtime": 1780816102.895614,
+    "ast_hash": "fb5d169fc19b0b1471ae2c7736f04418",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/module.rs": {
+    "mtime": 1775918594.1235185,
+    "ast_hash": "6e4a754ae31a71422cb60b51c0bd76b1",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/module_registry.rs": {
+    "mtime": 1778979348.2336152,
+    "ast_hash": "dff6f639a2a8999f7bbcb46e0a66de54",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/openapi.rs": {
+    "mtime": 1780679741.4001877,
+    "ast_hash": "eba467cc97b83eebb5a182780a9f0e50",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/persistence/adapter.rs": {
+    "mtime": 1775918594.1239507,
+    "ast_hash": "395f68e817c978ab114406bcd4f0f1a3",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/persistence/memory.rs": {
+    "mtime": 1775918594.1243744,
+    "ast_hash": "166bcacffd5e3d16cedd297086d05967",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/persistence/mod.rs": {
+    "mtime": 1775918594.1247633,
+    "ast_hash": "5f4843aabae6582c3789305a4283db29",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/persistence/postgres.rs": {
+    "mtime": 1775918594.1255996,
+    "ast_hash": "47404290f953b8eb029c659194f91f16",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/persistence/traits.rs": {
+    "mtime": 1780816045.070128,
+    "ast_hash": "c076942cdaaeea8b18172008af3f62c4",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/policy.rs": {
+    "mtime": 1775918594.1088712,
+    "ast_hash": "855e15b5899cdba228d3d699b221d994",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/projection.rs": {
+    "mtime": 1775918594.1263056,
+    "ast_hash": "1646a93de28aa5f993466c978f6d0b1e",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/query.rs": {
+    "mtime": 1775918594.1181703,
+    "ast_hash": "a3b8fe6712f2dea614091102a25c9164",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/registry.rs": {
+    "mtime": 1775918594.1103554,
+    "ast_hash": "d684d4040e78220047db62e82697c620",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/repository.rs": {
+    "mtime": 1775918594.1259696,
+    "ast_hash": "7dc076693ffa9fd59eb663b055493995",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/service.rs": {
+    "mtime": 1780816160.592118,
+    "ast_hash": "a217dfc9b4c8acc0ed21508b907e806a",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/specification.rs": {
+    "mtime": 1775918594.1269894,
+    "ast_hash": "0216de1545a7b80a60af6a30fa0ac946",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/state_machine.rs": {
+    "mtime": 1775918594.1094396,
+    "ast_hash": "723e49b2852469bff6bea23cc93c8d82",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/trigger.rs": {
+    "mtime": 1775918594.1218057,
+    "ast_hash": "32d3c43791d4cf50c44765a46c2e9a87",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/usecase.rs": {
+    "mtime": 1775918594.122685,
+    "ast_hash": "65645966051039d4f9562711617e3621",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/utils.rs": {
+    "mtime": 1775918594.1293585,
+    "ast_hash": "78fba4d9a1bd6a48ab0b40b205c70336",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/validation.rs": {
+    "mtime": 1775918594.1212142,
+    "ast_hash": "aeaedcd1ab57cf870823fc6f7353cf5d",
+    "semantic_hash": ""
+  },
+  "backbone-core/src/value_object.rs": {
+    "mtime": 1775918594.1199005,
+    "ast_hash": "148ac2f3f51fd5ab6c1c5cc6530b83bd",
+    "semantic_hash": ""
+  },
+  "backbone-core/tests/crud_macro_compile.rs": {
+    "mtime": 1780595096.2882924,
+    "ast_hash": "f6b8adc06332434946827f5de0137c07",
+    "semantic_hash": ""
+  },
+  "backbone-email/src/lib.rs": {
+    "mtime": 1778981556.3936229,
+    "ast_hash": "85e3ece93aa17a772a1306cc055e90fb",
+    "semantic_hash": ""
+  },
+  "backbone-email/src/mailgun.rs": {
+    "mtime": 1775918594.1360106,
+    "ast_hash": "1bf20dc1acbcdc51450891c79adb31da",
+    "semantic_hash": ""
+  },
+  "backbone-email/src/ses.rs": {
+    "mtime": 1775918594.134385,
+    "ast_hash": "b46da3b6fadc5c25e8b277d3558c5c00",
+    "semantic_hash": ""
+  },
+  "backbone-email/src/smtp.rs": {
+    "mtime": 1775918594.135709,
+    "ast_hash": "28a8282a9c565107c14cbb055a66704b",
+    "semantic_hash": ""
+  },
+  "backbone-email/src/traits.rs": {
+    "mtime": 1775918594.1352336,
+    "ast_hash": "a1e7a9e58539e56fb10007452fb7c910",
+    "semantic_hash": ""
+  },
+  "backbone-email/src/types.rs": {
+    "mtime": 1775918594.13407,
+    "ast_hash": "ff4ea34059414170fd5022e7b48b94da",
+    "semantic_hash": ""
+  },
+  "backbone-email/tests/email_service_tests.rs": {
+    "mtime": 1778978966.1743917,
+    "ast_hash": "e4ecdefec966255422e0fcc572c5e8d5",
+    "semantic_hash": ""
+  },
+  "backbone-email/tests/smtp_test.rs": {
+    "mtime": 1775918594.1323602,
+    "ast_hash": "4b7a91f81614902202b61997d48a1a9f",
+    "semantic_hash": ""
+  },
+  "backbone-graphql/src/error.rs": {
+    "mtime": 1775918594.1388462,
+    "ast_hash": "3acd5b95b8c4439ba9af237b42a98d28",
+    "semantic_hash": ""
+  },
+  "backbone-graphql/src/lib.rs": {
+    "mtime": 1775918594.139086,
+    "ast_hash": "ae2ddc597b309d1126179eae4179e983",
+    "semantic_hash": ""
+  },
+  "backbone-graphql/src/pagination.rs": {
+    "mtime": 1775918594.1393688,
+    "ast_hash": "0de5461422c96b98d4880789f0e34693",
+    "semantic_hash": ""
+  },
+  "backbone-health/examples/health_demo.rs": {
+    "mtime": 1775918594.1425703,
+    "ast_hash": "3d8896e76ef0ca5debeac282878531dd",
+    "semantic_hash": ""
+  },
+  "backbone-health/src/checker.rs": {
+    "mtime": 1778981137.3222928,
+    "ast_hash": "80ecaf5a4d79ef559a5a7998f4ab4599",
+    "semantic_hash": ""
+  },
+  "backbone-health/src/cli.rs": {
+    "mtime": 1778981588.9383047,
+    "ast_hash": "e2c01c7f6420a7b9fcc15bc601a4b56d",
+    "semantic_hash": ""
+  },
+  "backbone-health/src/components_simple.rs": {
+    "mtime": 1775918594.145578,
+    "ast_hash": "a1f12bd7f73e9d8e9db689e760484a9f",
+    "semantic_hash": ""
+  },
+  "backbone-health/src/health_server.rs": {
+    "mtime": 1775918594.1438115,
+    "ast_hash": "c582f492dd6299f3262982b67a14fb66",
+    "semantic_hash": ""
+  },
+  "backbone-health/src/lib.rs": {
+    "mtime": 1778981568.5354035,
+    "ast_hash": "869adb59f778ca8d826b0c8124ad1be5",
+    "semantic_hash": ""
+  },
+  "backbone-health/src/routes.rs": {
+    "mtime": 1777145263.0104628,
+    "ast_hash": "879c21a0c56dc025bf0f5f33b455e7a9",
+    "semantic_hash": ""
+  },
+  "backbone-health/src/status.rs": {
+    "mtime": 1778981081.79086,
+    "ast_hash": "ddd66a3a268f5516966bbdd2658cd982",
+    "semantic_hash": ""
+  },
+  "backbone-health/tests/health_tests.rs": {
+    "mtime": 1775918594.1421807,
+    "ast_hash": "b7726fd9514c5755d8bdce47af21ebad",
+    "semantic_hash": ""
+  },
+  "backbone-jobs/examples/basic_scheduler.rs": {
+    "mtime": 1778980233.4098456,
+    "ast_hash": "adf5d3e6927ed10bb6bfc5df327c5bc1",
+    "semantic_hash": ""
+  },
+  "backbone-jobs/examples/cron_jobs.rs": {
+    "mtime": 1778980196.4730659,
+    "ast_hash": "5d9ea5ad64a51fd3522f0120ecf96e84",
+    "semantic_hash": ""
+  },
+  "backbone-jobs/examples/database_cleanup.rs": {
+    "mtime": 1778980201.9977317,
+    "ast_hash": "8fa9e75ae3e8c09ac81c56db79ab25b2",
+    "semantic_hash": ""
+  },
+  "backbone-jobs/src/builder.rs": {
+    "mtime": 1775918594.15531,
+    "ast_hash": "0f2bd15095a30a7740f0dbd4cf093c6a",
+    "semantic_hash": ""
+  },
+  "backbone-jobs/src/config.rs": {
+    "mtime": 1775918594.1532047,
+    "ast_hash": "bc4bf0d79e87d39de96ea4782fa72044",
+    "semantic_hash": ""
+  },
+  "backbone-jobs/src/cron.rs": {
+    "mtime": 1778981269.001244,
+    "ast_hash": "5575e95378899c01f23bb0c74913cd02",
+    "semantic_hash": ""
+  },
+  "backbone-jobs/src/error.rs": {
+    "mtime": 1775918594.1527975,
+    "ast_hash": "f44b892e77bb1fe7bfa8eabf853d50ae",
+    "semantic_hash": ""
+  },
+  "backbone-jobs/src/job.rs": {
+    "mtime": 1778981218.5220563,
+    "ast_hash": "69b645ae7cce9b6df55cf3bd1128ac24",
+    "semantic_hash": ""
+  },
+  "backbone-jobs/src/job_executor/mod.rs": {
+    "mtime": 1775918594.1507006,
+    "ast_hash": "a9ac36b1e9ecfd35ba2859419c863bcc",
+    "semantic_hash": ""
+  },
+  "backbone-jobs/src/job_storage/in_memory.rs": {
+    "mtime": 1775918594.1542807,
+    "ast_hash": "543957a7811b0cf0aa19a9bec866f90e",
+    "semantic_hash": ""
+  },
+  "backbone-jobs/src/job_storage/mod.rs": {
+    "mtime": 1775918594.1545756,
+    "ast_hash": "4aaf64dce76326d132b0506be333c6c0",
+    "semantic_hash": ""
+  },
+  "backbone-jobs/src/lib.rs": {
+    "mtime": 1775918594.153602,
+    "ast_hash": "638d7d82e8c3b078b3fc65b2e4004282",
+    "semantic_hash": ""
+  },
+  "backbone-jobs/src/monitoring.rs": {
+    "mtime": 1775918594.1523883,
+    "ast_hash": "b360aa8672be9790c65bad15e6d7c773",
+    "semantic_hash": ""
+  },
+  "backbone-jobs/src/pg_cron.rs": {
+    "mtime": 1775918594.1557376,
+    "ast_hash": "19fbadd0a35b9590d4e2d8b4622a0c34",
+    "semantic_hash": ""
+  },
+  "backbone-jobs/src/scheduler.rs": {
+    "mtime": 1778979860.136837,
+    "ast_hash": "aec6e64589f316dd525686db138224af",
+    "semantic_hash": ""
+  },
+  "backbone-jobs/src/types.rs": {
+    "mtime": 1778981196.280157,
+    "ast_hash": "9225053add791b0cbbb5ed7d72011d57",
+    "semantic_hash": ""
+  },
+  "backbone-maintenance/src/lib.rs": {
+    "mtime": 1777145107.3275568,
+    "ast_hash": "e7132b384d64d506bbfe2bc32ea49a36",
+    "semantic_hash": ""
+  },
+  "backbone-maintenance/tests/middleware_test.rs": {
+    "mtime": 1777145156.355277,
+    "ast_hash": "93838ce5784e5005ce57d5f401a7e923",
+    "semantic_hash": ""
+  },
+  "backbone-messaging/src/bus.rs": {
+    "mtime": 1775918594.163414,
+    "ast_hash": "0a1b911af84703a2ede2eafab61b5329",
+    "semantic_hash": ""
+  },
+  "backbone-messaging/src/crud_event.rs": {
+    "mtime": 1775918594.1601615,
+    "ast_hash": "376bc0d846aa3c911c46a0d3365c2862",
+    "semantic_hash": ""
+  },
+  "backbone-messaging/src/envelope.rs": {
+    "mtime": 1775918594.1624265,
+    "ast_hash": "caae0199136ebc3bcc8b3a7677f0a90a",
+    "semantic_hash": ""
+  },
+  "backbone-messaging/src/error.rs": {
+    "mtime": 1775918594.160821,
+    "ast_hash": "e18d5bd6036d81111fb3405ab7435ba7",
+    "semantic_hash": ""
+  },
+  "backbone-messaging/src/event.rs": {
+    "mtime": 1775918594.1617286,
+    "ast_hash": "61f6c098ebef79573305034a3728e6ed",
+    "semantic_hash": ""
+  },
+  "backbone-messaging/src/handler.rs": {
+    "mtime": 1775918594.1611052,
+    "ast_hash": "26e6d193885d8180056d83a66cb0de29",
+    "semantic_hash": ""
+  },
+  "backbone-messaging/src/integration.rs": {
+    "mtime": 1775918594.1631005,
+    "ast_hash": "fce76f7a7cd7d9a52d2cf1f0159b7817",
+    "semantic_hash": ""
+  },
+  "backbone-messaging/src/integration_bus.rs": {
+    "mtime": 1775918594.1620517,
+    "ast_hash": "9fcd87f26892b8a5aeb5d93c87f08beb",
+    "semantic_hash": ""
+  },
+  "backbone-messaging/src/lib.rs": {
+    "mtime": 1775918594.1614687,
+    "ast_hash": "e60df6e42e5c5dcaf2d1f6aab1eb7408",
+    "semantic_hash": ""
+  },
+  "backbone-messaging/src/noop.rs": {
+    "mtime": 1775918594.1627505,
+    "ast_hash": "f6f7c1397d48eca60f4bfbf8fc29a17c",
+    "semantic_hash": ""
+  },
+  "backbone-messaging/src/subscriber.rs": {
+    "mtime": 1775918594.1605303,
+    "ast_hash": "e72b1a6e3b5b7db1d5277083c5a84961",
+    "semantic_hash": ""
+  },
+  "backbone-messaging/tests/messaging_tests.rs": {
+    "mtime": 1775918594.1588597,
+    "ast_hash": "231442de3105c7152816ee66fa392dfc",
+    "semantic_hash": ""
+  },
+  "backbone-observability/src/audit.rs": {
+    "mtime": 1777145206.7017603,
+    "ast_hash": "712c3afe6c94d641c67de810da8fca5e",
+    "semantic_hash": ""
+  },
+  "backbone-observability/src/config.rs": {
+    "mtime": 1775918594.1662707,
+    "ast_hash": "79ce1d16e369172bf740ec44b5c08e86",
+    "semantic_hash": ""
+  },
+  "backbone-observability/src/lib.rs": {
+    "mtime": 1777142200.4113011,
+    "ast_hash": "80b4a6cce0d576c81aca10cb5a83ce4f",
+    "semantic_hash": ""
+  },
+  "backbone-observability/src/logging.rs": {
+    "mtime": 1778981630.4064555,
+    "ast_hash": "f5b52192bd14c84ba79257d2ee7e5da4",
+    "semantic_hash": ""
+  },
+  "backbone-observability/src/metrics.rs": {
+    "mtime": 1775918594.168252,
+    "ast_hash": "e1035f6c5514d8d195a2ccb97d82ff0e",
+    "semantic_hash": ""
+  },
+  "backbone-observability/src/middleware.rs": {
+    "mtime": 1775918594.1687987,
+    "ast_hash": "eb19face6eca781250e4e958006d5991",
+    "semantic_hash": ""
+  },
+  "backbone-observability/src/tests.rs": {
+    "mtime": 1775918594.1692543,
+    "ast_hash": "57775f9f9063382eb0b052eeae7264ac",
+    "semantic_hash": ""
+  },
+  "backbone-observability/src/tracing.rs": {
+    "mtime": 1775918594.1678097,
+    "ast_hash": "682c3231dc97e07442b3dd3a0617dcc8",
+    "semantic_hash": ""
+  },
+  "backbone-orm/benches/filter_bench.rs": {
+    "mtime": 1775918594.175363,
+    "ast_hash": "693cdd823ca57415d25e6c3425feb858",
+    "semantic_hash": ""
+  },
+  "backbone-orm/src/company_scope.rs": {
+    "mtime": 1784545384.5607717,
+    "ast_hash": "b97bcf866489417c146c69914991aceb",
+    "semantic_hash": ""
+  },
+  "backbone-orm/src/connection.rs": {
+    "mtime": 1775918594.189992,
+    "ast_hash": "a867bbc5fbebcbc9341be43b9b87c43c",
+    "semantic_hash": ""
+  },
+  "backbone-orm/src/filter/condition.rs": {
+    "mtime": 1775918594.18939,
+    "ast_hash": "8b2880612281dd1c93ba67cfd44e3da8",
+    "semantic_hash": ""
+  },
+  "backbone-orm/src/filter/mod.rs": {
+    "mtime": 1775918594.1874077,
+    "ast_hash": "a0b3840783635cf3092ef78d21cb9762",
+    "semantic_hash": ""
+  },
+  "backbone-orm/src/filter/parser.rs": {
+    "mtime": 1777780758.0434823,
+    "ast_hash": "f94bd72541943a90e5e68365520f25e8",
+    "semantic_hash": ""
+  },
+  "backbone-orm/src/filter/query.rs": {
+    "mtime": 1775918594.187089,
+    "ast_hash": "924c4961c606c5c0048ab30f75cb1498",
+    "semantic_hash": ""
+  },
+  "backbone-orm/src/filter/tests.rs": {
+    "mtime": 1777780773.239392,
+    "ast_hash": "30f60a421ed7a87d6f94b7eb9ed7ed3e",
+    "semantic_hash": ""
+  },
+  "backbone-orm/src/filter/types.rs": {
+    "mtime": 1775918594.1866941,
+    "ast_hash": "3505d92a7d6ceb098b51986d61230cd7",
+    "semantic_hash": ""
+  },
+  "backbone-orm/src/filter/validation.rs": {
+    "mtime": 1775918594.1877077,
+    "ast_hash": "2b5f1a165056fb178a100898b0ac68d5",
+    "semantic_hash": ""
+  },
+  "backbone-orm/src/generic_repository.rs": {
+    "mtime": 1784225239.4755383,
+    "ast_hash": "1ba4be2fdcd45f582f6076c586fcdcc7",
+    "semantic_hash": ""
+  },
+  "backbone-orm/src/in_memory.rs": {
+    "mtime": 1775918594.1797543,
+    "ast_hash": "229e1bb34444a6804dc819e68017975f",
+    "semantic_hash": ""
+  },
+  "backbone-orm/src/lib.rs": {
+    "mtime": 1784224921.3874855,
+    "ast_hash": "b135c670b394c8caac1520fc04604ead",
+    "semantic_hash": ""
+  },
+  "backbone-orm/src/migrations.rs": {
+    "mtime": 1777219091.9078157,
+    "ast_hash": "f6f92a067672ddc1d8bd8838cd454f8e",
+    "semantic_hash": ""
+  },
+  "backbone-orm/src/migrations_tests.rs": {
+    "mtime": 1775918594.1764367,
+    "ast_hash": "6fc61cc1f65bbdbf16a2b34aacaa9f95",
+    "semantic_hash": ""
+  },
+  "backbone-orm/src/query_builder.rs": {
+    "mtime": 1775918594.1761935,
+    "ast_hash": "b0984b074141b8dda1544afa242b6626",
+    "semantic_hash": ""
+  },
+  "backbone-orm/src/query_builder_tests.rs": {
+    "mtime": 1775918594.1903756,
+    "ast_hash": "a944b2c4d79c89264eee0013bc10bb5a",
+    "semantic_hash": ""
+  },
+  "backbone-orm/src/raw_query.rs": {
+    "mtime": 1775918594.1850767,
+    "ast_hash": "aa8bcd85af5cc198cc698827cc247965",
+    "semantic_hash": ""
+  },
+  "backbone-orm/src/raw_query_tests.rs": {
+    "mtime": 1775918594.1776445,
+    "ast_hash": "e7232953d665320b662d75e8ca197167",
+    "semantic_hash": ""
+  },
+  "backbone-orm/src/repository.rs": {
+    "mtime": 1784224970.0534744,
+    "ast_hash": "4414a4b112da2dcb221260b3bab2be05",
+    "semantic_hash": ""
+  },
+  "backbone-orm/src/repository_tests.rs": {
+    "mtime": 1775918594.1759405,
+    "ast_hash": "e057cec3cec035c20491daea61903cbc",
+    "semantic_hash": ""
+  },
+  "backbone-orm/src/seeding.rs": {
+    "mtime": 1775918594.1772122,
+    "ast_hash": "04e19c5b3288577a67c225725a5a3369",
+    "semantic_hash": ""
+  },
+  "backbone-orm/src/seeding_tests.rs": {
+    "mtime": 1775918594.179448,
+    "ast_hash": "3c0b7161e6352158dceca0d8b89f2dc9",
+    "semantic_hash": ""
+  },
+  "backbone-orm/tests/company_fence.rs": {
+    "mtime": 1784205288.642761,
+    "ast_hash": "069784a350a314e5358d3630958442e3",
+    "semantic_hash": ""
+  },
+  "backbone-orm/tests/orm_tests.rs": {
+    "mtime": 1775918594.1725938,
+    "ast_hash": "6a7fef1e658aaf328b2b49ee77666f5d",
+    "semantic_hash": ""
+  },
+  "backbone-orm/tests/rls_scope_live.rs": {
+    "mtime": 1784275345.1040924,
+    "ast_hash": "a6a12c6ada9637c7c42094cd5fa5d6a2",
+    "semantic_hash": ""
+  },
+  "backbone-outbox/src/error.rs": {
+    "mtime": 1783411674.03226,
+    "ast_hash": "685791b9e078ce2c991b843b7fdab193",
+    "semantic_hash": ""
+  },
+  "backbone-outbox/src/inbox.rs": {
+    "mtime": 1783411737.971039,
+    "ast_hash": "53bfd14a5571847a1a4d9646f30b022f",
+    "semantic_hash": ""
+  },
+  "backbone-outbox/src/lib.rs": {
+    "mtime": 1783442710.9676416,
+    "ast_hash": "0990084d7422c25a9da2659b71eca61f",
+    "semantic_hash": ""
+  },
+  "backbone-outbox/src/outbox.rs": {
+    "mtime": 1783411724.732626,
+    "ast_hash": "e8ce0ae0a271d31b827ccc51a584fb79",
+    "semantic_hash": ""
+  },
+  "backbone-outbox/src/record.rs": {
+    "mtime": 1783411697.7934027,
+    "ast_hash": "d472fe1cb49bc7084bbe815c1d0c4d26",
+    "semantic_hash": ""
+  },
+  "backbone-outbox/src/relay.rs": {
+    "mtime": 1783443516.68253,
+    "ast_hash": "159a82189bba6366c442f13974909929",
+    "semantic_hash": ""
+  },
+  "backbone-outbox/src/runner.rs": {
+    "mtime": 1783442704.0949585,
+    "ast_hash": "f5e35450341f4dbcd875a318d8d885f7",
+    "semantic_hash": ""
+  },
+  "backbone-outbox/tests/mechanics.rs": {
+    "mtime": 1783443227.4168863,
+    "ast_hash": "ad441185c531c42262fc7fd6fccae8fc",
+    "semantic_hash": ""
+  },
+  "backbone-outbox/tests/relay_runner.rs": {
+    "mtime": 1783442754.6796594,
+    "ast_hash": "c1b56c396faa1b380fe2bbc163b316d3",
+    "semantic_hash": ""
+  },
+  "backbone-queue/examples/advanced_monitoring.rs": {
+    "mtime": 1775918594.198798,
+    "ast_hash": "701e70d8e3c62de03d4c8e7346ba6649",
+    "semantic_hash": ""
+  },
+  "backbone-queue/examples/basic_redis_queue.rs": {
+    "mtime": 1778980566.2194605,
+    "ast_hash": "8ab2b7fec8e8740e59cdc0015461f86e",
+    "semantic_hash": ""
+  },
+  "backbone-queue/examples/compression_demo.rs": {
+    "mtime": 1775918594.198986,
+    "ast_hash": "363e76233cac63a1b31ab5f03e32358f",
+    "semantic_hash": ""
+  },
+  "backbone-queue/examples/fifo_queue_demo.rs": {
+    "mtime": 1775918594.1993785,
+    "ast_hash": "3ee18e327172adf0571fde9fe05a8365",
+    "semantic_hash": ""
+  },
+  "backbone-queue/examples/monitoring_dashboard.rs": {
+    "mtime": 1775918594.1967013,
+    "ast_hash": "9eaf6642b50ecdcc7f62eea58b8c3748",
+    "semantic_hash": ""
+  },
+  "backbone-queue/examples/processor_demo.rs": {
+    "mtime": 1775918594.1986055,
+    "ast_hash": "13a9c26e3b6cbeafa806b0292f97ea7e",
+    "semantic_hash": ""
+  },
+  "backbone-queue/examples/queue_manager_demo.rs": {
+    "mtime": 1775918594.1958673,
+    "ast_hash": "f0eb631e4562ff01dd0aa2328a3eca6c",
+    "semantic_hash": ""
+  },
+  "backbone-queue/examples/rabbitmq_examples.rs": {
+    "mtime": 1775918594.1980658,
+    "ast_hash": "ecdd9780dda1b8674c3e79e1784ff36d",
+    "semantic_hash": ""
+  },
+  "backbone-queue/examples/rabbitmq_realtime_chat.rs": {
+    "mtime": 1775918594.1954195,
+    "ast_hash": "e01fb72a5a9b1affcb3d4c46d1d81d92",
+    "semantic_hash": ""
+  },
+  "backbone-queue/examples/rabbitmq_webhook_processor.rs": {
+    "mtime": 1775918594.1977403,
+    "ast_hash": "0507643f417498ccda6a773d465a4a66",
+    "semantic_hash": ""
+  },
+  "backbone-queue/examples/sqs_queue_examples.rs": {
+    "mtime": 1775918594.1984098,
+    "ast_hash": "c3f6d9272378908ac2076dca474fb4bf",
+    "semantic_hash": ""
+  },
+  "backbone-queue/examples/validation_demo.rs": {
+    "mtime": 1775918594.1951103,
+    "ast_hash": "2a7198a0be77feb882ef21c38a9aae12",
+    "semantic_hash": ""
+  },
+  "backbone-queue/examples/worker_pool.rs": {
+    "mtime": 1775918594.1963444,
+    "ast_hash": "0fb25b9d9ad324fb5ec51ef70b81add1",
+    "semantic_hash": ""
+  },
+  "backbone-queue/src/compression.rs": {
+    "mtime": 1775918594.2016442,
+    "ast_hash": "342ba2912b3c70d0fc6786d208a10185",
+    "semantic_hash": ""
+  },
+  "backbone-queue/src/compression_tests.rs": {
+    "mtime": 1775918594.2038703,
+    "ast_hash": "3f22d2611912e20dd261c90b3dea4fa4",
+    "semantic_hash": ""
+  },
+  "backbone-queue/src/deduplication.rs": {
+    "mtime": 1775918594.202617,
+    "ast_hash": "a35ee9fe2e0f343627f18b1639bcbaf9",
+    "semantic_hash": ""
+  },
+  "backbone-queue/src/deduplication_tests.rs": {
+    "mtime": 1775918594.202286,
+    "ast_hash": "d05debb436fd863cc93b541ec09f18c8",
+    "semantic_hash": ""
+  },
+  "backbone-queue/src/fifo.rs": {
+    "mtime": 1775918594.2035797,
+    "ast_hash": "3d7b4340315660095a715d8e95d8192c",
+    "semantic_hash": ""
+  },
+  "backbone-queue/src/fifo_tests.rs": {
+    "mtime": 1775918594.206982,
+    "ast_hash": "75dfce75b549a368df3ad60c7fe5b16c",
+    "semantic_hash": ""
+  },
+  "backbone-queue/src/lib.rs": {
+    "mtime": 1778981642.8679554,
+    "ast_hash": "f31cd2e5e8b2109c5564a016f660de6a",
+    "semantic_hash": ""
+  },
+  "backbone-queue/src/monitoring.rs": {
+    "mtime": 1775918594.2009203,
+    "ast_hash": "2a4ce098f4929c025c4790c35f034544",
+    "semantic_hash": ""
+  },
+  "backbone-queue/src/monitoring_tests.rs": {
+    "mtime": 1775918594.2086303,
+    "ast_hash": "edf4e457bd5ce51cd41eeee5c29e4c2f",
+    "semantic_hash": ""
+  },
+  "backbone-queue/src/processor.rs": {
+    "mtime": 1775918594.1998363,
+    "ast_hash": "8165bae613bf00588ec18ab264c567a8",
+    "semantic_hash": ""
+  },
+  "backbone-queue/src/processor_tests.rs": {
+    "mtime": 1775918594.2041595,
+    "ast_hash": "6fd3f37b5e845c33afe3fa02d26a5f3f",
+    "semantic_hash": ""
+  },
+  "backbone-queue/src/queue_manager.rs": {
+    "mtime": 1775918594.204972,
+    "ast_hash": "53991460c1313cce59dbe121b1dec0d5",
+    "semantic_hash": ""
+  },
+  "backbone-queue/src/queue_manager_tests.rs": {
+    "mtime": 1775918594.208013,
+    "ast_hash": "02ef6fb13778e54c744b47a8b4f35a2a",
+    "semantic_hash": ""
+  },
+  "backbone-queue/src/rabbitmq.rs": {
+    "mtime": 1775918594.205696,
+    "ast_hash": "2d69072a62c30d7a55e7f4255d7eee10",
+    "semantic_hash": ""
+  },
+  "backbone-queue/src/rabbitmq_simple.rs": {
+    "mtime": 1778980408.9544055,
+    "ast_hash": "c845cbd56fab0235da92a6bea9bb5777",
+    "semantic_hash": ""
+  },
+  "backbone-queue/src/rabbitmq_tests.rs": {
+    "mtime": 1778981412.9540043,
+    "ast_hash": "be6ebf88ac0f5c6dba9b6eaa76fcf0be",
+    "semantic_hash": ""
+  },
+  "backbone-queue/src/redis.rs": {
+    "mtime": 1775918594.2075868,
+    "ast_hash": "8d87011ea8ddcc6e308d49a7321bd607",
+    "semantic_hash": ""
+  },
+  "backbone-queue/src/redis_tests.rs": {
+    "mtime": 1775918594.2012284,
+    "ast_hash": "80d4d3be91186baefcb83f03f863f5ba",
+    "semantic_hash": ""
+  },
+  "backbone-queue/src/sqs.rs": {
+    "mtime": 1775918594.2032864,
+    "ast_hash": "b59ae261308e3cad4d55c4c68e94ebbd",
+    "semantic_hash": ""
+  },
+  "backbone-queue/src/sqs_tests.rs": {
+    "mtime": 1775918594.2063398,
+    "ast_hash": "1e564af3bf2a22a15c98dd0848c181bd",
+    "semantic_hash": ""
+  },
+  "backbone-queue/src/traits.rs": {
+    "mtime": 1775918594.2060812,
+    "ast_hash": "d4c8db17ac05b0d94a3b69cd9b967a1d",
+    "semantic_hash": ""
+  },
+  "backbone-queue/src/types.rs": {
+    "mtime": 1775918594.200604,
+    "ast_hash": "1eebb338b23597d7ae5d602afd5ed14b",
+    "semantic_hash": ""
+  },
+  "backbone-queue/src/validation.rs": {
+    "mtime": 1775918594.20457,
+    "ast_hash": "559e8f1ee46ecae7864d01a3e951e330",
+    "semantic_hash": ""
+  },
+  "backbone-queue/src/validation_tests.rs": {
+    "mtime": 1775918594.2054107,
+    "ast_hash": "260b317681ecd7a86a181ba93ba310c2",
+    "semantic_hash": ""
+  },
+  "backbone-queue/src/validation_utils.rs": {
+    "mtime": 1775918594.2066896,
+    "ast_hash": "e671a09dad72c6d765faa55a93d08b3b",
+    "semantic_hash": ""
+  },
+  "backbone-queue/tests/integration_tests.rs": {
+    "mtime": 1778981350.8251734,
+    "ast_hash": "a31bb922193ad3c23147243a4fc8905c",
+    "semantic_hash": ""
+  },
+  "backbone-rate-limit/src/dual.rs": {
+    "mtime": 1778981658.1015813,
+    "ast_hash": "8270fa3aa3e38eadb8f4a9ae31a3ccb0",
+    "semantic_hash": ""
+  },
+  "backbone-rate-limit/src/lib.rs": {
+    "mtime": 1778232459.1387014,
+    "ast_hash": "98ccc0201fb174cb204826ab95ef5b8f",
+    "semantic_hash": ""
+  },
+  "backbone-rate-limit/src/limiter.rs": {
+    "mtime": 1778232279.3503966,
+    "ast_hash": "779204c3b479d1a6080b7f4934440774",
+    "semantic_hash": ""
+  },
+  "backbone-rate-limit/src/middleware.rs": {
+    "mtime": 1778232298.0806994,
+    "ast_hash": "43fc1bb0a6c9da5e86a77be82d9e7217",
+    "semantic_hash": ""
+  },
+  "backbone-rate-limit/src/redis_storage.rs": {
+    "mtime": 1778232266.3386462,
+    "ast_hash": "e708c6729c52416a00ca5a8aafd7497a",
+    "semantic_hash": ""
+  },
+  "backbone-rate-limit/src/service.rs": {
+    "mtime": 1775883711.6681485,
+    "ast_hash": "6128662b27a1efc4cfd6172a56119426",
+    "semantic_hash": ""
+  },
+  "backbone-rate-limit/src/storage.rs": {
+    "mtime": 1778232238.5015848,
+    "ast_hash": "9c5d996e71b18aa7629fdd061d5273e2",
+    "semantic_hash": ""
+  },
+  "backbone-rate-limit/src/tests/integration_test.rs": {
+    "mtime": 1778232302.9128385,
+    "ast_hash": "f6610ef3bde896f7a444292cbbbab4ba",
+    "semantic_hash": ""
+  },
+  "backbone-rate-limit/src/types.rs": {
+    "mtime": 1778232221.1639247,
+    "ast_hash": "0be1d6c0a8caec061efaf4cd1e456087",
+    "semantic_hash": ""
+  },
+  "backbone-rate-limit/tests/redis_integration.rs": {
+    "mtime": 1778978407.3009267,
+    "ast_hash": "1ecb87fb762595a30afdb26cc3fb8be9",
+    "semantic_hash": ""
+  },
+  "backbone-search/examples/advanced_search.rs": {
+    "mtime": 1775918594.2153676,
+    "ast_hash": "853724077735a78509af669e5716a468",
+    "semantic_hash": ""
+  },
+  "backbone-search/examples/algolia_setup.rs": {
+    "mtime": 1775918594.2136693,
+    "ast_hash": "b8382563991d1487e2c7cceddc0ccd18",
+    "semantic_hash": ""
+  },
+  "backbone-search/examples/basic_usage.rs": {
+    "mtime": 1775918594.214047,
+    "ast_hash": "47143be2d1b19166e0419beea00ecaf3",
+    "semantic_hash": ""
+  },
+  "backbone-search/examples/deduplication_demo.rs": {
+    "mtime": 1775918594.2148504,
+    "ast_hash": "7df6da666ae8e8a51481ea8afef38b2a",
+    "semantic_hash": ""
+  },
+  "backbone-search/examples/elasticsearch_setup.rs": {
+    "mtime": 1775918594.215652,
+    "ast_hash": "5b51b13fbb19a797cd0a3061cc04259d",
+    "semantic_hash": ""
+  },
+  "backbone-search/examples/testing_examples.rs": {
+    "mtime": 1775918594.213094,
+    "ast_hash": "f6dc523869e881588225d83065b38d6d",
+    "semantic_hash": ""
+  },
+  "backbone-search/src/algolia.rs": {
+    "mtime": 1775918594.2171485,
+    "ast_hash": "d773218701daf83542082f74fbb1b1aa",
+    "semantic_hash": ""
+  },
+  "backbone-search/src/elasticsearch.rs": {
+    "mtime": 1775918594.2168736,
+    "ast_hash": "ba5be34355ede6a07caf3a603f23d88f",
+    "semantic_hash": ""
+  },
+  "backbone-search/src/lib.rs": {
+    "mtime": 1778982334.1856158,
+    "ast_hash": "cf292d5be915fa93d3c3de70eedbc061",
+    "semantic_hash": ""
+  },
+  "backbone-search/src/traits.rs": {
+    "mtime": 1775918594.2175035,
+    "ast_hash": "e0b835af0bbe50b1e86b13af8a520542",
+    "semantic_hash": ""
+  },
+  "backbone-search/src/types.rs": {
+    "mtime": 1775918594.2162259,
+    "ast_hash": "3f7236c2aabe57d8ec9cd70835818aef",
+    "semantic_hash": ""
+  },
+  "backbone-storage/src/compression.rs": {
+    "mtime": 1778981434.7059658,
+    "ast_hash": "ffa5c71551c9340bb6bf32735561ef4f",
+    "semantic_hash": ""
+  },
+  "backbone-storage/src/compression_engine.rs": {
+    "mtime": 1775918595.8953488,
+    "ast_hash": "b6ecd94d3e49d37f9663f206a87404e8",
+    "semantic_hash": ""
+  },
+  "backbone-storage/src/error.rs": {
+    "mtime": 1775918595.8934982,
+    "ast_hash": "ac3fb13bb102100ffe142ad0ffc36aa5",
+    "semantic_hash": ""
+  },
+  "backbone-storage/src/lib.rs": {
+    "mtime": 1775918595.8940892,
+    "ast_hash": "bf0ca1f16381b20c134b65878b82355e",
+    "semantic_hash": ""
+  },
+  "backbone-storage/src/local.rs": {
+    "mtime": 1775918595.8925092,
+    "ast_hash": "ee3d468aa3ad418bcd71f729ca115f77",
+    "semantic_hash": ""
+  },
+  "backbone-storage/src/local_simple.rs": {
+    "mtime": 1778976798.257748,
+    "ast_hash": "96684f4997a30f4b7237f5d6e68b65a2",
+    "semantic_hash": ""
+  },
+  "backbone-storage/src/minio.rs": {
+    "mtime": 1775918595.894466,
+    "ast_hash": "938e7f6d64275ee2dd256a70214bf06a",
+    "semantic_hash": ""
+  },
+  "backbone-storage/src/s3.rs": {
+    "mtime": 1775918595.8949072,
+    "ast_hash": "d6a5651233f1022ec0eee154de19cfe3",
+    "semantic_hash": ""
+  },
+  "backbone-storage/src/security.rs": {
+    "mtime": 1778981490.8158853,
+    "ast_hash": "459a470fb1bc70b0f794d2914e4a7ed9",
+    "semantic_hash": ""
+  },
+  "backbone-storage/src/traits.rs": {
+    "mtime": 1775918595.89575,
+    "ast_hash": "74c7ee88dec690ff4359a541d8fcfe9e",
+    "semantic_hash": ""
+  },
+  "backbone-storage/src/types.rs": {
+    "mtime": 1775918595.891743,
+    "ast_hash": "fa79ead6225d8279c75163e6f1ce3440",
+    "semantic_hash": ""
+  },
+  "backbone-tenant/src/lib.rs": {
+    "mtime": 1784215655.8972688,
+    "ast_hash": "570778d4c3fceee0348721236af91367",
+    "semantic_hash": ""
+  },
+  "backbone-tenant/src/provision.rs": {
+    "mtime": 1784216140.973658,
+    "ast_hash": "52d769903d067bbd981df55d8debeffd",
+    "semantic_hash": ""
+  },
+  "backbone-tenant/tests/provision_live.rs": {
+    "mtime": 1784216191.430416,
+    "ast_hash": "291a94d617302f27111cefe059b80925",
+    "semantic_hash": ""
+  },
+  "backbone-tenant/tests/registry.rs": {
+    "mtime": 1784209996.6131508,
+    "ast_hash": "ec85ade84d8187828be97ce27f19acdc",
+    "semantic_hash": ""
+  },
+  ".github/workflows/release.yml": {
+    "mtime": 1777040967.4193318,
+    "ast_hash": "95bbfbc44ace66a493561c628ac79ea9",
+    "semantic_hash": ""
+  },
+  ".github/workflows/test.yml": {
+    "mtime": 1784545763.473682,
+    "ast_hash": "f92f6e9af5252193d62e972302a9dc83",
+    "semantic_hash": ""
+  },
+  "CHANGELOG.md": {
+    "mtime": 1780818587.3717566,
+    "ast_hash": "4abc3a4578d0a3e65ab3d5ba1afb1e02",
+    "semantic_hash": ""
+  },
+  "CLAUDE.md": {
+    "mtime": 1784708440.547807,
+    "ast_hash": "08bafbd6215074773e4098092d1994f1",
+    "semantic_hash": ""
+  },
+  "README.md": {
+    "mtime": 1783437997.7964573,
+    "ast_hash": "b4931b00c1cc99f5163c4d64f2e82ba8",
+    "semantic_hash": ""
+  },
+  "backbone-auth/README.md": {
+    "mtime": 1775918594.075171,
+    "ast_hash": "707e46963a15fd6a00ca66ff237a5d6a",
+    "semantic_hash": ""
+  },
+  "backbone-cache/README.md": {
+    "mtime": 1775918594.096861,
+    "ast_hash": "6ac5032a1e1b32aaf691df995f8071f4",
+    "semantic_hash": ""
+  },
+  "backbone-core/README.md": {
+    "mtime": 1780818595.9339879,
+    "ast_hash": "48ac242e6876f81cfb6c85e6008492aa",
+    "semantic_hash": ""
+  },
+  "backbone-core/docs/README.md": {
+    "mtime": 1780680370.4876473,
+    "ast_hash": "1b9be4682ba1538c2bc65c77d13dd120",
+    "semantic_hash": ""
+  },
+  "backbone-core/docs/api-reference.md": {
+    "mtime": 1780818656.1983712,
+    "ast_hash": "d15e15b23ec60510d4c059ee9bce9827",
+    "semantic_hash": ""
+  },
+  "backbone-core/docs/architecture.md": {
+    "mtime": 1780818643.484932,
+    "ast_hash": "51265d4111a5fe435ab707664d42b7a0",
+    "semantic_hash": ""
+  },
+  "backbone-core/docs/configuration.md": {
+    "mtime": 1780680538.9642,
+    "ast_hash": "1ca0e60a7ac6755392c8d2b3869990e3",
+    "semantic_hash": ""
+  },
+  "backbone-core/docs/openapi.md": {
+    "mtime": 1780680573.170467,
+    "ast_hash": "17c93095db8085d2c349aa5890ca8347",
+    "semantic_hash": ""
+  },
+  "backbone-core/docs/openapi.template.yaml": {
+    "mtime": 1780680613.3123126,
+    "ast_hash": "fcfb9ee84985b34b30b30e2a4cf36788",
+    "semantic_hash": ""
+  },
+  "backbone-core/docs/usage.md": {
+    "mtime": 1780818631.8808036,
+    "ast_hash": "82e14585ee18c3622153d3b1d18cd7e1",
+    "semantic_hash": ""
+  },
+  "backbone-core/examples/README.md": {
+    "mtime": 1775918594.1065605,
+    "ast_hash": "6e6f1c49c7a16cf802ac66d4e4fbb565",
+    "semantic_hash": ""
+  },
+  "backbone-email/README.md": {
+    "mtime": 1775918594.1332514,
+    "ast_hash": "795d21593738495b266728b086b4cb45",
+    "semantic_hash": ""
+  },
+  "backbone-jobs/README.md": {
+    "mtime": 1775918594.148023,
+    "ast_hash": "16b291de230dca6cbf0c650391640e82",
+    "semantic_hash": ""
+  },
+  "backbone-orm/README.md": {
+    "mtime": 1775918594.1740685,
+    "ast_hash": "844f5132b259e13e4630da04abf34ba6",
+    "semantic_hash": ""
+  },
+  "backbone-orm/examples/comprehensive_usage_examples.md": {
+    "mtime": 1775918594.1745417,
+    "ast_hash": "e811b7e07feba34b341a03c2dd20656e",
+    "semantic_hash": ""
+  },
+  "backbone-outbox/README.md": {
+    "mtime": 1783436275.3725216,
+    "ast_hash": "9c8ac982dd4f130193fb7a1044ed1e02",
+    "semantic_hash": ""
+  },
+  "backbone-queue/README.md": {
+    "mtime": 1775918594.1944525,
+    "ast_hash": "8af39f37764b895940652e110655f7b2",
+    "semantic_hash": ""
+  },
+  "backbone-queue/docs/RABBITMQ_GUIDE.md": {
+    "mtime": 1775918594.1940014,
+    "ast_hash": "eecc8ebed18af4bf4454e104abdab284",
+    "semantic_hash": ""
+  },
+  "backbone-queue/examples/README.md": {
+    "mtime": 1775918594.197437,
+    "ast_hash": "2efa719644493c58cdb47a57330bebf0",
+    "semantic_hash": ""
+  },
+  "backbone-rate-limit/README.md": {
+    "mtime": 1778264110.9616086,
+    "ast_hash": "42f80835c78aeb838ff621ce5d277967",
+    "semantic_hash": ""
+  },
+  "backbone-search/README.md": {
+    "mtime": 1775918594.2114785,
+    "ast_hash": "b874ca62a6db80f93c810cd66171e2fe",
+    "semantic_hash": ""
+  },
+  "backbone-search/examples/README.md": {
+    "mtime": 1775918594.2144089,
+    "ast_hash": "0de8d30a098bd0f8191870fa161de38a",
+    "semantic_hash": ""
+  },
+  "backbone-storage/README.md": {
+    "mtime": 1775918595.8876953,
+    "ast_hash": "aea1ffdc86e2ad43501f584c76daf77f",
+    "semantic_hash": ""
+  },
+  "backbone-tenant/README.md": {
+    "mtime": 1784215751.7563221,
+    "ast_hash": "506e5a92acbb2e86bf288e91dec7734f",
+    "semantic_hash": ""
+  },
+  "docs/README.md": {
+    "mtime": 1783437287.8737342,
+    "ast_hash": "922dcb60f38f462c125e23dbe4a65d51",
+    "semantic_hash": ""
+  },
+  "docs/adr/README.md": {
+    "mtime": 1783437605.10879,
+    "ast_hash": "f3e4e31b77d396531d29dee66b6539c8",
+    "semantic_hash": ""
+  },
+  "docs/adr/adr-0001-git-tag-distribution.md": {
+    "mtime": 1783437618.8708377,
+    "ast_hash": "3dd01887095ee1ad176c3c78b4ab17d7",
+    "semantic_hash": ""
+  },
+  "docs/adr/adr-0002-self-describing-crates.md": {
+    "mtime": 1783437632.7554216,
+    "ast_hash": "eeff4e442ddb2c6e56f232ac8d57c769",
+    "semantic_hash": ""
+  },
+  "docs/adr/adr-0003-protocol-agnostic-core.md": {
+    "mtime": 1783437648.4855497,
+    "ast_hash": "929217b147cdedebd0b881d7144630f3",
+    "semantic_hash": ""
+  },
+  "docs/adr/adr-0004-monorepo-versioning.md": {
+    "mtime": 1783437663.2051086,
+    "ast_hash": "1c6da8eeed7c1cacfe3e780ae3f2189b",
+    "semantic_hash": ""
+  },
+  "docs/architecture.md": {
+    "mtime": 1783438029.4762673,
+    "ast_hash": "dcc37872c939554ef58249d700983581",
+    "semantic_hash": ""
+  },
+  "docs/background.md": {
+    "mtime": 1783437352.8946762,
+    "ast_hash": "ed65671565eb29889388f8181ace13d9",
+    "semantic_hash": ""
+  },
+  "docs/contributing.md": {
+    "mtime": 1783437560.1537871,
+    "ast_hash": "9d074920f0655b3a2e5e4233af6ade5e",
+    "semantic_hash": ""
+  },
+  "docs/developer-guide.md": {
+    "mtime": 1783438061.9082167,
+    "ast_hash": "b76ad3a06f33593e40cc1be3c072f2b8",
+    "semantic_hash": ""
+  },
+  "docs/glossary.md": {
+    "mtime": 1783438077.6224904,
+    "ast_hash": "2527c8c26ddec711421512185479a861",
+    "semantic_hash": ""
+  },
+  "docs/maintainer-guide.md": {
+    "mtime": 1783437480.883101,
+    "ast_hash": "8ce23762017313e3802ef6d5e67d4f4e",
+    "semantic_hash": ""
+  },
+  "docs/philosophy.md": {
+    "mtime": 1783437321.464726,
+    "ast_hash": "9896bd17d0e12da0676433732cd0ede0",
+    "semantic_hash": ""
+  },
+  "docs/technology.md": {
+    "mtime": 1783437398.9861073,
+    "ast_hash": "e8f99e2b5840159688a89ed63cd924e4",
+    "semantic_hash": ""
+  }
+}
