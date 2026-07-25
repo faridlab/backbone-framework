@@ -6,6 +6,7 @@ members = [
     "backbone-cache",
     "backbone-core",
     "backbone-email",
+    "backbone-gl-posting",
     "backbone-graphql",
     "backbone-health",
     "backbone-jobs",

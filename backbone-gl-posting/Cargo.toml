@@ -1,0 +1,17 @@
+[package]
+name = "backbone-gl-posting"
+version = "0.1.0"
+edition = "2021"
+description = "The GL-posting wire contract shared across Backbone producers (envelope + sink port)."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# Only the wire types — no backbone deps, so this composes everywhere with zero version skew
+# (same posture as backbone-outbox: framework plumbing that depends on sqlx/serde only).
+serde = { version = "1.0", features = ["derive"] }
+uuid = { version = "1.0", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+rust_decimal = { version = "1.36", features = ["serde"] }
+async-trait = "0.1"
