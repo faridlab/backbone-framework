@@ -1,6 +1,6 @@
 [package]
 name = "backbone-outbox"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Durable transactional-outbox + inbox + relay primitives for go-live exactly-once event delivery over Postgres."
 
@@ -20,6 +20,11 @@ tokio = { version = "1.0", features = ["time", "macros", "rt"], optional = true 
 # The relay RUNNER (a poll loop that drains the outbox on an interval until shutdown). Off by default —
 # a producer/composition service enables it; the outbox/inbox primitives don't need tokio.
 runner = ["dep:tokio"]
+# Fence `outbox_events` by `company_id` with FORCE RLS + a `company_isolation` policy when `migrate()`
+# creates the table (ADR-0011). Off by default — the framework stays tenant-agnostic; a company-tenant
+# service enables it so the TABLE OWNER applies the fence instead of each module bolting on a migration.
+# The `company_id` column itself is always created (OutboxRecord requires it); only the RLS fence is opt-in.
+multi_tenant = []
 
 [dev-dependencies]
 tokio = { version = "1.0", features = ["full", "test-util"] }

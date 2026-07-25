@@ -36,6 +36,44 @@ pub async fn migrate(pool: &PgPool, schema: &str) -> Result<()> {
     ))
     .execute(pool)
     .await?;
+
+    // ADR-0011: fence `outbox_events` by `company_id` so a tenant's event stream is isolated. This is
+    // the table OWNER applying the fence (the correct home — it was previously a hand-authored backfill
+    // migration bolted onto each module). Opt-in via the `multi_tenant` feature so the framework stays
+    // tenant-agnostic; a company-tenant service enables it. The `company_id` column is always created
+    // above (OutboxRecord requires it) — only the RLS fence is conditional. An unset `app.company_id`
+    // session var sees zero rows (NULLIF → NULL), the standard fail-closed posture. The outbox relay is
+    // cross-tenant (it drains `WHERE published_at IS NULL` with no company scope), so the policy also
+    // admits connections logged in as `metaphor_relay` (`OR current_user = 'metaphor_relay'`) — a surgical
+    // per-table bypass, NOT a BYPASSRLS attribute, so every other table's fence still holds.
+    #[cfg(feature = "multi_tenant")]
+    {
+        sqlx::query(&format!(
+            "CREATE INDEX IF NOT EXISTS idx_{schema}_outbox_company_id ON {schema}.outbox_events (company_id)"
+        ))
+        .execute(pool)
+        .await?;
+        sqlx::query(&format!("ALTER TABLE {schema}.outbox_events ENABLE ROW LEVEL SECURITY"))
+            .execute(pool).await?;
+        sqlx::query(&format!("ALTER TABLE {schema}.outbox_events FORCE ROW LEVEL SECURITY"))
+            .execute(pool).await?;
+        sqlx::query(&format!(
+            "DROP POLICY IF EXISTS outbox_events_company_isolation ON {schema}.outbox_events"
+        ))
+        .execute(pool)
+        .await?;
+        sqlx::query(&format!(
+            r#"CREATE POLICY outbox_events_company_isolation ON {schema}.outbox_events
+                 FOR ALL
+                 USING      (company_id = NULLIF(current_setting('app.company_id', true), '')::uuid
+                             OR current_user = 'metaphor_relay')
+                 WITH CHECK (company_id = NULLIF(current_setting('app.company_id', true), '')::uuid
+                             OR current_user = 'metaphor_relay')"#
+        ))
+        .execute(pool)
+        .await?;
+    }
+
     sqlx::query(&format!(
         r#"CREATE TABLE IF NOT EXISTS {schema}.inbox_consumed (
              consumer    text NOT NULL,
