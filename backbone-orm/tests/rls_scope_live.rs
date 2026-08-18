@@ -9,7 +9,7 @@
 //! company A sees only A's rows, an unscoped read sees nothing (fail-closed), and a write forging
 //! another company's id is rejected by `WITH CHECK`.
 
-use backbone_orm::company_scope::{with_company_scope, with_request_scope};
+use backbone_orm::company_scope::{current_company, with_company_scope, with_request_scope};
 use backbone_orm::repository::{DatabaseOperations, PostgresRepository};
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
@@ -146,4 +146,35 @@ async fn orm_reads_and_writes_are_company_fenced() {
     let _ = sqlx::raw_sql("DROP SCHEMA IF EXISTS rls_orm_test CASCADE; DROP ROLE IF EXISTS rls_orm_app;")
         .execute(&admin)
         .await;
+}
+
+/// The two scope modes must agree on task-local visibility: `with_request_scope` carries the
+/// company in the dedicated connection's session var, and it must ALSO publish the `COMPANY`
+/// task-local so that `current_company()` readers (application-layer adapters, audit stamps)
+/// learn the same tenant both ways. A request-scoped deployment that degrades `current_company()`
+/// to `None` silently breaks every ambient-company read in its handlers.
+#[tokio::test]
+async fn request_scope_publishes_the_company_task_local() {
+    let Some(dsn) = admin_dsn() else {
+        eprintln!("skipping: set BACKBONE_ORM_RLS_DSN to run the live RLS scope test");
+        return;
+    };
+    // No RLS fixture needed — the probe is about task-local visibility, not fencing, so any
+    // pool works. It also must not touch the `rls_orm_test` schema the fencing test above
+    // creates: the two tests run in parallel and would race on the shared name.
+    let pool = PgPool::connect(&dsn).await.expect("connect");
+    let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+
+    let inside = with_request_scope(&pool, a, async { current_company() })
+        .await
+        .expect("request scope A");
+    assert_eq!(inside, Some(a), "with_request_scope must publish the COMPANY task-local");
+
+    let inside_b = with_request_scope(&pool, b, async { current_company() })
+        .await
+        .expect("request scope B");
+    assert_eq!(inside_b, Some(b), "each request scope publishes its own company");
+
+    // Outside any scope there is none — the fail-closed default is unchanged.
+    assert_eq!(current_company(), None);
 }

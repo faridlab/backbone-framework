@@ -64,7 +64,14 @@ where
         .await?;
 
     let holder = Arc::new(Mutex::new(conn));
-    let result = REQUEST_CONN.scope(holder.clone(), f).await;
+    // Publish the COMPANY task-local too, matching `with_company_scope`'s visibility contract.
+    // The dedicated connection carries the company in its session var, but code that asks
+    // `current_company()` (application-layer adapters, audit stamps) has no other way to learn
+    // it — the two scope modes must not disagree about task-local visibility, or request-scoped
+    // deployments silently degrade `current_company()` to `None` for every handler.
+    let result = COMPANY
+        .scope(Some(company), REQUEST_CONN.scope(holder.clone(), f))
+        .await;
 
     // Unconditional reset. We do NOT gate on `Arc::try_unwrap(holder)` (sole-reference check):
     // `REQUEST_CONN` is a clonable `Arc`, and every scoped helper takes a clone via `request_conn()`.
