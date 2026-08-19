@@ -69,7 +69,9 @@ pub struct ReconcilePairRequest {
 /// The resulting edge. `applied` is the post-clamp amount actually reconciled.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ReconcileEdgeAck {
-    pub partial_id: Uuid,
+    /// `None` when the requested amount clamped to zero — no edge exists, and the
+    /// unapplied remainder stays unreconciled on the credit line (the on-account credit).
+    pub partial_id: Option<Uuid>,
     pub applied: Decimal,
     /// Set when this edge completed the pair — every connected line reached zero residual.
     pub full_reconcile_id: Option<Uuid>,
