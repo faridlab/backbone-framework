@@ -106,6 +106,16 @@ pub trait ReconcileSink: Send + Sync {
 
     /// Side-effecting unlink riding the caller's transaction: reverses generated moves,
     /// repairs groups, removes the partials between the pair.
+    ///
+    /// **Contract: reversals are pair-complete.** The unlink removes EVERY partial between
+    /// the located pair, whatever their origin and amount — it is not scoped to a subset of
+    /// the pair's history. A producer must therefore only call this for a pair whose edges it
+    /// is undoing IN FULL: cancel events must carry the complete allocation set for each
+    /// affected pair (an all-or-nothing document reversal), never a partial subset — a
+    /// subset would restore the caller's cached bookkeeping by less than the graph reopens,
+    /// silently diverging the two. The void return reflects today's producers (each pair
+    /// carries one allocation, one edge); a future producer needing amount-scoped reversal
+    /// requires a richer ack first.
     async fn unreconcile_pair_on(
         &self,
         conn: &mut sqlx::PgConnection,
