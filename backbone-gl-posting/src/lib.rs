@@ -13,6 +13,14 @@
 //!
 //! This crate is framework plumbing: it depends on `serde` + primitives only, never on a domain module
 //! or accounting itself.
+//!
+//! The companion seam is the **reconciliation contract** ([`ReconcileSink`]): producers settle and
+//! clear through reconciliation edges on accounting's journal lines via the same zero-edge posture —
+//! a locator-based, connection-taking port implemented by the composition layer.
+
+mod reconcile;
+
+pub use reconcile::*;
 
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};

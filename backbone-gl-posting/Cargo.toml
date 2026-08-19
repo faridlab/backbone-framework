@@ -2,7 +2,7 @@
 name = "backbone-gl-posting"
 version = "0.1.0"
 edition = "2021"
-description = "The GL-posting wire contract shared across Backbone producers (envelope + sink port)."
+description = "Wire contracts shared across Backbone producers: the GL-posting envelope + sink port, and the reconciliation edge port."
 
 [lib]
 path = "src/lib.rs"
@@ -15,3 +15,6 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 rust_decimal = { version = "1.36", features = ["serde"] }
 async-trait = "0.1"
+# PgConnection for the connection-taking ReconcileSink port (the sink rides the caller's
+# transaction; no pooling/runtime features needed here — consumers bring their own runtime).
+sqlx = { version = "0.8", default-features = false, features = ["postgres"] }
