@@ -29,6 +29,17 @@ pub async fn migrate(pool: &PgPool, schema: &str) -> Result<()> {
     ))
     .execute(pool)
     .await?;
+    // Heal a table created by an older version of this function that predates the `company_id`
+    // column: `CREATE TABLE IF NOT EXISTS` is a no-op on such a table, so the fence/index/policy DDL
+    // below would abort on the missing column and kill the boot. Added NULLABLE — a NOT NULL add
+    // is rejected outright on any legacy table that already has rows. Rows that predate the heal
+    // keep `company_id IS NULL`: the fence below hides them from every scoped app role (fail-closed),
+    // while the relay role's policy bypass still sees them.
+    sqlx::query(&format!(
+        "ALTER TABLE {schema}.outbox_events ADD COLUMN IF NOT EXISTS company_id uuid"
+    ))
+    .execute(pool)
+    .await?;
     // Partial index over just the un-drained tail — keeps the relay's poll cheap as the table grows.
     sqlx::query(&format!(
         "CREATE INDEX IF NOT EXISTS idx_{schema}_outbox_unpublished
@@ -40,8 +51,9 @@ pub async fn migrate(pool: &PgPool, schema: &str) -> Result<()> {
     // ADR-0011: fence `outbox_events` by `company_id` so a tenant's event stream is isolated. This is
     // the table OWNER applying the fence (the correct home — it was previously a hand-authored backfill
     // migration bolted onto each module). Opt-in via the `multi_tenant` feature so the framework stays
-    // tenant-agnostic; a company-tenant service enables it. The `company_id` column is always created
-    // above (OutboxRecord requires it) — only the RLS fence is conditional. An unset `app.company_id`
+    // tenant-agnostic; a company-tenant service enables it. The `company_id` column is guaranteed
+    // present above — created with the table, or healed in place by the ALTER for a legacy table —
+    // so only the RLS fence is conditional. An unset `app.company_id`
     // session var sees zero rows (NULLIF → NULL), the standard fail-closed posture. The outbox relay is
     // cross-tenant (it drains `WHERE published_at IS NULL` with no company scope), so the policy also
     // admits connections logged in as `metaphor_relay` (`OR current_user = 'metaphor_relay'`) — a surgical

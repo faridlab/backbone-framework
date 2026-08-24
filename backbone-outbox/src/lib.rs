@@ -22,8 +22,10 @@
 //! # async fn ex(pool: &sqlx::PgPool) -> Result<(), backbone_outbox::OutboxError> {
 //! use backbone_outbox::{outbox, inbox, relay, OutboxRecord};
 //! use chrono::Utc;
+//! use uuid::Uuid;
 //!
 //! // Producer: stage in the same tx as the state change.
+//! let company_id = Uuid::new_v4();
 //! let mut tx = pool.begin().await?;
 //! // ... mutate state on &mut *tx ...
 //! let rec = OutboxRecord::new("PaymentSettled", "Payment", "pay-1", company_id,
