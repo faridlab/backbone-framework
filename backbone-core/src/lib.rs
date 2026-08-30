@@ -46,6 +46,7 @@
 // Macros must be declared before any items that use them.
 // `#[macro_export]` makes them available as `backbone_core::impl_crud_repository!`.
 pub mod macros;
+pub use macros::log_include_hydration_failure;
 
 /// Number of standard CRUD endpoints generated per entity
 pub const STANDARD_ENDPOINT_COUNT: usize = 12;

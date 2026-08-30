@@ -32,13 +32,16 @@ mod query_builder_tests;
 mod seeding_tests;
 #[cfg(test)]
 mod raw_query_tests;
+#[cfg(test)]
+mod qualify_relation_tests;
 
 // Re-export commonly used types
 pub use repository::*;
 pub use company_scope::{current_company, with_company_scope};
 pub use generic_repository::{
     and_conditions, fetch_by_ids_as_json, strip_client_company_filters, company_fence,
-    EntityRepoMeta, GenericCrudRepository, HardDelete, MissingCompanyScope, SoftDelete,
+    qualify_relation_table, EntityRepoMeta, GenericCrudRepository, HardDelete, MissingCompanyScope,
+    SoftDelete,
 };
 pub use migrations::*;
 pub use query_builder::*;

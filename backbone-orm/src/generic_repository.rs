@@ -1041,23 +1041,82 @@ where
     }
 }
 
+/// Qualify a relation target table with the calling entity's schema.
+///
+/// `EntityRepoMeta::relations()` emits bare table names (e.g. `countries`), but
+/// module tables live in the module's own schema (`geo.countries`) and the
+/// runtime app role's search_path does not include module schemas — an
+/// unqualified reference fails with "relation does not exist". The calling
+/// entity's table name is schema-qualified, so its prefix is the schema a
+/// relation declared inside one module shares with its target. Targets that
+/// already carry a schema, and callers that do not, pass through unchanged.
+pub fn qualify_relation_table(caller_table: &str, target_table: &str) -> String {
+    if target_table.contains('.') || !caller_table.contains('.') {
+        target_table.to_string()
+    } else {
+        let schema = caller_table.split('.').next().unwrap_or(caller_table);
+        format!("{schema}.{target_table}")
+    }
+}
+
+/// True when the error is Postgres `undefined_table` (SQLSTATE 42P01).
+///
+/// Walks the anyhow chain because the scoped-fetch error is converted with `?`
+/// on its way up — the sqlx error rides as the (only) source.
+fn is_undefined_table(err: &anyhow::Error) -> bool {
+    err.chain()
+        .filter_map(|cause| cause.downcast_ref::<sqlx::Error>())
+        .any(|sqlx_err| {
+            sqlx_err
+                .as_database_error()
+                .map(|db| db.code().as_deref() == Some("42P01"))
+                .unwrap_or(false)
+        })
+}
+
 /// Fetch rows from an arbitrary table by id list, as JSON — hydrates `?include=`
 /// relations in the generic CRUD handler without a typed repository for the
 /// target entity. `table` is a generator-emitted collection name (from
 /// `EntityRepoMeta::relations()`), NEVER client input, so the interpolation is
-/// not an injection vector. One batched `WHERE id = ANY(...)` per relation.
+/// not an injection vector. `caller_table` is the hydrated entity's own
+/// (schema-qualified) table name, used to qualify a bare `table` — see
+/// [`qualify_relation_table`]. One batched `WHERE id = ANY(...)` per relation.
 /// Returns `row_to_json` objects keyed by raw (snake_case) column names.
+///
+/// Resolution is two-step for bare targets: the caller's schema first, then —
+/// only on `undefined_table` — the name as written, which resolves through the
+/// role's search_path (platform tables such as `users` or `roles` live in
+/// `public` while their declaring entities live in a module schema). Any other
+/// error, or a target that fails both spellings, is returned to the caller.
 pub async fn fetch_by_ids_as_json(
     pool: &PgPool,
+    caller_table: &str,
     table: &str,
     ids: &[String],
 ) -> Result<Vec<serde_json::Value>> {
     if ids.is_empty() {
         return Ok(Vec::new());
     }
+    let qualified = qualify_relation_table(caller_table, table);
+    match fetch_rows_as_json(pool, &qualified, ids).await {
+        Ok(rows) => Ok(rows),
+        Err(err) if qualified != table && is_undefined_table(&err) => {
+            fetch_rows_as_json(pool, table, ids).await
+        }
+        Err(err) => Err(err),
+    }
+}
+
+/// The scoped fetch behind [`fetch_by_ids_as_json`] — one relation, one table
+/// spelling. Scoped because an `?include=` hydration of a company-fenced
+/// relation must obey the same fence, so a cross-company related row is never
+/// leaked through the expansion.
+async fn fetch_rows_as_json(
+    pool: &PgPool,
+    table: &str,
+    ids: &[String],
+) -> Result<Vec<serde_json::Value>> {
     let query = format!("SELECT row_to_json(t) AS j FROM {table} t WHERE t.id = ANY($1::uuid[])");
-    // Scoped too: an `?include=` hydration of a company-fenced relation must obey the same fence,
-    // so a cross-company related row is never leaked through the expansion.
     let rows: Vec<(serde_json::Value,)> =
         crate::company_scope::fetch_all_scoped(pool, sqlx::query_as(&query).bind(ids)).await?;
     Ok(rows.into_iter().map(|(j,)| j).collect())

@@ -13,6 +13,21 @@
 //! backbone_core::impl_crud_repository!(RoleRepository, Role, no_soft_delete);
 //! ```
 
+/// Report an `?include=` hydration failure.
+///
+/// Hydration runs after the main query and only shapes the response, so it does
+/// not fail the request — but it used to return an empty expansion SILENTLY,
+/// which read as "no related rows": every expanded relation rendered as `null`
+/// and the underlying wiring bug was invisible. Logging at error level keeps
+/// the response stable while making the failure diagnosable from service logs.
+pub fn log_include_hydration_failure(table: &str, error: &str) {
+    tracing::error!(
+        relation_table = table,
+        error = error,
+        "include hydration failed; relation expanded as null"
+    );
+}
+
 /// Implement `backbone_core::CrudRepository<E>` for a generated repository struct.
 ///
 /// This macro removes ~125 lines of boilerplate per entity by centralising the
@@ -64,9 +79,20 @@ macro_rules! impl_crud_repository {
                 table: &str,
                 ids: &[String],
             ) -> Vec<serde_json::Value> {
-                backbone_orm::fetch_by_ids_as_json((&**self).pool(), table, ids)
-                    .await
-                    .unwrap_or_default()
+                match backbone_orm::fetch_by_ids_as_json(
+                    (&**self).pool(),
+                    (&**self).table_name(),
+                    table,
+                    ids,
+                )
+                .await
+                {
+                    Ok(rows) => rows,
+                    Err(err) => {
+                        backbone_core::log_include_hydration_failure(table, &err.to_string());
+                        Vec::new()
+                    }
+                }
             }
 
             // ── NOTE on method resolution ─────────────────────────────────────
@@ -272,9 +298,20 @@ macro_rules! impl_crud_repository {
                 table: &str,
                 ids: &[String],
             ) -> Vec<serde_json::Value> {
-                backbone_orm::fetch_by_ids_as_json((&**self).pool(), table, ids)
-                    .await
-                    .unwrap_or_default()
+                match backbone_orm::fetch_by_ids_as_json(
+                    (&**self).pool(),
+                    (&**self).table_name(),
+                    table,
+                    ids,
+                )
+                .await
+                {
+                    Ok(rows) => rows,
+                    Err(err) => {
+                        backbone_core::log_include_hydration_failure(table, &err.to_string());
+                        Vec::new()
+                    }
+                }
             }
 
             async fn create(
