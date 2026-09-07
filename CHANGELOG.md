@@ -15,6 +15,32 @@ back to the `## [Unreleased]` section.
 
 ## [Unreleased]
 
+## [2.7.14] - 2026-09-07
+
+### Added
+- `backbone-auth`: the org session issuer (`backbone_auth::org::OrgIssuer`, feature `axum`) — the
+  mint twin of `OrgVerifier` (ADR-0027/0028). An org session is born in exactly one place: the
+  issuing service resolves the acting unit and entitlements from the tenant's own data
+  (membership tables, the org spine) and seals them into a signed token; a client never states
+  its org unit. `org_unit_id` is a required argument, mirroring the guard's 401-on-absent claim —
+  a token that cannot name its node is never minted. HS256 and RS256 constructors;
+  `issue_access`/`issue_refresh` mint the pair with a `typ` claim discriminating them.
+- Test infrastructure: a live end-to-end proof of the issuance chain (`backbone-auth`
+  `tests/org_session_live.rs`, gated on `BACKBONE_AUTH_ORG_DSN` against a disposable database).
+  It builds the minimal org spine, mints with `OrgIssuer`, and drives the real guard through
+  `tower::ServiceExt::oneshot`: the access token passes and the handler's fenced read returns
+  exactly the entitlement-union rows (subtree + entitled sister + root, parent company
+  excluded), the refresh twin of the same session is 401, an access token naming a unit the
+  tree does not hold is 403, and no token is 401. The no-database contract for guard and issuer
+  round-trips lives in `tests/org_guard.rs`.
+
+### Fixed
+- `backbone-auth`: token-purpose (`typ`) discipline on both HTTP guards. `CompanyClaims` and
+  `OrgClaims` now read an optional `typ` claim, and a present value other than `"access"` fails
+  verification: a refresh token — valid signature, longer life — could previously open a scoped
+  session on `company_auth`/`org_auth` routes. Tokens minted before `typ` existed carry no claim
+  and stay accepted.
+
 ## [2.7.13] - 2026-09-07
 
 ### Added
