@@ -49,6 +49,7 @@ jobs:
       # tenant databases from these.
       BACKBONE_ORM_RLS_DSN: postgresql://postgres:postgres@localhost:5432/postgres
       BACKBONE_TENANT_ADMIN_DSN: postgresql://postgres:postgres@localhost:5432/postgres
+      BACKBONE_TENANT_ROUTER_DSN: postgresql://postgres:postgres@localhost:5432/postgres
 
     steps:
       - uses: actions/checkout@v4
