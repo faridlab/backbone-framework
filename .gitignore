@@ -3,3 +3,5 @@
 .DS_Store
 Cargo.lock
 .claude/
+.dit-cache/
+graphify-out/cache/last_query_stamp
