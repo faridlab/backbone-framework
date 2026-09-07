@@ -50,6 +50,9 @@ jobs:
       BACKBONE_ORM_RLS_DSN: postgresql://postgres:postgres@localhost:5432/postgres
       BACKBONE_TENANT_ADMIN_DSN: postgresql://postgres:postgres@localhost:5432/postgres
       BACKBONE_TENANT_ROUTER_DSN: postgresql://postgres:postgres@localhost:5432/postgres
+      # The org-session live proof creates and drops its own disposable database from this
+      # maintenance DSN (same pattern as the provisioning suites).
+      BACKBONE_AUTH_ORG_DSN: postgresql://postgres:postgres@localhost:5432/postgres
 
     steps:
       - uses: actions/checkout@v4

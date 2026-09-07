@@ -1,4 +1,5 @@
-//! Org-tree session guard for the entitlement-union fence (feature `axum`, ADR-0028).
+//! Org-tree session guard for the entitlement-union fence (feature `axum`, ADR-0028), and the
+//! issuer that mints the tokens it trusts.
 //!
 //! The twin of [`crate::company::company_auth`] for org-re-keyed surfaces. A handler must not
 //! trust a client-supplied `org_unit_id`: here the acting node comes off a **signed** Bearer
@@ -41,6 +42,7 @@
 //! ```
 
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{
     extract::{FromRequestParts, Request, State},
@@ -49,9 +51,15 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
+use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+/// Marks a token's purpose. Access tokens carry `"access"` and open scoped sessions; refresh
+/// tokens carry `"refresh"` and are rotation credentials ONLY — the verifier refuses them, so a
+/// long-lived token can never ride a guarded route.
+pub const TOKEN_TYPE_ACCESS: &str = "access";
+pub const TOKEN_TYPE_REFRESH: &str = "refresh";
 
 /// The acting node proven by a validated access token.
 ///
@@ -73,7 +81,9 @@ pub struct OrgContext {
 /// The access-token claims an org-guarded surface trusts.
 ///
 /// `org_unit_id` is REQUIRED to pass the guard — a token without it is rejected with 401.
-/// `entitled_units` is optional (empty default) for the common single-node session.
+/// `entitled_units` is optional (empty default) for the common single-node session. `typ` is
+/// checked when present: anything other than [`TOKEN_TYPE_ACCESS`] is refused, so a refresh
+/// token never passes as an access credential.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OrgClaims {
     /// Subject (the authenticated user/principal id).
@@ -86,6 +96,10 @@ pub struct OrgClaims {
     /// Additional entitled nodes, when the session spans more than its acting node.
     #[serde(default)]
     pub entitled_units: Vec<Uuid>,
+    /// Token purpose. Absent on tokens minted before this field existed (accepted); a present
+    /// value other than `"access"` — e.g. a refresh token — is refused.
+    #[serde(default)]
+    pub typ: Option<String>,
 }
 
 /// Verifier the composing service builds once (from its JWT secret) and clones into guarded
@@ -117,16 +131,142 @@ impl OrgVerifier {
         })
     }
 
-    /// Validate a raw token → an org context, or `None` if the signature/expiry is bad or the
-    /// `org_unit_id` claim is absent.
+    /// Validate a raw access token → an org context, or `None` if the signature/expiry is bad,
+    /// the `org_unit_id` claim is absent, or the token is not an access credential.
+    ///
+    /// A `typ` claim of anything other than `"access"` fails verification: a refresh token is a
+    /// rotation credential, and presenting it to a guarded route must not open a scoped session.
+    /// Tokens minted before `typ` existed carry no claim and stay accepted.
     pub fn verify(&self, token: &str) -> Option<OrgContext> {
         let data = decode::<OrgClaims>(token, &self.key, &self.validation).ok()?;
         let c = data.claims;
+        if let Some(typ) = &c.typ {
+            if typ != TOKEN_TYPE_ACCESS {
+                return None;
+            }
+        }
         Some(OrgContext {
             acting_unit_id: c.org_unit_id?,
             entitled_units: c.entitled_units,
             user_id: c.sub,
         })
+    }
+}
+
+/// The mint twin of [`OrgVerifier`]: signs the session pair an org-guarded surface later
+/// verifies (ADR-0027/0028).
+///
+/// An org session is born in exactly one place — here. The acting unit and entitlements are
+/// resolved from the tenant's own data (membership tables, the org spine) by the calling
+/// service and sealed into a signed token; a client never gets to state its org unit.
+/// `org_unit_id` is a required argument, mirroring the guard's 401-on-absent claim: a token
+/// that cannot name its node is never minted, let alone verified.
+///
+/// Issued tokens carry a `typ` claim (`"access"` / `"refresh"`); [`OrgVerifier::verify`]
+/// refuses anything present that is not `"access"`, so a refresh token cannot ride a guarded
+/// route even though it shares the signing key.
+///
+/// # Wiring
+///
+/// ```rust,ignore
+/// use backbone_auth::org::OrgIssuer;
+/// use std::time::Duration;
+///
+/// let issuer = OrgIssuer::hs256(jwt_secret.as_bytes());
+/// // acting unit + entitlements resolved from the tenant's membership data beforehand.
+/// let access  = issuer.issue_access(&user_id, acting_unit, &entitled, Duration::from_secs(3600))?;
+/// let refresh = issuer.issue_refresh(&user_id, acting_unit, &entitled, Duration::from_secs(7 * 24 * 3600))?;
+/// ```
+#[derive(Clone)]
+pub struct OrgIssuer {
+    key: Arc<EncodingKey>,
+    algorithm: Algorithm,
+}
+
+/// The claims the issuer seals — a wire superset of [`OrgClaims`] (the verifier ignores `iat`;
+/// `typ` it checks). Kept private so the decode contract stays minimal and the mint shape
+/// cannot drift from what this issuer produces.
+#[derive(Serialize)]
+struct IssuedSessionClaims {
+    sub: String,
+    exp: usize,
+    iat: usize,
+    typ: &'static str,
+    org_unit_id: Uuid,
+    entitled_units: Vec<Uuid>,
+}
+
+impl OrgIssuer {
+    /// HS256 issuer over a shared secret (the common single-service deployment).
+    pub fn hs256(secret: &[u8]) -> Self {
+        Self {
+            key: Arc::new(EncodingKey::from_secret(secret)),
+            algorithm: Algorithm::HS256,
+        }
+    }
+
+    /// RS256 issuer over a PEM-encoded RSA private key, for deployments where a separate
+    /// verifier holds only the public key.
+    ///
+    /// # Errors
+    /// Returns an error if `private_key_pem` is not a valid PEM-encoded RSA private key.
+    pub fn rs256(private_key_pem: &[u8]) -> Result<Self, jsonwebtoken::errors::Error> {
+        Ok(Self {
+            key: Arc::new(EncodingKey::from_rsa_pem(private_key_pem)?),
+            algorithm: Algorithm::RS256,
+        })
+    }
+
+    /// Mint an access token: the credential guarded routes accept.
+    ///
+    /// # Errors
+    /// Returns an error if the claims cannot be encoded/signed (key or serialization failure).
+    pub fn issue_access(
+        &self,
+        user_id: &str,
+        acting_unit: Uuid,
+        entitled_units: &[Uuid],
+        ttl: Duration,
+    ) -> Result<String, jsonwebtoken::errors::Error> {
+        self.issue(user_id, acting_unit, entitled_units, ttl, TOKEN_TYPE_ACCESS)
+    }
+
+    /// Mint a refresh token: a rotation credential only. [`OrgVerifier::verify`] refuses it;
+    /// the issuing service's refresh endpoint is its sole consumer.
+    ///
+    /// # Errors
+    /// Returns an error if the claims cannot be encoded/signed (key or serialization failure).
+    pub fn issue_refresh(
+        &self,
+        user_id: &str,
+        acting_unit: Uuid,
+        entitled_units: &[Uuid],
+        ttl: Duration,
+    ) -> Result<String, jsonwebtoken::errors::Error> {
+        self.issue(user_id, acting_unit, entitled_units, ttl, TOKEN_TYPE_REFRESH)
+    }
+
+    fn issue(
+        &self,
+        user_id: &str,
+        acting_unit: Uuid,
+        entitled_units: &[Uuid],
+        ttl: Duration,
+        typ: &'static str,
+    ) -> Result<String, jsonwebtoken::errors::Error> {
+        // A clock before the Unix epoch cannot happen on a real host; if it somehow does, the
+        // zero `now` makes the token already-expired at verification — fail-closed, never a
+        // token valid from the epoch.
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+        let claims = IssuedSessionClaims {
+            sub: user_id.to_string(),
+            exp: now.saturating_add(ttl).as_secs() as usize,
+            iat: now.as_secs() as usize,
+            typ,
+            org_unit_id: acting_unit,
+            entitled_units: entitled_units.to_vec(),
+        };
+        encode(&Header::new(self.algorithm), &claims, &self.key)
     }
 }
 

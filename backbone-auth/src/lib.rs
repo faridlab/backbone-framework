@@ -63,6 +63,13 @@ pub use token_generator::TokenGenerator;
 /// The HTTP company guard (feature `axum`): derive `company_id` from a signed token, never a request body.
 #[cfg(feature = "axum")]
 pub use company::{company_auth, CompanyClaims, CompanyContext, CompanyVerifier};
+/// The org-tree session guard and its issuer (feature `axum`, ADR-0028): acting unit +
+/// entitlements from a signed token; the issuer mints the pair the guard trusts.
+#[cfg(feature = "axum")]
+pub use org::{
+    org_auth, OrgClaims, OrgContext, OrgIssuer, OrgVerifier, TOKEN_TYPE_ACCESS,
+    TOKEN_TYPE_REFRESH,
+};
 #[cfg(feature = "axum")]
 pub use idempotency::{IdempotencyState, idempotency_middleware, migrate as migrate_idempotency};
 
