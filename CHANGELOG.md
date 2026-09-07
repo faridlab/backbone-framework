@@ -15,6 +15,8 @@ back to the `## [Unreleased]` section.
 
 ## [Unreleased]
 
+## [2.7.13] - 2026-09-07
+
 ### Added
 - `backbone-tenant`: host→tenant resolution (`backbone_tenant::resolve`). `HostResolver` maps a
   request's host to its tenant — `{slug}.<product-domain>` subdomains, an optional custom-domain
@@ -49,6 +51,16 @@ back to the `## [Unreleased]` section.
 
 ## [2.7.12] - 2026-09-07
 
+### Changed
+- `backbone-outbox`: **breaking** — `OutboxRecord::new` now takes a required `company_id: Uuid`
+  (4th arg), the `stage()` INSERT + `migrate()` table template carry a `company_id` column, and the
+  relay reads it. This lets each module's `outbox_events` table be fenced by tenant (ADR-0011).
+  Callers must pass the owning company; modules that don't bump to this tag are unaffected (they pin
+  the older tag).
+- `backbone-core`: re-export `PaginatedApiResponse`, `BatchIdsRequest`, `BulkUpdateItem`,
+  `BulkPatchItem`, and `BulkPatchRequest` from the crate root (previously only reachable
+  via `backbone_core::http::…`).
+
 ### Added
 - `backbone-orm`: org-tree request scope (`backbone_orm::org_scope`) for the entitlement-union RLS
   fence. `resolve_org_scope` derives a session's entitled org-unit ids from the organization spine
@@ -58,23 +70,6 @@ back to the `## [Unreleased]` section.
   `bind_org_scope_on` is the transaction-local twin; `execute_unit_scoped` is the statement-level
   fence for single-node writes outside a request scope. Generated repositories need no changes —
   the scope binds the same request connection the existing scoped helpers route onto.
-
-### Fixed
-- `backbone-orm`: test target builds again on current chrono (`NaiveDateTime::from_timestamp_opt`
-  was removed upstream; the query-builder tests now use `DateTime::from_timestamp`).
-
-## [Unreleased]`.
-
-## [Unreleased]
-
-### Changed
-- `backbone-outbox`: **breaking** — `OutboxRecord::new` now takes a required `company_id: Uuid`
-  (4th arg), the `stage()` INSERT + `migrate()` table template carry a `company_id` column, and the
-  relay reads it. This lets each module's `outbox_events` table be fenced by tenant (ADR-0011).
-  Callers must pass the owning company; modules that don't bump to this tag are unaffected (they pin
-  the older tag).
-
-### Added
 - `backbone-core`: relation expansion on read endpoints. `list` and `get_by_id`
   accept `?include=<rel>` (alias `?with=`) to hydrate declared to-one relations,
   injecting each related row as a sibling object keyed by the relation name.
@@ -127,10 +122,9 @@ back to the `## [Unreleased]` section.
   query keys — stripped from the filter map before it reaches the repository, so
   they never leak into the `WHERE` clause.
 
-### Changed
-- `backbone-core`: re-export `PaginatedApiResponse`, `BatchIdsRequest`, `BulkUpdateItem`,
-  `BulkPatchItem`, and `BulkPatchRequest` from the crate root (previously only reachable
-  via `backbone_core::http::…`).
+### Fixed
+- `backbone-orm`: test target builds again on current chrono (`NaiveDateTime::from_timestamp_opt`
+  was removed upstream; the query-builder tests now use `DateTime::from_timestamp`).
 
 ## [2.3.0]
 
