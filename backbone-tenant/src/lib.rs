@@ -41,6 +41,11 @@ use std::sync::Arc;
 
 use tokio::sync::{Mutex, OnceCell};
 
+pub mod resolve;
+
+#[cfg(feature = "axum")]
+pub mod axum_router;
+
 #[cfg(feature = "provision")]
 pub mod provision;
 

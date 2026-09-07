@@ -17,12 +17,23 @@ tokio = { version = "1.0", features = ["sync"] }
 # provisions tenants enables it.
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres"], optional = true }
 
+# The host-routing middleware (feature `axum`): resolve the request's tenant and dispatch into its
+# runtime. Pulls sqlx only for the `ProvidesDatabase` hand-off of the tenant pool to the auth
+# layers.
+axum = { version = "0.7", optional = true }
+serde_json = { version = "1.0", optional = true }
+tracing = { version = "0.1", optional = true }
+
 [features]
 default = []
 provision = ["dep:sqlx"]
+axum = ["dep:axum", "dep:serde_json", "dep:tracing", "dep:sqlx"]
 
 [dev-dependencies]
 tokio = { version = "1.0", features = ["sync", "macros", "rt", "rt-multi-thread", "time"] }
 async-trait = "0.1"
 thiserror = "1.0"
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres"] }
+axum = { version = "0.7", features = ["macros"] }
+tower = { version = "0.4", features = ["util"] }
+http-body-util = "0.1"
