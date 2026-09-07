@@ -112,6 +112,13 @@ fn request_conn() -> Option<Arc<Mutex<PoolConnection<Postgres>>>> {
     REQUEST_CONN.try_with(|c| c.clone()).ok()
 }
 
+/// The request-dedicated connection for callers outside this module (`org_scope`'s
+/// statement-level helpers route onto the same connection so request-scoped sessions and
+/// per-statement callers share one fence surface).
+pub(crate) fn current_request_conn() -> Option<Arc<Mutex<PoolConnection<Postgres>>>> {
+    request_conn()
+}
+
 /// Run `f` with the request's company scope bound to the current async task.
 ///
 /// Middleware calls this once per request with the company derived from the signed token, so every
@@ -123,6 +130,33 @@ where
     F: Future<Output = R>,
 {
     COMPANY.scope(company, f).await
+}
+
+/// Internal: bind ONLY the `COMPANY` task-local around `f`, without acquiring a connection or
+/// setting any session variable.
+///
+/// For [`org_scope`](crate::org_scope), which drives its own request-dedicated connection and
+/// must not nest the full [`with_request_scope`] (that would acquire a second connection and
+/// re-set `app.company_id` from the legacy argument alone).
+pub(crate) async fn with_company_scope_internal<F, R>(company: Option<Uuid>, f: F) -> R
+where
+    F: Future<Output = R>,
+{
+    COMPANY.scope(company, f).await
+}
+
+/// Internal: bind ONLY the `REQUEST_CONN` task-local around `f`, without acquiring a connection
+/// or setting any session variable. The caller owns the connection and its fence variables.
+///
+/// For [`org_scope`](crate::org_scope), same reason as [`with_company_scope_internal`].
+pub(crate) async fn with_request_conn_internal<F, R>(
+    holder: Arc<Mutex<PoolConnection<Postgres>>>,
+    f: F,
+) -> R
+where
+    F: Future<Output = R>,
+{
+    REQUEST_CONN.scope(holder, f).await
 }
 
 /// The company bound to the current task, or `None` when no scope is set (unscoped code path).

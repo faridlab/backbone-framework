@@ -11,7 +11,23 @@ crate at this commit. Downstream projects pin the whole framework with
 
 The release workflow reads the section matching the git tag's version and
 uses it as the GitHub Release body. If no matching section is found it falls
-back to `## [Unreleased]`.
+back to `## [2.7.12] - 2026-09-07
+
+### Added
+- `backbone-orm`: org-tree request scope (`backbone_orm::org_scope`) for the entitlement-union RLS
+  fence. `resolve_org_scope` derives a session's entitled org-unit ids from the organization spine
+  (union of subtrees + the root node) plus the legacy governing company id;
+  `with_org_request_scope` carries both fence variables (`app.scope_unit_ids`, `app.company_id`)
+  on a request-dedicated connection for the whole request and clears them before pool return;
+  `bind_org_scope_on` is the transaction-local twin; `execute_unit_scoped` is the statement-level
+  fence for single-node writes outside a request scope. Generated repositories need no changes —
+  the scope binds the same request connection the existing scoped helpers route onto.
+
+### Fixed
+- `backbone-orm`: test target builds again on current chrono (`NaiveDateTime::from_timestamp_opt`
+  was removed upstream; the query-builder tests now use `DateTime::from_timestamp`).
+
+## [Unreleased]`.
 
 ## [Unreleased]
 

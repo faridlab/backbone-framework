@@ -12,6 +12,7 @@
 
 pub mod repository;
 pub mod company_scope;
+pub mod org_scope;
 pub mod generic_repository;
 pub mod migrations;
 pub mod query_builder;
@@ -38,6 +39,7 @@ mod qualify_relation_tests;
 // Re-export commonly used types
 pub use repository::*;
 pub use company_scope::{current_company, with_company_scope};
+pub use org_scope::{current_org_scope, resolve_org_scope, with_org_request_scope, OrgScope, OrgScopeError};
 pub use generic_repository::{
     and_conditions, fetch_by_ids_as_json, strip_client_company_filters, company_fence,
     qualify_relation_table, EntityRepoMeta, GenericCrudRepository, HardDelete, MissingCompanyScope,

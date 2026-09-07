@@ -171,7 +171,7 @@ mod tests {
         let bool_val = QueryValue::boolean(true);
         let uuid_val = QueryValue::uuid(Uuid::new_v4());
         let timestamp_val = QueryValue::timestamp(
-            NaiveDateTime::from_timestamp_opt(1609459200, 0).unwrap()
+            chrono::DateTime::from_timestamp(1609459200, 0).unwrap().naive_utc()
         );
         let null_val = QueryValue::null();
 
