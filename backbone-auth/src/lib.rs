@@ -45,6 +45,8 @@ pub mod resource_policy;
 pub mod company;
 #[cfg(feature = "axum")]
 pub mod idempotency;
+#[cfg(feature = "axum")]
+pub mod org;
 
 // Re-export commonly used types
 pub use audit::AuditEvent;
