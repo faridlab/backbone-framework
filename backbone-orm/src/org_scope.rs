@@ -316,21 +316,26 @@ mod tests {
         PgPoolOptions::new().max_connections(4).connect(dsn).await.unwrap()
     }
 
-    async fn app_pool(dsn: &str) -> PgPool {
+    async fn app_pool(dsn: &str, role: &str) -> PgPool {
         let after_at = dsn.rsplit('@').next().unwrap();
-        let url = format!("postgresql://org_scope_app:orgpw@{after_at}");
+        let url = format!("postgresql://{role}:orgpw@{after_at}");
         PgPoolOptions::new().max_connections(1).connect(&url).await.unwrap()
     }
 
-    async fn setup(admin: &PgPool, root: Uuid, company: Uuid, branch: Uuid, other: Uuid) {
-        sqlx::raw_sql(
+    /// Mint the per-run role name — a fixed name breaks on shared dev clusters (`DROP ROLE`
+    /// fails while the role holds grants in another database), a fresh one can never collide.
+    fn role_name() -> String {
+        format!("org_scope_app_{}", &Uuid::new_v4().simple().to_string()[..8])
+    }
+
+    async fn setup(admin: &PgPool, role: &str, root: Uuid, company: Uuid, branch: Uuid, other: Uuid) {
+        sqlx::raw_sql(&format!(
             "DROP SCHEMA IF EXISTS organization CASCADE; \
              DROP SCHEMA IF EXISTS org_scope_test CASCADE; \
-             DROP ROLE IF EXISTS org_scope_app; \
              CREATE SCHEMA organization; \
              CREATE TABLE organization.org_units ( \
                  id uuid PRIMARY KEY, kind text NOT NULL, parent_id uuid, \
-                 code text, name text NOT NULL, metadata jsonb NOT NULL DEFAULT '{}' \
+                 code text, name text NOT NULL, metadata jsonb NOT NULL DEFAULT '{{}}' \
              ); \
              CREATE UNIQUE INDEX one_root ON organization.org_units (kind) WHERE kind = 'root'; \
              CREATE OR REPLACE FUNCTION organization.org_unit_subtree(p_roots uuid[]) \
@@ -350,11 +355,11 @@ mod tests {
              CREATE POLICY t_org_isolation ON org_scope_test.t FOR ALL \
                  USING (org_unit_id = ANY(string_to_array(current_setting('app.scope_unit_ids', true), ',')::uuid[])) \
                  WITH CHECK (org_unit_id = ANY(string_to_array(current_setting('app.scope_unit_ids', true), ',')::uuid[])); \
-             CREATE ROLE org_scope_app LOGIN PASSWORD 'orgpw'; \
-             GRANT USAGE ON SCHEMA organization, org_scope_test TO org_scope_app; \
-             GRANT SELECT ON organization.org_units TO org_scope_app; \
-             GRANT SELECT, INSERT, UPDATE, DELETE ON org_scope_test.t TO org_scope_app;",
-        )
+             CREATE ROLE {role} LOGIN PASSWORD 'orgpw'; \
+             GRANT USAGE ON SCHEMA organization, org_scope_test TO {role}; \
+             GRANT SELECT ON organization.org_units TO {role}; \
+             GRANT SELECT, INSERT, UPDATE, DELETE ON org_scope_test.t TO {role};",
+        ))
         .execute(admin)
         .await
         .unwrap();
@@ -382,8 +387,9 @@ mod tests {
         let company = Uuid::new_v4();
         let branch = Uuid::new_v4();
         let other = Uuid::new_v4();
+        let role = role_name();
         let admin = admin_pool(&dsn).await;
-        setup(&admin, root, company, branch, other).await;
+        setup(&admin, &role, root, company, branch, other).await;
 
         // Seed as superuser (bypasses RLS).
         sqlx::query("INSERT INTO org_scope_test.t (id, org_unit_id, code) VALUES ($1,$2,'CO-WH'), ($3,$4,'BR-WH'), ($5,$6,'OTHER-WH')")
@@ -416,7 +422,7 @@ mod tests {
         // The request scope fences queries on the app role's pool. The scoped helper (not a raw
         // pool fetch) is the interesting path: it must route onto the request connection the
         // scope bound, which carries the fence variables.
-        let pool = app_pool(&dsn).await;
+        let pool = app_pool(&dsn, &role).await;
         let codes: Vec<String> = with_org_request_scope(&pool, scope, async {
             crate::company_scope::fetch_all_scoped(
                 &pool,

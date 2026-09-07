@@ -448,24 +448,30 @@ mod tests {
         PgPoolOptions::new().max_connections(4).connect(dsn).await.unwrap()
     }
 
-    /// A single-connection pool as the non-super `rls_reset_app` role. max_connections=1 forces a
+    /// A single-connection pool as the non-super test role. max_connections=1 forces a
     /// re-acquire after the leaked clone drops to land on the SAME connection the scope dirtied.
-    async fn app_pool(dsn: &str) -> PgPool {
+    async fn app_pool(dsn: &str, role: &str) -> PgPool {
         let after_at = dsn.rsplit('@').next().unwrap();
-        let url = format!("postgresql://rls_reset_app:rlspw@{after_at}");
+        let url = format!("postgresql://{role}:rlspw@{after_at}");
         PgPoolOptions::new().max_connections(1).connect(&url).await.unwrap()
     }
 
-    async fn setup(admin: &PgPool) {
-        sqlx::raw_sql(
+    /// Mint the per-run role name. A fixed name breaks on shared dev clusters: `DROP ROLE` fails
+    /// when the role still holds grants in another database, so a leftover from earlier work
+    /// poisons every later run. A fresh name per run can never collide with residue.
+    fn role_name() -> String {
+        format!("rls_reset_app_{}", &Uuid::new_v4().simple().to_string()[..8])
+    }
+
+    async fn setup(admin: &PgPool, role: &str) {
+        sqlx::raw_sql(&format!(
             "DROP SCHEMA IF EXISTS rls_reset_test CASCADE; \
-             DROP ROLE IF EXISTS rls_reset_app; \
              CREATE SCHEMA rls_reset_test; \
-             CREATE ROLE rls_reset_app LOGIN PASSWORD 'rlspw'; \
-             GRANT USAGE ON SCHEMA rls_reset_test TO rls_reset_app; \
+             CREATE ROLE {role} LOGIN PASSWORD 'rlspw'; \
+             GRANT USAGE ON SCHEMA rls_reset_test TO {role}; \
              CREATE TABLE rls_reset_test.t (id uuid PRIMARY KEY, company_id uuid NOT NULL); \
-             GRANT SELECT, INSERT, UPDATE, DELETE ON rls_reset_test.t TO rls_reset_app;",
-        )
+             GRANT SELECT, INSERT, UPDATE, DELETE ON rls_reset_test.t TO {role};",
+        ))
         .execute(admin).await.unwrap();
     }
 
@@ -473,9 +479,10 @@ mod tests {
     #[tokio::test]
     async fn lingering_request_conn_clone_does_not_dirty_the_pooled_connection() {
         let Some(dsn) = dsn() else { eprintln!("skipping: set BACKBONE_ORM_RLS_DSN"); return; };
+        let role = role_name();
         let admin = admin_pool(&dsn).await;
-        setup(&admin).await;
-        let pool = app_pool(&dsn).await;
+        setup(&admin, &role).await;
+        let pool = app_pool(&dsn, &role).await;
         let company_a = Uuid::new_v4();
 
         // Smuggle a clone of REQUEST_CONN OUT of the scope via a channel, so it outlives `f`.
