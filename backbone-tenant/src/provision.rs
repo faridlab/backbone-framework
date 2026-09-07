@@ -198,18 +198,35 @@ impl TenantProvisioner {
 pub struct PgPoolFactory {
     provisioner: TenantProvisioner,
     max_connections: u32,
+    /// Credentials for the RUNTIME role — a least-privilege login, NOT the provisioning admin.
+    /// Without this the pool would connect as the admin DSN's user, and a superuser/owner
+    /// bypasses RLS: the fence would exist and enforce nothing. A composition root that has no
+    /// separate runtime role yet still gets the admin user (today's behavior) plus this warning.
+    connect_as: Option<(String, String)>,
 }
 
 impl PgPoolFactory {
     /// Resolve tenants using `provisioner`'s DSN + naming (so pool DSNs share the id-safety guard).
     pub fn new(provisioner: TenantProvisioner) -> Self {
-        Self { provisioner, max_connections: 8 }
+        Self { provisioner, max_connections: 8, connect_as: None }
     }
 
     /// Cap connections per tenant pool (default 8). With database-per-tenant, this × resident tenants
     /// is the real connection budget — keep it modest.
     pub fn max_connections(mut self, n: u32) -> Self {
         self.max_connections = n;
+        self
+    }
+
+    /// Connect runtime pools as `role` instead of the provisioning admin's user.
+    ///
+    /// The provisioning DSN mints databases; it should never serve requests. Pass the
+    /// least-privilege role the tenant's migrations granted (`USAGE` on its schemas, `SELECT/DML`
+    /// on its tables, no `BYPASSRLS`) so the row-level fence actually applies to every statement
+    /// the runtime issues. The role is a login that exists in the cluster; the password is held
+    /// by the pool options, never logged.
+    pub fn connect_as(mut self, role: &str, password: &str) -> Self {
+        self.connect_as = Some((role.to_string(), password.to_string()));
         self
     }
 }
@@ -221,9 +238,19 @@ impl TenantRuntimeFactory for PgPoolFactory {
 
     async fn build(&self, tenant: &TenantId) -> Result<PgPool, ProvisionError> {
         let dsn = self.provisioner.tenant_dsn(tenant)?; // validated slug → safe DSN
+        let mut opts = sqlx::postgres::PgConnectOptions::from_str(&dsn)?;
+        if let Some((role, password)) = &self.connect_as {
+            opts = opts.username(role).password(password);
+        } else {
+            tracing::warn!(
+                target: "backbone_tenant::provision",
+                "tenant pool connecting as the provisioning admin user — row-level security does \
+                 not bind superusers; configure a least-privilege runtime role with connect_as"
+            );
+        }
         let pool = PgPoolOptions::new()
             .max_connections(self.max_connections)
-            .connect(&dsn)
+            .connect_with(opts)
             .await?;
         Ok(pool)
     }
@@ -291,7 +318,6 @@ mod tests {
 
     #[test]
     fn tenant_dsn_swaps_the_database() {
-        let p = provisioner();
         let dsn = render_dsn("postgresql://u:p@host:5432/postgres", "tenant_acme").unwrap();
         assert_eq!(dsn, "postgresql://u:p@host:5432/tenant_acme");
         // Query strings are preserved.
