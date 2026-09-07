@@ -11,7 +11,14 @@ crate at this commit. Downstream projects pin the whole framework with
 
 The release workflow reads the section matching the git tag's version and
 uses it as the GitHub Release body. If no matching section is found it falls
-back to `## [2.7.12] - 2026-09-07
+back to `### Fixed
+- Test infrastructure: the live RLS/org-scope suites mint a per-run database role instead of a
+  fixed name — a fixed role breaks every later run on shared dev clusters (`DROP ROLE` fails while
+  the role holds grants in another database). The release lane runs against a Postgres service so
+  the workspace's live suites (outbox mechanics/relay/migrations, ORM fence proofs, tenant
+  provisioning) actually execute before a release is published.
+
+## [2.7.12] - 2026-09-07
 
 ### Added
 - `backbone-orm`: org-tree request scope (`backbone_orm::org_scope`) for the entitlement-union RLS

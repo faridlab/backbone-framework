@@ -20,6 +20,36 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+
+    # `cargo test --workspace --all-features` reaches the live-Postgres suites: the outbox
+    # mechanics/relay/migration harnesses (DATABASE_URL, ungated — they expect a database), and
+    # the DSN-gated fence/provisioning proofs (backbone-orm's RLS + org-scope, backbone-tenant's
+    # provisioner). The service below provides one; without it the lane fails at the outbox
+    # connect and never publishes.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          # The outbox suites connect to the DATABASE_URL database directly and create their own
+          # schemas inside it — so the database must exist at container init.
+          POSTGRES_DB: backbone_outbox
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/backbone_outbox
+      # Superuser DSNs — the gated suites bootstrap their own non-super roles, schemas, and
+      # tenant databases from these.
+      BACKBONE_ORM_RLS_DSN: postgresql://postgres:postgres@localhost:5432/postgres
+      BACKBONE_TENANT_ADMIN_DSN: postgresql://postgres:postgres@localhost:5432/postgres
+
     steps:
       - uses: actions/checkout@v4
         with:
