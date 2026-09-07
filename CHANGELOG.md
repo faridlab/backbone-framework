@@ -11,7 +11,36 @@ crate at this commit. Downstream projects pin the whole framework with
 
 The release workflow reads the section matching the git tag's version and
 uses it as the GitHub Release body. If no matching section is found it falls
-back to `### Fixed
+back to the `## [Unreleased]` section.
+
+## [Unreleased]
+
+### Added
+- `backbone-tenant`: host→tenant resolution (`backbone_tenant::resolve`). `HostResolver` maps a
+  request's host to its tenant — `{slug}.<product-domain>` subdomains, an optional custom-domain
+  map for enterprise domains, and a development-only header override that a production resolver
+  refuses loudly (403) rather than ignoring. The slug law matches the provisioner's
+  database-name law, so every resolved tenant id is safe to interpolate downstream.
+- `backbone-tenant`: the tenant-routing middleware (feature `axum`, `backbone_tenant::axum_router`).
+  `tenant_route` resolves the request's tenant, gets-or-builds its runtime through
+  `TenantRegistry`, and attaches the runtime — and, via the `ProvidesDatabase` hand-off, its
+  tenant-dedicated `PgPool` — to the request extensions. A host that names no tenant is 404 and a
+  tenant whose database cannot be built is 503; there is no fallback tenant.
+- `backbone-auth`: org-tree session guard (feature `axum`, `backbone_auth::org`). The org twin of
+  `company_auth`: the acting org unit comes off a signed Bearer token (`org_unit_id` required,
+  `entitled_units` optional), the session's scope is resolved over the request's tenant pool (the
+  one `tenant_route` inserted), and the whole downstream handler runs inside
+  `with_org_request_scope`. A token naming a unit outside this tenant's tree is 403 — identity
+  without tenancy is not access.
+- `backbone-tenant`: `PgPoolFactory::connect_as` — connect tenant runtime pools as a
+  least-privilege login instead of the provisioning admin. Without it the pool connects as the
+  admin user, and superusers bypass row-level security: the fence would enforce nothing.
+- Test infrastructure: a live end-to-end proof (`backbone-tenant` `tests/router_live.rs`, gated on
+  `BACKBONE_TENANT_ROUTER_DSN`) — two real tenant databases provisioned through
+  `TenantProvisioner`, one axum app over both, asserting per-tenant fence visibility, the
+  cross-tenant 403, entitlement-union widening, and fail-closed routing/auth.
+
+### Fixed
 - Test infrastructure: the live RLS/org-scope suites mint a per-run database role instead of a
   fixed name — a fixed role breaks every later run on shared dev clusters (`DROP ROLE` fails while
   the role holds grants in another database). The release lane runs against a Postgres service so
