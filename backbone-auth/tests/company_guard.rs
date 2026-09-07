@@ -12,6 +12,8 @@
 //! TG-4  token signed with the wrong secret    → 401
 //! TG-5  valid token                           → 200, and the handler sees the claim's `company_id`
 //! TG-6  `branch_id` is optional               → 200 without it
+//! TG-7  refresh-typed token                   → 401  (a rotation credential is not an access credential)
+//! TG-8  unknown-typed token                   → 401  (fail-closed on unrecognized purposes)
 
 #![cfg(feature = "axum")]
 
@@ -44,10 +46,23 @@ struct TestClaims {
     company_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     branch_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    typ: Option<String>,
 }
 
 fn token_with(secret: &[u8], exp: usize, company_id: Option<Uuid>, branch_id: Option<Uuid>) -> String {
-    let claims = TestClaims { sub: "user-1".into(), exp, company_id, branch_id };
+    let claims = TestClaims { sub: "user-1".into(), exp, company_id, branch_id, typ: None };
+    encode(&Header::new(Algorithm::HS256), &claims, &EncodingKey::from_secret(secret)).unwrap()
+}
+
+fn token_with_typ(secret: &[u8], exp: usize, company_id: Uuid, typ: &str) -> String {
+    let claims = TestClaims {
+        sub: "user-1".into(),
+        exp,
+        company_id: Some(company_id),
+        branch_id: None,
+        typ: Some(typ.into()),
+    };
     encode(&Header::new(Algorithm::HS256), &claims, &EncodingKey::from_secret(secret)).unwrap()
 }
 
@@ -146,4 +161,20 @@ async fn a_bare_token_without_the_bearer_prefix_is_rejected() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn tg7_refresh_typed_token_is_rejected() {
+    // A session bridge's refresh credential: valid signature, real company, long expiry —
+    // and exactly therefore never acceptable on a guarded route.
+    let t = token_with_typ(SECRET, NOT_EXPIRED, Uuid::new_v4(), "refresh");
+    assert_eq!(call(Some(&t)).await.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn tg8_unknown_typed_token_is_rejected() {
+    // Fail-closed on unrecognized purposes: an issuer minting a new token type must not
+    // silently widen what this guard accepts.
+    let t = token_with_typ(SECRET, NOT_EXPIRED, Uuid::new_v4(), "godmode");
+    assert_eq!(call(Some(&t)).await.status(), StatusCode::UNAUTHORIZED);
 }

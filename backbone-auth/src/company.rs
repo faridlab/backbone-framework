@@ -48,6 +48,8 @@ use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::org::TOKEN_TYPE_ACCESS;
+
 /// The company + subject proven by a validated access token.
 ///
 /// Populated by [`company_auth`] and read by guarded handlers via the [`FromRequestParts`] impl below.
@@ -65,7 +67,9 @@ pub struct CompanyContext {
 /// The access-token claims a guarded surface trusts.
 ///
 /// `company_id` is REQUIRED to pass the guard — a token without it is rejected with 401. `branch_id` is
-/// optional, for deployments that do not model an org tree.
+/// optional, for deployments that do not model an org tree. `typ` is checked when present:
+/// anything other than `"access"` is refused, so a refresh token never passes as an access
+/// credential.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CompanyClaims {
     /// Subject (the authenticated user/principal id).
@@ -78,6 +82,10 @@ pub struct CompanyClaims {
     /// The branch this token acts for, when modelled.
     #[serde(default)]
     pub branch_id: Option<Uuid>,
+    /// Token purpose. Absent on tokens minted before this field existed (accepted); a present
+    /// value other than `"access"` — e.g. a refresh token — is refused.
+    #[serde(default)]
+    pub typ: Option<String>,
 }
 
 /// Verifier the composing service builds once (from its JWT secret) and clones into guarded routes.
@@ -108,11 +116,20 @@ impl CompanyVerifier {
         })
     }
 
-    /// Validate a raw token → a company context, or `None` if the signature/expiry is bad or the
-    /// `company_id` claim is absent.
+    /// Validate a raw access token → a company context, or `None` if the signature/expiry is
+    /// bad, the `company_id` claim is absent, or the token is not an access credential.
+    ///
+    /// A `typ` claim of anything other than `"access"` fails verification: a refresh token is a
+    /// rotation credential, and presenting it to a guarded route must not open a scoped session.
+    /// Tokens minted before `typ` existed carry no claim and stay accepted.
     pub fn verify(&self, token: &str) -> Option<CompanyContext> {
         let data = decode::<CompanyClaims>(token, &self.key, &self.validation).ok()?;
         let c = data.claims;
+        if let Some(typ) = &c.typ {
+            if typ != TOKEN_TYPE_ACCESS {
+                return None;
+            }
+        }
         Some(CompanyContext {
             company_id: c.company_id?,
             branch_id: c.branch_id,
