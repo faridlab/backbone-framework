@@ -15,6 +15,15 @@ back to the `## [Unreleased]` section.
 
 ## [Unreleased]
 
+## [2.7.15] - 2026-09-07
+
+### Fixed
+- Test infrastructure: the tenant-router live proof compiles again — its `OrgClaims` struct
+  literal predates the token-purpose (`typ`) field added in 2.7.14 and was missing the member
+  (E0063). The proof's minted tokens are deliberately typless: the typless-legacy acceptance is
+  part of what the proof carries. The 2.7.14 tag was published with this file broken (its
+  release lane failed before publishing); pin 2.7.15 instead.
+
 ## [2.7.14] - 2026-09-07
 
 ### Added
