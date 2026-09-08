@@ -1,4 +1,4 @@
-//! Org-tree request scope for the entitlement-union RLS fence (ADR-0028).
+//! Org-tree request scope for the entitlement-union RLS fence (ADR-0028/0029).
 //!
 //! ADR-0028 replaces the single `company_id` scoping key with `org_unit_id`: one org tree per
 //! tenant database (root / company / branch nodes), and a session sees the UNION of the subtrees
@@ -8,12 +8,20 @@
 //! this module is the application half that resolves a session's entitled ids and carries them
 //! for the duration of a request.
 //!
+//! Session variables set by an org request scope, in full:
+//! - `app.scope_unit_ids` — the entitlement-union fence (read by org policies).
+//! - `app.company_id` — the legacy equality fence during the re-key transition, resolved from
+//!   the acting node's company ancestry.
+//! - `app.acting_unit_id` — where new records land: the column DEFAULT
+//!   `nullif(current_setting('app.acting_unit_id', true), '')::uuid` on decorated tables
+//!   (ADR-0029) resolves INSERTs that omit `org_unit_id`. Unset/empty → NULL → NOT NULL
+//!   violation: an insert outside a scope fails loud, never silently unscoped.
+//!
 //! During the module-by-module re-key both fences are live at once: some tables still read
 //! `app.company_id` (ADR-0008 equality fence), org-re-keyed tables read `app.scope_unit_ids`.
-//! [`with_org_request_scope`] therefore sets BOTH session variables on one request-dedicated
-//! connection — the legacy variable resolved from the acting node's company ancestry, so a
-//! session acting at a branch keeps its company-fenced rows too. When the last company-fenced
-//! table is re-keyed, the legacy bridge retires with the old fence.
+//! [`with_org_request_scope`] therefore sets ALL THREE session variables on one request-dedicated
+//! connection. When the last company-fenced table is re-keyed, the legacy bridge retires with
+//! the old fence.
 //!
 //! The scope binds the same `REQUEST_CONN` task-local as
 //! [`with_request_scope`](crate::company_scope::with_request_scope): every scoped execute helper
@@ -50,6 +58,28 @@ pub struct OrgScope {
 }
 
 impl OrgScope {
+    /// A single-company scope for paths that cannot run the resolver — chiefly composition
+    /// seams minting records on a node the request already pinned (ADR-0029's decorator makes
+    /// those inserts resolve their `org_unit_id` from `app.acting_unit_id`).
+    ///
+    /// **Precondition: `unit` must be a COMPANY node** (or whatever node kind the caller's
+    /// rows anchor on, with `legacy_company_id` semantics in mind). [`resolve_org_scope`]
+    /// derives the legacy `app.company_id` by walking ancestors from the acting node; this
+    /// constructor sets it verbatim, so a BRANCH handed here would bind a legacy variable
+    /// matching no company-fenced row and fail closed on every not-yet-stripped table.
+    ///
+    /// The scope ids are exactly `[unit]` — no root-shared rows, no sibling subtrees. That is
+    /// fail-narrow (the same property as [`execute_unit_scoped`]): inserts land on the unit
+    /// and reads see only the unit's own rows. Paths needing the session's entitlement union
+    /// must resolve a real scope instead.
+    pub fn for_company_unit(unit: Uuid) -> Self {
+        Self {
+            scope_unit_ids: vec![unit],
+            acting_unit_id: unit,
+            legacy_company_id: Some(unit),
+        }
+    }
+
     /// Every unit id this session may see rows for: the union of the entitled subtrees plus the
     /// root node. Order is stable (sorted) so the serialized form is deterministic.
     pub fn scope_unit_ids(&self) -> &[Uuid] {
@@ -183,15 +213,16 @@ pub async fn resolve_org_scope(
 
 /// Run `f` with a request-dedicated connection carrying the session's org scope.
 ///
-/// Sets `app.scope_unit_ids` (the entitlement-union fence) AND the legacy `app.company_id`
-/// (equality fence, resolved from the acting node's company ancestry) at the session level, so
-/// org-re-keyed and not-yet-re-keyed tables are both fenced correctly for the whole request —
-/// including ID-only lookups, which ride the connection rather than the query text.
+/// Sets `app.scope_unit_ids` (the entitlement-union fence), the legacy `app.company_id`
+/// (equality fence, resolved from the acting node's company ancestry), and `app.acting_unit_id`
+/// (the acting-unit DEFAULT source for inserts on decorated tables, ADR-0029) at the session
+/// level, so org-re-keyed and not-yet-re-keyed tables are both fenced correctly for the whole
+/// request — including ID-only lookups, which ride the connection rather than the query text.
 ///
 /// Mirrors [`with_request_scope`](crate::company_scope::with_request_scope)'s reset discipline:
-/// both variables are cleared unconditionally before the connection returns to the pool, even
-/// when a `REQUEST_CONN` clone outlives the scope — a clone that runs queries after the reset
-/// does so unscoped (fail-closed), never with the previous session's scope.
+/// all three variables are cleared unconditionally before the connection returns to the pool,
+/// even when a `REQUEST_CONN` clone outlives the scope — a clone that runs queries after the
+/// reset does so unscoped (fail-closed), never with the previous session's scope.
 pub async fn with_org_request_scope<F, R>(pool: &PgPool, scope: OrgScope, f: F) -> Result<R, sqlx::Error>
 where
     F: Future<Output = R>,
@@ -205,6 +236,10 @@ where
         .bind(scope.legacy_company_id.map(|id| id.to_string()).unwrap_or_default())
         .execute(&mut *conn)
         .await?;
+    sqlx::query("SELECT set_config('app.acting_unit_id', $1, false)")
+        .bind(scope.acting_unit_id.to_string())
+        .execute(&mut *conn)
+        .await?;
 
     let holder = Arc::new(Mutex::new(conn));
     let scope_arc = Arc::new(scope);
@@ -216,11 +251,11 @@ where
     })
     .await;
 
-    // Unconditional reset of BOTH fence variables (see with_request_scope for the
-    // lingering-clone reasoning — the same contract applies to both variables).
+    // Unconditional reset of ALL THREE fence variables (see with_request_scope for the
+    // lingering-clone reasoning — the same contract applies to every variable).
     {
         let mut guard = holder.lock().await;
-        for var in ["app.scope_unit_ids", "app.company_id"] {
+        for var in ["app.scope_unit_ids", "app.company_id", "app.acting_unit_id"] {
             if let Err(e) = sqlx::query("SELECT set_config($1, '', false)")
                 .bind(var)
                 .execute(&mut **guard)
@@ -252,7 +287,9 @@ pub fn current_org_scope() -> Option<OrgScope> {
 ///
 /// The transaction twin of [`with_org_request_scope`], for hand-written write services and jobs
 /// that manage their own transaction (mirrors
-/// [`bind_company_on`](crate::company_scope::bind_company_on)).
+/// [`bind_company_on`](crate::company_scope::bind_company_on)). Binds all three session
+/// variables, `app.acting_unit_id` included, so an insert inside the transaction can rely on
+/// the acting-unit DEFAULT.
 pub async fn bind_org_scope_on(
     conn: &mut sqlx::PgConnection,
     scope: &OrgScope,
@@ -263,6 +300,10 @@ pub async fn bind_org_scope_on(
         .await?;
     sqlx::query("SELECT set_config('app.company_id', $1, true)")
         .bind(scope.legacy_company_id.map(|id| id.to_string()).unwrap_or_default())
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query("SELECT set_config('app.acting_unit_id', $1, true)")
+        .bind(scope.acting_unit_id.to_string())
         .execute(&mut *conn)
         .await?;
     Ok(())

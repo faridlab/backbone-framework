@@ -57,6 +57,10 @@ fn proof_db_dsn(maintenance_dsn: &str) -> String {
     format!("{before_db}/{PROOF_DB}")
 }
 
+/// Disposable database for the acting-unit DEFAULT proof — separate from [`PROOF_DB`] so the
+/// two tests can run concurrently without racing CREATE/DROP DATABASE.
+const PROOF_DB_ACTING_UNIT: &str = "backbone_auth_org_live_au";
+
 async fn admin_pool(dsn: &str) -> PgPool {
     PgPoolOptions::new().max_connections(2).connect(dsn).await.unwrap()
 }
@@ -90,7 +94,8 @@ async fn setup(admin: &PgPool, role: &str, root: Uuid, company: Uuid, branch: Uu
              LANGUAGE sql STABLE AS $$ \
              SELECT id FROM organization.org_units WHERE kind = 'root' $$; \
          CREATE SCHEMA org_live_test; \
-         CREATE TABLE org_live_test.t (id uuid PRIMARY KEY, org_unit_id uuid NOT NULL, code text); \
+         CREATE TABLE org_live_test.t (id uuid PRIMARY KEY, org_unit_id uuid NOT NULL \
+             DEFAULT nullif(current_setting('app.acting_unit_id', true), '')::uuid, code text); \
          ALTER TABLE org_live_test.t ENABLE ROW LEVEL SECURITY; \
          ALTER TABLE org_live_test.t FORCE ROW LEVEL SECURITY; \
          CREATE POLICY t_org_isolation ON org_live_test.t FOR ALL \
@@ -99,7 +104,7 @@ async fn setup(admin: &PgPool, role: &str, root: Uuid, company: Uuid, branch: Uu
          CREATE ROLE {role} LOGIN PASSWORD '{APP_PASSWORD}'; \
          GRANT USAGE ON SCHEMA organization, org_live_test TO {role}; \
          GRANT SELECT ON organization.org_units TO {role}; \
-         GRANT SELECT ON org_live_test.t TO {role};",
+         GRANT SELECT, INSERT ON org_live_test.t TO {role};",
     ))
     .execute(admin)
     .await
@@ -281,5 +286,195 @@ async fn issuer_guard_spine_fence_chain() {
         .execute(&maintenance)
         .await
         .unwrap();
+    maintenance.close().await;
+}
+
+/// The acting-unit column DEFAULT (ADR-0029's decorator installs exactly this DEFAULT on every
+/// table it decorates): inserts that omit `org_unit_id` resolve it from
+/// `app.acting_unit_id` inside a bound org request scope, and fail LOUD — a NOT NULL
+/// violation — outside one. Also pins the full session-variable inventory a scope sets
+/// (`app.scope_unit_ids`, `app.company_id`, `app.acting_unit_id`) and the single-company
+/// constructor composition seams use.
+#[tokio::test]
+async fn acting_unit_default_fills_scoped_inserts_and_fails_loud_unbound() {
+    let Some(maintenance_dsn) = dsn() else {
+        eprintln!("skipping: set BACKBONE_AUTH_ORG_DSN to a maintenance database");
+        return;
+    };
+    let maintenance = admin_pool(&maintenance_dsn).await;
+    sqlx::raw_sql(&format!("DROP DATABASE IF EXISTS {PROOF_DB_ACTING_UNIT} WITH (FORCE)"))
+        .execute(&maintenance)
+        .await
+        .unwrap();
+    sqlx::raw_sql(&format!("CREATE DATABASE {PROOF_DB_ACTING_UNIT}"))
+        .execute(&maintenance)
+        .await
+        .unwrap();
+    let proof_dsn = proof_db_dsn(&maintenance_dsn)
+        .replace(&format!("/{PROOF_DB}"), &format!("/{PROOF_DB_ACTING_UNIT}"));
+
+    let root = Uuid::new_v4();
+    let company = Uuid::new_v4();
+    let branch = Uuid::new_v4();
+    let other = Uuid::new_v4();
+    let role = role_name();
+    let admin = admin_pool(&proof_dsn).await;
+    setup(&admin, &role, root, company, branch, other).await;
+    let pool = app_pool(&proof_dsn, &role).await;
+
+    // 1. Resolved scope: insert WITHOUT org_unit_id inside the request scope auto-fills the
+    //    acting node. The insert rides the scoped helper so it lands on the request connection
+    //    the scope bound — the same routing every generated repository uses.
+    let mut conn = admin.acquire().await.unwrap();
+    let branch_scope =
+        backbone_orm::org_scope::resolve_org_scope(&mut conn, branch, &[other])
+            .await
+            .unwrap();
+    drop(conn);
+    let inserted_at_branch: Uuid = backbone_orm::org_scope::with_org_request_scope(
+        &pool,
+        branch_scope.clone(),
+        async {
+            let id = Uuid::new_v4();
+            backbone_orm::company_scope::execute_scoped(
+                &pool,
+                sqlx::query("INSERT INTO org_live_test.t (id, code) VALUES ($1, 'AUTO-BR')")
+                    .bind(id),
+            )
+            .await
+            .unwrap();
+            id
+        },
+    )
+    .await
+    .unwrap();
+    let landed: Uuid = sqlx::query_scalar("SELECT org_unit_id FROM org_live_test.t WHERE id = $1")
+        .bind(inserted_at_branch)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    assert_eq!(landed, branch, "insert omitting org_unit_id must land on the acting node");
+
+    // 2. The composition-seam constructor: single-company scope, same auto-fill on the unit.
+    let inserted_at_company: Uuid = backbone_orm::org_scope::with_org_request_scope(
+        &pool,
+        backbone_orm::org_scope::OrgScope::for_company_unit(company),
+        async {
+            let id = Uuid::new_v4();
+            backbone_orm::company_scope::execute_scoped(
+                &pool,
+                sqlx::query("INSERT INTO org_live_test.t (id, code) VALUES ($1, 'AUTO-CO')")
+                    .bind(id),
+            )
+            .await
+            .unwrap();
+            id
+        },
+    )
+    .await
+    .unwrap();
+    let landed: Uuid = sqlx::query_scalar("SELECT org_unit_id FROM org_live_test.t WHERE id = $1")
+        .bind(inserted_at_company)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    assert_eq!(landed, company);
+
+    // 3. Explicit values always win over the DEFAULT: a scoped insert naming the entitled
+    //    sister company (in the scope's union, NOT the acting node) lands there. RLS's WITH
+    //    CHECK still gates the value — override and fence are independent layers.
+    let explicit = Uuid::new_v4();
+    backbone_orm::org_scope::with_org_request_scope(
+        &pool,
+        branch_scope,
+        async {
+            backbone_orm::company_scope::execute_scoped(
+                &pool,
+                sqlx::query(
+                    "INSERT INTO org_live_test.t (id, org_unit_id, code) VALUES ($1, $2, 'EXPLICIT')",
+                )
+                .bind(explicit)
+                .bind(other),
+            )
+            .await
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let landed: Uuid = sqlx::query_scalar("SELECT org_unit_id FROM org_live_test.t WHERE id = $1")
+        .bind(explicit)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    assert_eq!(landed, other, "explicit org_unit_id must override the acting-unit DEFAULT");
+
+    // 4. Outside any scope the same insert fails LOUD. The DEFAULT resolves NULL, and RLS's
+    //    WITH CHECK evaluates before the NOT NULL constraint — so on a fenced table the
+    //    rejection is 42501 (NULL fails the fence predicate); on a path where RLS is bypassed
+    //    (a migration script) the same NULL surfaces as 23502. Either way: loud, never a
+    //    silently-unscoped row.
+    let unbound = sqlx::query("INSERT INTO org_live_test.t (id, code) VALUES ($1, 'UNBOUND')")
+        .bind(Uuid::new_v4())
+        .execute(&pool)
+        .await;
+    match unbound {
+        Err(sqlx::Error::Database(db)) => {
+            let code = db.code();
+            let code = code.as_deref();
+            assert!(
+                code == Some("42501") || code == Some("23502"),
+                "unscoped insert must fail loud (RLS violation or NOT NULL), got {code:?}: {db}"
+            );
+        }
+        other => panic!("unscoped insert must fail loud, got: {other:?}"),
+    }
+
+    // 5. Full session-variable inventory inside the scope: exactly the three fence variables,
+    //    all set, on the connection inserts actually ride.
+    let settings: Vec<(String, String)> =
+        backbone_orm::org_scope::with_org_request_scope(
+            &pool,
+            backbone_orm::org_scope::OrgScope::for_company_unit(company),
+            async {
+                backbone_orm::company_scope::fetch_all_scoped(
+                    &pool,
+                    sqlx::query_as::<_, (String, String)>(
+                        "SELECT s.name, current_setting(s.name, true) FROM unnest(ARRAY[\
+                         'app.scope_unit_ids','app.company_id','app.acting_unit_id']) AS s(name)",
+                    ),
+                )
+                .await
+                .unwrap()
+            },
+        )
+        .await
+        .unwrap();
+    let get = |name: &str| {
+        settings
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.clone())
+            .unwrap()
+    };
+    assert_eq!(get("app.scope_unit_ids"), company.to_string());
+    assert_eq!(get("app.company_id"), company.to_string());
+    assert_eq!(get("app.acting_unit_id"), company.to_string());
+
+    // Zero residue.
+    sqlx::raw_sql(&format!(
+        "DROP SCHEMA organization CASCADE; DROP SCHEMA org_live_test CASCADE; DROP ROLE {role};"
+    ))
+    .execute(&admin)
+    .await
+    .unwrap();
+    pool.close().await;
+    admin.close().await;
+    sqlx::raw_sql(&format!(
+        "DROP DATABASE IF EXISTS {PROOF_DB_ACTING_UNIT} WITH (FORCE);"
+    ))
+    .execute(&maintenance)
+    .await
+    .unwrap();
     maintenance.close().await;
 }

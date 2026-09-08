@@ -15,6 +15,34 @@ back to the `## [Unreleased]` section.
 
 ## [Unreleased]
 
+## [2.7.17] - 2026-09-08
+
+### Added
+
+- `backbone-orm`: the org request scope binds a third session variable,
+  `app.acting_unit_id` (ADR-0029's composition-installed tenancy). Decorated tables carry the
+  column DEFAULT `nullif(current_setting('app.acting_unit_id', true), '')::uuid`, so an INSERT
+  inside a scope that omits `org_unit_id` lands on the session's acting node; outside a scope
+  the DEFAULT resolves NULL and the insert fails loud — on a fenced table the RLS `WITH CHECK`
+  rejects it (42501) before the NOT NULL constraint would (23502), and on a bypassed path the
+  NOT NULL fires. `with_org_request_scope` sets all three fence variables
+  (`app.scope_unit_ids`, the legacy `app.company_id`, `app.acting_unit_id`) and resets all
+  three when the connection returns to the pool; the transaction twin `bind_org_scope_on`
+  binds the same trio transaction-locally.
+- `backbone-orm`: `OrgScope::for_company_unit(unit)` — a single-company scope constructor for
+  composition seams that cannot run the resolver because the request already pinned the node.
+  Precondition on record: `unit` must be a COMPANY node (the constructor sets the legacy
+  `app.company_id` verbatim; a branch handed here binds a legacy variable matching no fenced
+  row and fails closed on not-yet-stripped tables). The scope ids are exactly `[unit]` — no
+  root-shared rows, no sibling subtrees — fail-narrow like `execute_unit_scoped`.
+- `backbone-auth`: the live org-session proof (`tests/org_session_live.rs`, gated on
+  `BACKBONE_AUTH_ORG_DSN`) extends to the acting-unit DEFAULT: its scratch table now carries
+  the exact DEFAULT the tenancy decorator installs, and a second proof pins the full
+  inventory — insert-without-column auto-fills under a resolved scope and under
+  `for_company_unit`; an explicit `org_unit_id` in scope always overrides the DEFAULT; the
+  unscoped insert fails loud (42501/23502); and inside a scope exactly the three fence
+  variables are set on the connection inserts actually ride.
+
 ## [2.7.16] - 2026-09-08
 
 ### Added
