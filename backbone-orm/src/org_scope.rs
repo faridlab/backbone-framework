@@ -339,6 +339,38 @@ pub async fn execute_unit_scoped<'q>(
     Ok(res)
 }
 
+/// Tenant-agnostic `execute` for hand-written module SQL (ADR-0029): ride the request-dedicated
+/// connection when one is bound — carrying whatever fence variables the COMPOSING service's scope
+/// set (`with_org_request_scope` / `with_request_scope`) — otherwise execute plainly on the pool.
+///
+/// Unlike [`execute_unit_scoped`] this invents no scope of its own: a module that knows nothing
+/// about tenancy must not fabricate a unit or a company. Under a composer's request scope the
+/// database fence owns isolation; with no scope bound this is a plain unfenced execute.
+pub async fn execute_scoped<'q>(
+    pool: &PgPool,
+    query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
+) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error> {
+    if let Some(conn) = crate::company_scope::current_request_conn() {
+        let mut g = conn.lock().await;
+        return query.execute(&mut **g).await;
+    }
+    query.execute(pool).await
+}
+
+/// Tenant-agnostic `fetch_optional` for an untyped row query — the read twin of
+/// [`execute_scoped`], same connection discipline: request-dedicated connection when bound,
+/// plain pool otherwise, no scope invented.
+pub async fn fetch_optional_row_scoped<'q>(
+    pool: &PgPool,
+    query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
+) -> Result<Option<sqlx::postgres::PgRow>, sqlx::Error> {
+    if let Some(conn) = crate::company_scope::current_request_conn() {
+        let mut g = conn.lock().await;
+        return query.fetch_optional(&mut **g).await;
+    }
+    query.fetch_optional(pool).await
+}
+
 #[cfg(test)]
 mod tests {
     //! Gated on `BACKBONE_ORM_RLS_DSN` (a superuser DSN). Self-contained: builds a minimal org
