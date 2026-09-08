@@ -15,6 +15,20 @@ back to the `## [Unreleased]` section.
 
 ## [Unreleased]
 
+## [2.7.16] - 2026-09-08
+
+### Added
+- `backbone-auth`: the org session's legacy company twin. `OrgClaims` and `OrgContext` gain
+  `company_id` / `legacy_company_id` (optional), and `OrgIssuer::issue_access`/`issue_refresh`
+  take a `legacy_company: Option<Uuid>` argument (ADR-0027/0028 transition). While the re-key
+  sweep runs, one credential must open both the org-tree guard and the company guard — surfaces
+  flip surface by surface, so the issuing service seals the acting node's legacy company beside
+  its org unit (the spine copies company ids verbatim; the twin equals `org_unit_id` whenever the
+  acting node is a company). The twin is omitted from the wire entirely when `None`, keeping
+  org-only mints byte-compatible with pre-twin tokens. New contract: one twin-claim mint passes
+  both `OrgVerifier` and `CompanyVerifier`, its refresh twin passes neither, and an org-only
+  mint never opens a company-guarded surface.
+
 ## [2.7.15] - 2026-09-07
 
 ### Fixed
