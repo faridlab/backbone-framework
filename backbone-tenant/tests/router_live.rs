@@ -250,6 +250,9 @@ async fn two_tenants_one_app_the_fence_holds() {
             exp: 4_102_444_800, // 2100-01-01: expiry is not what this test exercises
             org_unit_id: Some(acting),
             entitled_units: entitled.to_vec(),
+            // No legacy company twin: this proof carries the pure-org posture (the
+            // twin's cross-guard contract lives in backbone-auth's org_guard suite).
+            company_id: None,
             // Typless on purpose: the typless-legacy acceptance is part of what this
             // proof carries (a present non-access typ is refused by the unit contract
             // in backbone-auth; here the minted pairs behave like pre-typ tokens).

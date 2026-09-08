@@ -228,7 +228,7 @@ async fn issuer_guard_spine_fence_chain() {
 
     // 1. The full happy path: minted access token → guard → entitlement-union fence.
     let access = issuer
-        .issue_access(&user, branch, &[other], Duration::from_secs(3600))
+        .issue_access(&user, branch, &[other], None, Duration::from_secs(3600))
         .unwrap();
     let res = call(app.clone(), &access).await;
     assert_eq!(res.status(), StatusCode::OK, "minted access token must pass the guard");
@@ -242,7 +242,7 @@ async fn issuer_guard_spine_fence_chain() {
 
     // 2. The refresh twin of the very same session is refused on the guarded route.
     let refresh = issuer
-        .issue_refresh(&user, branch, &[other], Duration::from_secs(7 * 24 * 3600))
+        .issue_refresh(&user, branch, &[other], None, Duration::from_secs(7 * 24 * 3600))
         .unwrap();
     let res = call(app.clone(), &refresh).await;
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "refresh token must not open a scoped session");
@@ -250,7 +250,7 @@ async fn issuer_guard_spine_fence_chain() {
     // 3. An access token naming a unit this tree does not hold is 403 — identity without
     //    tenancy is not access.
     let ghost = issuer
-        .issue_access(&user, Uuid::new_v4(), &[], Duration::from_secs(3600))
+        .issue_access(&user, Uuid::new_v4(), &[], None, Duration::from_secs(3600))
         .unwrap();
     let res = call(app.clone(), &ghost).await;
     assert_eq!(res.status(), StatusCode::FORBIDDEN, "unknown acting unit must be refused, not narrowed");

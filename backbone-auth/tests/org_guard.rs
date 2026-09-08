@@ -46,13 +46,16 @@ fn issuer_access_token_round_trips_through_the_verifier() {
     let sister = Uuid::new_v4();
 
     let token = issuer
-        .issue_access(&user.to_string(), acting, &[sister], Duration::from_secs(3600))
+        .issue_access(&user.to_string(), acting, &[sister], None, Duration::from_secs(3600))
         .unwrap();
     let ctx = verifier.verify(&token).expect("minted access token must verify");
 
     assert_eq!(ctx.acting_unit_id, acting);
     assert_eq!(ctx.entitled_units, vec![sister]);
     assert_eq!(ctx.user_id, user.to_string());
+    // An org-only mint carries no legacy twin — the field stays absent from the wire, so the
+    // token decodes exactly like a pre-twin mint.
+    assert_eq!(ctx.legacy_company_id, None);
 }
 
 #[test]
@@ -61,11 +64,60 @@ fn issuer_refresh_token_is_refused_by_the_verifier() {
     let verifier = OrgVerifier::hs256(SECRET);
 
     let refresh = issuer
-        .issue_refresh("user-1", Uuid::new_v4(), &[], Duration::from_secs(7 * 24 * 3600))
+        .issue_refresh("user-1", Uuid::new_v4(), &[], None, Duration::from_secs(7 * 24 * 3600))
         .unwrap();
     // Same signature, same claims shape — the `typ` claim is the only difference, and it is
     // load-bearing: a rotation credential must never open a scoped session.
     assert!(verifier.verify(&refresh).is_none());
+}
+
+/// The tenancy-transition contract: one minted credential passes BOTH guards. The re-key
+/// sweep flips surface by surface, so the org guard and the company guard must accept the
+/// same token while it runs — and the refresh twin must pass neither.
+#[test]
+fn a_twin_claim_mint_passes_both_guards() {
+    use backbone_auth::company::CompanyVerifier;
+
+    let issuer = OrgIssuer::hs256(SECRET);
+    let org_verifier = OrgVerifier::hs256(SECRET);
+    let company_verifier = CompanyVerifier::hs256(SECRET);
+    let user = Uuid::new_v4();
+    let company = Uuid::new_v4();
+
+    let access = issuer
+        .issue_access(&user.to_string(), company, &[], Some(company), Duration::from_secs(3600))
+        .unwrap();
+    let org_ctx = org_verifier
+        .verify(&access)
+        .expect("the org guard accepts the twin-claim token");
+    assert_eq!(org_ctx.acting_unit_id, company);
+    assert_eq!(org_ctx.legacy_company_id, Some(company));
+    let company_ctx = company_verifier
+        .verify(&access)
+        .expect("the company guard accepts the same token during the transition");
+    assert_eq!(company_ctx.company_id, company);
+    assert_eq!(company_ctx.user_id, user.to_string());
+
+    let refresh = issuer
+        .issue_refresh(&user.to_string(), company, &[], Some(company), Duration::from_secs(7 * 24 * 3600))
+        .unwrap();
+    assert!(org_verifier.verify(&refresh).is_none());
+    assert!(company_verifier.verify(&refresh).is_none());
+}
+
+/// An org-only mint (no twin) must NOT open a company-guarded surface: the transition
+/// contract is one token → both guards, never org-only → company access.
+#[test]
+fn an_org_only_mint_is_refused_by_the_company_guard() {
+    use backbone_auth::company::CompanyVerifier;
+
+    let issuer = OrgIssuer::hs256(SECRET);
+    let company_verifier = CompanyVerifier::hs256(SECRET);
+
+    let org_only = issuer
+        .issue_access("user-1", Uuid::new_v4(), &[], None, Duration::from_secs(3600))
+        .unwrap();
+    assert!(company_verifier.verify(&org_only).is_none());
 }
 
 #[test]
@@ -74,7 +126,7 @@ fn a_token_signed_by_a_different_secret_is_refused() {
     let verifier = OrgVerifier::hs256(SECRET);
 
     let token = issuer
-        .issue_access("user-1", Uuid::new_v4(), &[], Duration::from_secs(3600))
+        .issue_access("user-1", Uuid::new_v4(), &[], None, Duration::from_secs(3600))
         .unwrap();
     assert!(verifier.verify(&token).is_none());
 }
@@ -145,7 +197,7 @@ async fn og5_refresh_typed_token_is_rejected() {
     // Minted by the real issuer: exactly the credential a refresh endpoint hands out. The
     // signature is valid and the acting unit is present — the guard still refuses it.
     let refresh = OrgIssuer::hs256(SECRET)
-        .issue_refresh("user-1", Uuid::new_v4(), &[], Duration::from_secs(7 * 24 * 3600))
+        .issue_refresh("user-1", Uuid::new_v4(), &[], None, Duration::from_secs(7 * 24 * 3600))
         .unwrap();
     assert_eq!(call(Some(&refresh)).await.status(), StatusCode::UNAUTHORIZED);
 }
@@ -173,7 +225,7 @@ async fn og8_missing_tenant_pool_is_a_wiring_error_not_a_pass() {
     // guard. That is a 500 wiring error — the guard must never let the request through.
     let issuer = OrgIssuer::hs256(SECRET);
     let access = issuer
-        .issue_access("user-1", Uuid::new_v4(), &[], Duration::from_secs(3600))
+        .issue_access("user-1", Uuid::new_v4(), &[], None, Duration::from_secs(3600))
         .unwrap();
     assert_eq!(call(Some(&access)).await.status(), StatusCode::INTERNAL_SERVER_ERROR);
 }

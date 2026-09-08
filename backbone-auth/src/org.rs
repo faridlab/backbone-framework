@@ -74,6 +74,10 @@ pub struct OrgContext {
     /// Further nodes the token holds entitlements for (a group admin's sister companies). Each
     /// contributes its whole subtree at resolution time.
     pub entitled_units: Vec<Uuid>,
+    /// The acting node's legacy company twin, when the token carries one (the tenancy
+    /// transition). Hosts that still fence tables on `app.company_id` read it here instead of
+    /// re-decoding the raw token.
+    pub legacy_company_id: Option<Uuid>,
     /// The authenticated principal (the token's `sub`).
     pub user_id: String,
 }
@@ -96,6 +100,13 @@ pub struct OrgClaims {
     /// Additional entitled nodes, when the session spans more than its acting node.
     #[serde(default)]
     pub entitled_units: Vec<Uuid>,
+    /// The legacy company twin (the tenancy transition): while the ADR-0028 re-key sweep runs,
+    /// one credential must pass both guards — org-tree surfaces read `org_unit_id`, surfaces
+    /// not yet re-keyed still read `company_id`. The org spine copies legacy company ids
+    /// verbatim, so the twin equals `org_unit_id` whenever the acting node is a company. Absent
+    /// on post-transition tokens and on org-only sessions.
+    #[serde(default)]
+    pub company_id: Option<Uuid>,
     /// Token purpose. Absent on tokens minted before this field existed (accepted); a present
     /// value other than `"access"` — e.g. a refresh token — is refused.
     #[serde(default)]
@@ -148,6 +159,7 @@ impl OrgVerifier {
         Some(OrgContext {
             acting_unit_id: c.org_unit_id?,
             entitled_units: c.entitled_units,
+            legacy_company_id: c.company_id,
             user_id: c.sub,
         })
     }
@@ -166,6 +178,12 @@ impl OrgVerifier {
 /// refuses anything present that is not `"access"`, so a refresh token cannot ride a guarded
 /// route even though it shares the signing key.
 ///
+/// During the tenancy transition the mint also seals the legacy `company_id` twin when the
+/// caller passes one, so a single credential opens both the org-tree guard and the company
+/// guard (the re-key sweep flips surface by surface; both must accept one token meanwhile).
+/// The twin is omitted from the wire entirely when `None`, keeping org-only mints
+/// byte-compatible with tokens minted before the twin existed.
+///
 /// # Wiring
 ///
 /// ```rust,ignore
@@ -174,8 +192,10 @@ impl OrgVerifier {
 ///
 /// let issuer = OrgIssuer::hs256(jwt_secret.as_bytes());
 /// // acting unit + entitlements resolved from the tenant's membership data beforehand.
-/// let access  = issuer.issue_access(&user_id, acting_unit, &entitled, Duration::from_secs(3600))?;
-/// let refresh = issuer.issue_refresh(&user_id, acting_unit, &entitled, Duration::from_secs(7 * 24 * 3600))?;
+/// // During the tenancy transition pass `Some(company)` as the legacy twin so the same
+/// // credential passes the company guard too; `None` mints an org-only session.
+/// let access  = issuer.issue_access(&user_id, acting_unit, &entitled, Some(company), Duration::from_secs(3600))?;
+/// let refresh = issuer.issue_refresh(&user_id, acting_unit, &entitled, Some(company), Duration::from_secs(7 * 24 * 3600))?;
 /// ```
 #[derive(Clone)]
 pub struct OrgIssuer {
@@ -194,6 +214,10 @@ struct IssuedSessionClaims {
     typ: &'static str,
     org_unit_id: Uuid,
     entitled_units: Vec<Uuid>,
+    /// Sealed only during the tenancy transition — see [`OrgClaims::company_id`]. Skipped
+    /// entirely when `None`, so an org-only mint stays byte-shaped like a pre-twin token.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    company_id: Option<Uuid>,
 }
 
 impl OrgIssuer {
@@ -226,9 +250,10 @@ impl OrgIssuer {
         user_id: &str,
         acting_unit: Uuid,
         entitled_units: &[Uuid],
+        legacy_company: Option<Uuid>,
         ttl: Duration,
     ) -> Result<String, jsonwebtoken::errors::Error> {
-        self.issue(user_id, acting_unit, entitled_units, ttl, TOKEN_TYPE_ACCESS)
+        self.issue(user_id, acting_unit, entitled_units, legacy_company, ttl, TOKEN_TYPE_ACCESS)
     }
 
     /// Mint a refresh token: a rotation credential only. [`OrgVerifier::verify`] refuses it;
@@ -241,9 +266,10 @@ impl OrgIssuer {
         user_id: &str,
         acting_unit: Uuid,
         entitled_units: &[Uuid],
+        legacy_company: Option<Uuid>,
         ttl: Duration,
     ) -> Result<String, jsonwebtoken::errors::Error> {
-        self.issue(user_id, acting_unit, entitled_units, ttl, TOKEN_TYPE_REFRESH)
+        self.issue(user_id, acting_unit, entitled_units, legacy_company, ttl, TOKEN_TYPE_REFRESH)
     }
 
     fn issue(
@@ -251,6 +277,7 @@ impl OrgIssuer {
         user_id: &str,
         acting_unit: Uuid,
         entitled_units: &[Uuid],
+        legacy_company: Option<Uuid>,
         ttl: Duration,
         typ: &'static str,
     ) -> Result<String, jsonwebtoken::errors::Error> {
@@ -265,6 +292,7 @@ impl OrgIssuer {
             typ,
             org_unit_id: acting_unit,
             entitled_units: entitled_units.to_vec(),
+            company_id: legacy_company,
         };
         encode(&Header::new(self.algorithm), &claims, &self.key)
     }
