@@ -15,8 +15,16 @@ back to the `## [Unreleased]` section.
 
 ## [Unreleased]
 
+## [2.7.18] - 2026-09-11
+
 ### Added
 
+- `backbone-orm`: tenant-agnostic scoped-execute twins in `org_scope` — `execute_scoped` and
+  `fetch_optional_row_scoped` ride the request-dedicated connection when one is bound (carrying
+  whatever fence variables the composing service's scope set) and otherwise execute plainly on
+  the pool. Unlike `execute_unit_scoped` they invent no scope: tenant-agnostic modules
+  (ADR-0029) call these for their hand-written SQL so their inserts land on the connection the
+  composer's fence variables are set on, without the module naming a unit or a company.
 - `backbone-orm`: the audit-attribution channel of data-change audit capture (ADR-0025) — a
   `RequestAuditContext` (actor, correlation id, client IP, user agent, HTTP method, resource
   path) binds six `app.*` session variables on the request-dedicated connection through
@@ -59,12 +67,6 @@ back to the `## [Unreleased]` section.
   `app.company_id` verbatim; a branch handed here binds a legacy variable matching no fenced
   row and fails closed on not-yet-stripped tables). The scope ids are exactly `[unit]` — no
   root-shared rows, no sibling subtrees — fail-narrow like `execute_unit_scoped`.
-- `backbone-orm`: tenant-agnostic scoped-execute twins in `org_scope` — `execute_scoped` and
-  `fetch_optional_row_scoped` ride the request-dedicated connection when one is bound (carrying
-  whatever fence variables the composing service's scope set) and otherwise execute plainly on
-  the pool. Unlike `execute_unit_scoped` they invent no scope: tenant-agnostic modules
-  (ADR-0029) call these for their hand-written SQL so their inserts land on the connection the
-  composer's fence variables are set on, without the module naming a unit or a company.
 - `backbone-auth`: the live org-session proof (`tests/org_session_live.rs`, gated on
   `BACKBONE_AUTH_ORG_DSN`) extends to the acting-unit DEFAULT: its scratch table now carries
   the exact DEFAULT the tenancy decorator installs, and a second proof pins the full
