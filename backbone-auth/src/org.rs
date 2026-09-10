@@ -16,6 +16,11 @@
 //! connection for the entire request. ID-only lookups and raw-`sqlx` statements are thereby
 //! fenced by the connection, not the query text.
 //!
+//! The same wrap carries the request's **audit attribution** (ADR-0025): the actor off the
+//! token's `sub`, the correlation id (honored from `X-Correlation-ID`, else minted and echoed
+//! on the response so callers and logs join on it), and the request facts. The auditlog
+//! module's capture triggers read them off the connection every write of the request rides.
+//!
 //! Fail-closed, same contract as the company guard: a token without an `org_unit_id` claim is
 //! 401 — a request that cannot name its node must never reach a writer.
 //!
@@ -46,11 +51,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{
     extract::{FromRequestParts, Request, State},
-    http::{header, request::Parts, StatusCode},
+    http::{header, request::Parts, HeaderMap, HeaderValue, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
     Json,
 };
+use backbone_orm::audit_context::RequestAuditContext;
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -322,6 +328,65 @@ fn internal_error(message: &str) -> Response {
         .into_response()
 }
 
+/// The header a caller uses to join its request with the service's logs and audit rows.
+const CORRELATION_ID_HEADER: &str = "x-correlation-id";
+/// Bound on a client-supplied correlation id: the value rides audit rows and logs for the life
+/// of the record, so it is normalized to visible ASCII and capped — an unbounded header must
+/// not become an unbounded column.
+const MAX_CORRELATION_ID_LEN: usize = 128;
+/// The same bound, proportioned, for the other client-supplied request facts.
+const MAX_CLIENT_IP_LEN: usize = 64;
+const MAX_USER_AGENT_LEN: usize = 256;
+const MAX_RESOURCE_PATH_LEN: usize = 256;
+
+/// Visible ASCII only, capped at `max` — the normalization every client-supplied audit fact
+/// passes before it is bound, so the audit channel carries bounded, printable values.
+fn normalize_fact(raw: &str, max: usize) -> String {
+    raw.chars().filter(|c| c.is_ascii_graphic()).take(max).collect()
+}
+
+/// The request's correlation id: the caller's `X-Correlation-ID` when it normalizes to
+/// something non-empty, else a freshly minted UUID. The SAME value is bound into the audit
+/// channel and echoed on the response — that identity is what makes the join key trustworthy.
+fn correlation_id_of(headers: &HeaderMap) -> String {
+    headers
+        .get(CORRELATION_ID_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(|raw| normalize_fact(raw, MAX_CORRELATION_ID_LEN))
+        .filter(|normalized| !normalized.is_empty())
+        .unwrap_or_else(|| Uuid::new_v4().to_string())
+}
+
+/// The client's IP as the edge proxy reported it: the FIRST entry of `X-Forwarded-For` (the
+/// original client; later entries are the proxies themselves). Empty when no proxy header is
+/// present — this guard never sees the socket address, and inventing one is worse than a gap.
+fn client_ip_of(headers: &HeaderMap) -> String {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(|raw| normalize_fact(raw.trim(), MAX_CLIENT_IP_LEN))
+        .unwrap_or_default()
+}
+
+/// The audit attribution of one guarded request, off the proven token and the request itself —
+/// the actor is the signed `sub`, never anything the client asserts in the body or headers.
+fn audit_context_of(ctx: &OrgContext, req: &Request) -> RequestAuditContext {
+    RequestAuditContext {
+        actor: ctx.user_id.clone(),
+        correlation_id: correlation_id_of(req.headers()),
+        client_ip: client_ip_of(req.headers()),
+        user_agent: req
+            .headers()
+            .get(header::USER_AGENT)
+            .and_then(|v| v.to_str().ok())
+            .map(|raw| normalize_fact(raw, MAX_USER_AGENT_LEN))
+            .unwrap_or_default(),
+        http_method: req.method().as_str().to_string(),
+        resource_path: normalize_fact(req.uri().path(), MAX_RESOURCE_PATH_LEN),
+    }
+}
+
 /// Middleware: validate the Bearer token, resolve the session's org scope over the request's
 /// tenant database, and run the handler inside that scope.
 ///
@@ -399,9 +464,29 @@ pub async fn org_auth(
         }
     };
 
+    // Audit attribution (ADR-0025 lane): the actor is the signed `sub`; the correlation id is
+    // honored from the request or minted here. The normalized value bound into the audit
+    // channel is exactly the value echoed on the response — that identity is the join key.
+    let audit = audit_context_of(&ctx, &req);
+    let correlation_id = audit.correlation_id.clone();
+
     req.extensions_mut().insert(ctx);
-    match backbone_orm::org_scope::with_org_request_scope(&pool, scope, next.run(req)).await {
-        Ok(resp) => resp,
+    match backbone_orm::org_scope::with_org_request_scope_and_audit(
+        &pool,
+        scope,
+        audit,
+        next.run(req),
+    )
+    .await
+    {
+        Ok(mut resp) => {
+            // After normalization the id is visible ASCII only, so from_str cannot fail; a
+            // header insert must still never take a guarded route down — skip over a bad value.
+            if let Ok(value) = HeaderValue::from_str(&correlation_id) {
+                resp.headers_mut().insert(CORRELATION_ID_HEADER, value);
+            }
+            resp
+        }
         Err(_) => internal_error("could not establish the request org scope"),
     }
 }

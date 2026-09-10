@@ -15,6 +15,30 @@ back to the `## [Unreleased]` section.
 
 ## [Unreleased]
 
+### Added
+
+- `backbone-orm`: the audit-attribution channel of data-change audit capture (ADR-0025) — a
+  `RequestAuditContext` (actor, correlation id, client IP, user agent, HTTP method, resource
+  path) binds six `app.*` session variables on the request-dedicated connection through
+  `with_org_request_scope_and_audit`, the audited twin of `with_org_request_scope`, so the
+  composed auditlog module's capture triggers read WHO made a change and WHERE it came from
+  off the same connection every write of the request rides. All six are
+  empty-string-when-unset on the wire (every reader wraps them in `nullif(...)`, so unset
+  reads NULL — the capture function's `'system'` actor fallback reads exactly that), and the
+  scope's reset discipline clears fence AND audit variables unconditionally before the
+  connection returns to the pool. `RequestAuditContext::bind_on` is the transaction twin for
+  hand-written write services, beside `bind_org_scope_on`.
+- `backbone-auth`: `org_auth` populates that context off the proven token and the request —
+  the actor is the signed `sub`, never client-asserted; the correlation id is honored from
+  `X-Correlation-ID` (normalized to bounded visible ASCII) or minted as a UUID, and the same
+  value is echoed on the response, making it the join key between a response, its logs, and
+  its audit rows. The client IP is the first `X-Forwarded-For` entry the edge proxy reported.
+- `backbone-orm`/`backbone-auth`: DSN-gated live proofs of the channel — the org scope test
+  proves the six variables ride the request connection (a row-level trigger on a scoped
+  insert reads the bound actor and correlation id) and clear afterwards; the org session
+  proof drives a guarded write end to end and pins that the audit row's correlation id equals
+  the response header, for both a caller-supplied and a minted id.
+
 ## [2.7.17] - 2026-09-08
 
 ### Added

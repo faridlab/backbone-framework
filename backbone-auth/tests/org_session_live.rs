@@ -14,6 +14,10 @@
 //!    returns exactly the entitled subtree union plus root rows, and nothing else.
 //! 4. The issuer's refresh token is 401 on the same route; an access token naming a unit the
 //!    tree does not hold is 403.
+//! 5. The audit lane (ADR-0025): a guarded write's row-level trigger reads the request's
+//!    attribution off the connection, and the response's `X-Correlation-ID` equals the
+//!    correlation id the audit row carries — honored from the caller when supplied, minted
+//!    when not.
 //!
 //! Zero-residue: schemas, the per-run role, and the disposable database are dropped at the end.
 
@@ -472,6 +476,231 @@ async fn acting_unit_default_fills_scoped_inserts_and_fails_loud_unbound() {
     admin.close().await;
     sqlx::raw_sql(&format!(
         "DROP DATABASE IF EXISTS {PROOF_DB_ACTING_UNIT} WITH (FORCE);"
+    ))
+    .execute(&maintenance)
+    .await
+    .unwrap();
+    maintenance.close().await;
+}
+
+/// The disposable database of the audit-lane proof — separate from the two above so all three
+/// can run concurrently without racing CREATE/DROP DATABASE.
+const PROOF_DB_AUDIT_LANE: &str = "backbone_auth_org_live_audit";
+
+/// The guarded write route of the audit-lane proof: performs the write every guarded handler
+/// performs — through the scoped helper, landing on the request connection the guard bound, so
+/// the fence variables AND the attribution variables ride it into the trigger.
+async fn audit_lane_write(Extension(pool): Extension<PgPool>) -> Response {
+    match backbone_orm::company_scope::execute_scoped(
+        &pool,
+        sqlx::query("INSERT INTO org_live_test.t (id, code) VALUES ($1, 'AUDIT-LANE')")
+            .bind(Uuid::new_v4()),
+    )
+    .await
+    {
+        Ok(_) => StatusCode::OK.into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("audit-lane write failed: {e}"),
+        )
+            .into_response(),
+    }
+}
+
+/// A guarded write route's audit trail, end to end (ADR-0025): the guard binds the request's
+/// attribution on the request-dedicated connection, the write's row-level trigger reads it off
+/// that same connection, and the correlation id the caller sees on the response is the one the
+/// audit row carries — the join key between a response, its logs, and its audit history.
+///
+/// The trail here is a minimal inline probe (the framework cannot depend on the auditlog
+/// module); the module's own capture-function suite proves the real capture semantics against
+/// this same channel contract.
+#[tokio::test]
+async fn audit_attribution_flows_from_request_to_audit_row() {
+    let Some(maintenance_dsn) = dsn() else {
+        eprintln!("skipping: set BACKBONE_AUTH_ORG_DSN to a maintenance database");
+        return;
+    };
+    let maintenance = admin_pool(&maintenance_dsn).await;
+    sqlx::raw_sql(&format!("DROP DATABASE IF EXISTS {PROOF_DB_AUDIT_LANE} WITH (FORCE)"))
+        .execute(&maintenance)
+        .await
+        .unwrap();
+    sqlx::raw_sql(&format!("CREATE DATABASE {PROOF_DB_AUDIT_LANE}"))
+        .execute(&maintenance)
+        .await
+        .unwrap();
+    let proof_dsn = proof_db_dsn(&maintenance_dsn)
+        .replace(&format!("/{PROOF_DB}"), &format!("/{PROOF_DB_AUDIT_LANE}"));
+
+    let root = Uuid::new_v4();
+    let company = Uuid::new_v4();
+    let branch = Uuid::new_v4();
+    let other = Uuid::new_v4();
+    let role = role_name();
+    let admin = admin_pool(&proof_dsn).await;
+
+    // The spine + fenced table of the sibling proofs, plus the audit probe: an AFTER INSERT
+    // trigger capturing the whole attribution channel — the minimal shape of the auditlog
+    // module's capture function.
+    sqlx::raw_sql(&format!(
+        "CREATE SCHEMA organization; \
+         CREATE TABLE organization.org_units ( \
+             id uuid PRIMARY KEY, kind text NOT NULL, parent_id uuid, \
+             code text, name text NOT NULL, metadata jsonb NOT NULL DEFAULT '{{}}' \
+         ); \
+         CREATE OR REPLACE FUNCTION organization.org_unit_subtree(p_roots uuid[]) \
+             RETURNS SETOF uuid LANGUAGE sql STABLE AS $$ \
+             WITH RECURSIVE tree AS ( \
+                 SELECT o.id FROM organization.org_units o WHERE o.id = ANY(p_roots) \
+                 UNION ALL \
+                 SELECT o.id FROM organization.org_units o JOIN tree t ON o.parent_id = t.id \
+             ) SELECT id FROM tree $$; \
+         CREATE OR REPLACE FUNCTION organization.org_unit_root() RETURNS uuid \
+             LANGUAGE sql STABLE AS $$ \
+             SELECT id FROM organization.org_units WHERE kind = 'root' $$; \
+         CREATE SCHEMA org_live_test; \
+         CREATE TABLE org_live_test.t (id uuid PRIMARY KEY, org_unit_id uuid NOT NULL \
+             DEFAULT nullif(current_setting('app.acting_unit_id', true), '')::uuid, code text); \
+         ALTER TABLE org_live_test.t ENABLE ROW LEVEL SECURITY; \
+         ALTER TABLE org_live_test.t FORCE ROW LEVEL SECURITY; \
+         CREATE POLICY t_org_isolation ON org_live_test.t FOR ALL \
+             USING (org_unit_id = ANY(string_to_array(current_setting('app.scope_unit_ids', true), ',')::uuid[])) \
+             WITH CHECK (org_unit_id = ANY(string_to_array(current_setting('app.scope_unit_ids', true), ',')::uuid[])); \
+         CREATE TABLE org_live_test.audit_probe ( \
+             id bigserial PRIMARY KEY, actor text NOT NULL, correlation_id text NOT NULL, \
+             client_ip text NOT NULL, user_agent text NOT NULL, \
+             http_method text NOT NULL, resource_path text NOT NULL \
+         ); \
+         CREATE FUNCTION org_live_test.capture_probe() RETURNS trigger LANGUAGE plpgsql AS $$ \
+             BEGIN \
+                 INSERT INTO org_live_test.audit_probe \
+                     (actor, correlation_id, client_ip, user_agent, http_method, resource_path) \
+                 VALUES (current_setting('app.actor', true), \
+                         current_setting('app.correlation_id', true), \
+                         current_setting('app.client_ip', true), \
+                         current_setting('app.user_agent', true), \
+                         current_setting('app.http_method', true), \
+                         current_setting('app.resource_path', true)); \
+                 RETURN NULL; \
+             END $$; \
+         CREATE TRIGGER t_audit_probe AFTER INSERT ON org_live_test.t \
+             FOR EACH ROW EXECUTE FUNCTION org_live_test.capture_probe(); \
+         CREATE ROLE {role} LOGIN PASSWORD '{APP_PASSWORD}'; \
+         GRANT USAGE ON SCHEMA organization, org_live_test TO {role}; \
+         GRANT SELECT ON organization.org_units TO {role}; \
+         GRANT SELECT, INSERT ON org_live_test.t TO {role}; \
+         GRANT INSERT ON org_live_test.audit_probe TO {role}; \
+         GRANT USAGE, SELECT ON SEQUENCE org_live_test.audit_probe_id_seq TO {role};",
+    ))
+    .execute(&admin)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO organization.org_units (id, kind, parent_id, code, name) VALUES \
+             ($1, 'root',    NULL, 'ROOT', 'Tenant root'), \
+             ($2, 'company', $1,   'CO',   'Company'), \
+             ($3, 'branch',  $2,   'BR',   'Branch'), \
+             ($4, 'company', $1,   'OTHER', 'Other Company')",
+    )
+    .bind(root)
+    .bind(company)
+    .bind(branch)
+    .bind(other)
+    .execute(&admin)
+    .await
+    .unwrap();
+
+    let pool = app_pool(&proof_dsn, &role).await;
+    let insert_pool = {
+        let pool = pool.clone();
+        from_fn(move |mut req: Request<Body>, next: axum::middleware::Next| {
+            let pool = pool.clone();
+            async move {
+                req.extensions_mut().insert(pool);
+                next.run(req).await
+            }
+        })
+    };
+    let app = Router::new()
+        .route("/audit-write", axum::routing::post(audit_lane_write))
+        .layer(from_fn_with_state(OrgVerifier::hs256(SECRET), org_auth))
+        .layer(insert_pool);
+
+    let issuer = OrgIssuer::hs256(SECRET);
+    let user = Uuid::new_v4().to_string();
+    let access = issuer
+        .issue_access(&user, branch, &[], None, Duration::from_secs(3600))
+        .unwrap();
+
+    // 1. Caller-supplied correlation id + proxy/request facts: echoed verbatim (normalized),
+    //    and the audit row the trigger wrote carries exactly the same values.
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/audit-write")
+                .header(header::AUTHORIZATION, format!("Bearer {access}"))
+                .header("x-correlation-id", "client-corr-42")
+                .header("x-forwarded-for", "203.0.113.9, 10.0.0.1")
+                .header(header::USER_AGENT, "audit-probe/2.0")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let echoed = res.headers()["x-correlation-id"].to_str().unwrap().to_string();
+    assert_eq!(echoed, "client-corr-42", "the caller's id is honored and echoed");
+
+    let row: (String, String, String, String, String, String) = sqlx::query_as(
+        "SELECT actor, correlation_id, client_ip, user_agent, http_method, resource_path \
+         FROM org_live_test.audit_probe ORDER BY id DESC LIMIT 1",
+    )
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(row.0, user, "actor is the signed token sub");
+    assert_eq!(row.1, echoed, "audit row correlation id == response header — the join key");
+    assert_eq!(row.2, "203.0.113.9", "first X-Forwarded-For entry is the client");
+    assert_eq!(row.3, "audit-probe/2.0");
+    assert_eq!(row.4, "POST");
+    assert_eq!(row.5, "/audit-write");
+
+    // 2. No caller id: one is minted, echoed, and audited — the same value in both places.
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/audit-write")
+                .header(header::AUTHORIZATION, format!("Bearer {access}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let echoed = res.headers()["x-correlation-id"].to_str().unwrap().to_string();
+    Uuid::parse_str(&echoed).expect("a minted correlation id is a UUID");
+    let row_corr: String =
+        sqlx::query_scalar("SELECT correlation_id FROM org_live_test.audit_probe ORDER BY id DESC LIMIT 1")
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    assert_eq!(row_corr, echoed, "minted id lands in the audit row and on the response alike");
+
+    // Zero residue.
+    sqlx::raw_sql(&format!(
+        "DROP SCHEMA organization CASCADE; DROP SCHEMA org_live_test CASCADE; DROP ROLE {role};"
+    ))
+    .execute(&admin)
+    .await
+    .unwrap();
+    pool.close().await;
+    admin.close().await;
+    sqlx::raw_sql(&format!(
+        "DROP DATABASE IF EXISTS {PROOF_DB_AUDIT_LANE} WITH (FORCE);"
     ))
     .execute(&maintenance)
     .await

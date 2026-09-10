@@ -16,6 +16,11 @@
 //!   `nullif(current_setting('app.acting_unit_id', true), '')::uuid` on decorated tables
 //!   (ADR-0029) resolves INSERTs that omit `org_unit_id`. Unset/empty → NULL → NOT NULL
 //!   violation: an insert outside a scope fails loud, never silently unscoped.
+//! - the six `app.*` audit variables of [`crate::audit_context`] (actor, correlation id,
+//!   request facts) when the request carries a
+//!   [`RequestAuditContext`](crate::audit_context::RequestAuditContext) — set by the audited
+//!   twin [`with_org_request_scope_and_audit`], on the same request-dedicated connection, so
+//!   the auditlog capture function's triggers read attribution off every write of the request.
 //!
 //! During the module-by-module re-key both fences are live at once: some tables still read
 //! `app.company_id` (ADR-0008 equality fence), org-re-keyed tables read `app.scope_unit_ids`.
@@ -31,12 +36,17 @@
 //! **The task-local is not the fence.** RLS is. Unscoped statements see the variables unset and
 //! match zero rows — fail-closed, identical to the ADR-0008 contract.
 
+use crate::audit_context::{AUDIT_CONTEXT_VARS, RequestAuditContext};
 use sqlx::PgPool;
 use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use uuid::Uuid;
+
+/// The fence variables an org request scope sets — the reset inventory's first half. Private:
+/// callers reset through the scope wrappers, which clear fence AND audit variables together.
+const ORG_FENCE_VARS: [&str; 3] = ["app.scope_unit_ids", "app.company_id", "app.acting_unit_id"];
 
 tokio::task_local! {
     /// The resolved org scope of the current request: entitled unit ids (union of subtrees,
@@ -227,6 +237,40 @@ pub async fn with_org_request_scope<F, R>(pool: &PgPool, scope: OrgScope, f: F) 
 where
     F: Future<Output = R>,
 {
+    with_org_request_scope_internal(pool, scope, None, f).await
+}
+
+/// [`with_org_request_scope`] plus the request's audit attribution (ADR-0025): the six
+/// [`RequestAuditContext`] variables are bound on the same request-dedicated connection, so
+/// every write of the request — including the ones that fire the auditlog capture function's
+/// triggers — reads the same actor and request facts off the connection it rides.
+///
+/// This is the wrapper a guarded route runs: the guard resolves the scope off the token, builds
+/// the audit context off the token's `sub` and the request itself, and the two channels travel
+/// together for the whole request. The reset discipline clears fence AND audit variables
+/// unconditionally: a pooled connection must never carry the previous request's attribution
+/// into the next one's audit rows.
+pub async fn with_org_request_scope_and_audit<F, R>(
+    pool: &PgPool,
+    scope: OrgScope,
+    audit: RequestAuditContext,
+    f: F,
+) -> Result<R, sqlx::Error>
+where
+    F: Future<Output = R>,
+{
+    with_org_request_scope_internal(pool, scope, Some(&audit), f).await
+}
+
+async fn with_org_request_scope_internal<F, R>(
+    pool: &PgPool,
+    scope: OrgScope,
+    audit: Option<&RequestAuditContext>,
+    f: F,
+) -> Result<R, sqlx::Error>
+where
+    F: Future<Output = R>,
+{
     let mut conn = pool.acquire().await?;
     sqlx::query("SELECT set_config('app.scope_unit_ids', $1, false)")
         .bind(scope.scope_unit_ids_csv())
@@ -240,6 +284,9 @@ where
         .bind(scope.acting_unit_id.to_string())
         .execute(&mut *conn)
         .await?;
+    if let Some(audit) = audit {
+        audit.bind_on(&mut conn, false).await?;
+    }
 
     let holder = Arc::new(Mutex::new(conn));
     let scope_arc = Arc::new(scope);
@@ -251,11 +298,13 @@ where
     })
     .await;
 
-    // Unconditional reset of ALL THREE fence variables (see with_request_scope for the
+    // Unconditional reset of every variable the scope may have set — fence always, audit when
+    // the request carried a context (resetting anyway when it did not costs six cheap
+    // set_config calls and keeps the inventory one list; see with_request_scope for the
     // lingering-clone reasoning — the same contract applies to every variable).
     {
         let mut guard = holder.lock().await;
-        for var in ["app.scope_unit_ids", "app.company_id", "app.acting_unit_id"] {
+        for var in ORG_FENCE_VARS.into_iter().chain(AUDIT_CONTEXT_VARS) {
             if let Err(e) = sqlx::query("SELECT set_config($1, '', false)")
                 .bind(var)
                 .execute(&mut **guard)
@@ -376,7 +425,8 @@ mod tests {
     //! Gated on `BACKBONE_ORM_RLS_DSN` (a superuser DSN). Self-contained: builds a minimal org
     //! spine + an org-fenced table + an app role, then proves the resolver and the request
     //! scope against them — the same shapes the organization/inventory migrations emit.
-    use super::{resolve_org_scope, with_org_request_scope};
+    use super::{resolve_org_scope, with_org_request_scope, with_org_request_scope_and_audit};
+    use crate::audit_context::RequestAuditContext;
     use sqlx::postgres::PgPoolOptions;
     use sqlx::PgPool;
     use uuid::Uuid;
@@ -519,5 +569,220 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(setting, "", "scope leaked onto the pooled connection");
+    }
+
+    /// The audit-context channel of the request scope (ADR-0025): the audited twin binds the
+    /// six `app.*` attribution variables on the request-dedicated connection, a row-level
+    /// trigger on a write through the scoped helpers reads them off that connection, and every
+    /// variable — fence AND audit — is cleared before the connection returns to the pool. The
+    /// unaudited twin leaves the audit variables unset (the capture function's `'system'`
+    /// fallback reads exactly that: empty).
+    ///
+    /// Runs in its own disposable database (dropped at the end), because the spine-building
+    /// sibling test above recreates the `organization` schema and would race this one's if they
+    /// shared a database — cargo runs test fns concurrently.
+    #[tokio::test]
+    async fn audit_context_binds_rides_and_clears_with_the_scope() {
+        let Some(maintenance_dsn) = dsn() else {
+            eprintln!("skipping: set BACKBONE_ORM_RLS_DSN");
+            return;
+        };
+        const PROOF_DB: &str = "backbone_orm_audit_ctx_probe";
+        let proof_dsn = {
+            let (before_db, ..) = maintenance_dsn.rsplit_once('/').unwrap();
+            format!("{before_db}/{PROOF_DB}")
+        };
+        let maintenance = admin_pool(&maintenance_dsn).await;
+        // Each statement rides its own simple-protocol query — CREATE/DROP DATABASE may not run
+        // inside a transaction block.
+        sqlx::raw_sql(&format!("DROP DATABASE IF EXISTS {PROOF_DB} WITH (FORCE)"))
+            .execute(&maintenance)
+            .await
+            .unwrap();
+        sqlx::raw_sql(&format!("CREATE DATABASE {PROOF_DB}"))
+            .execute(&maintenance)
+            .await
+            .unwrap();
+        let admin = admin_pool(&proof_dsn).await;
+
+        let root = Uuid::new_v4();
+        let company = Uuid::new_v4();
+        let role = role_name();
+        // The spine + fenced table of the sibling test, plus the audit probe: a table and an
+        // AFTER INSERT trigger capturing two of the attribution variables — the minimal shape
+        // of the auditlog module's capture function, whose contract this pins without the
+        // framework crate depending on a domain module.
+        sqlx::raw_sql(&format!(
+            "CREATE SCHEMA organization; \
+             CREATE TABLE organization.org_units ( \
+                 id uuid PRIMARY KEY, kind text NOT NULL, parent_id uuid, \
+                 code text, name text NOT NULL, metadata jsonb NOT NULL DEFAULT '{{}}' \
+             ); \
+             CREATE OR REPLACE FUNCTION organization.org_unit_subtree(p_roots uuid[]) \
+                 RETURNS SETOF uuid LANGUAGE sql STABLE AS $$ \
+                 WITH RECURSIVE tree AS ( \
+                     SELECT o.id FROM organization.org_units o WHERE o.id = ANY(p_roots) \
+                     UNION ALL \
+                     SELECT o.id FROM organization.org_units o JOIN tree t ON o.parent_id = t.id \
+                 ) SELECT id FROM tree $$; \
+             CREATE OR REPLACE FUNCTION organization.org_unit_root() RETURNS uuid \
+                 LANGUAGE sql STABLE AS $$ \
+                 SELECT id FROM organization.org_units WHERE kind = 'root' $$; \
+             CREATE SCHEMA org_scope_test; \
+             CREATE TABLE org_scope_test.t (id uuid PRIMARY KEY, org_unit_id uuid NOT NULL \
+                 DEFAULT nullif(current_setting('app.acting_unit_id', true), '')::uuid, code text); \
+             ALTER TABLE org_scope_test.t ENABLE ROW LEVEL SECURITY; \
+             ALTER TABLE org_scope_test.t FORCE ROW LEVEL SECURITY; \
+             CREATE POLICY t_org_isolation ON org_scope_test.t FOR ALL \
+                 USING (org_unit_id = ANY(string_to_array(current_setting('app.scope_unit_ids', true), ',')::uuid[])) \
+                 WITH CHECK (org_unit_id = ANY(string_to_array(current_setting('app.scope_unit_ids', true), ',')::uuid[])); \
+             CREATE TABLE org_scope_test.audit_probe ( \
+                 id bigserial PRIMARY KEY, actor text NOT NULL, correlation_id text NOT NULL \
+             ); \
+             CREATE FUNCTION org_scope_test.capture_probe() RETURNS trigger LANGUAGE plpgsql AS $$ \
+                 BEGIN \
+                     INSERT INTO org_scope_test.audit_probe (actor, correlation_id) \
+                     VALUES (current_setting('app.actor', true), \
+                             current_setting('app.correlation_id', true)); \
+                     RETURN NULL; \
+                 END $$; \
+             CREATE TRIGGER t_audit_probe AFTER INSERT ON org_scope_test.t \
+                 FOR EACH ROW EXECUTE FUNCTION org_scope_test.capture_probe(); \
+             CREATE ROLE {role} LOGIN PASSWORD 'orgpw'; \
+             GRANT USAGE ON SCHEMA organization, org_scope_test TO {role}; \
+             GRANT SELECT ON organization.org_units TO {role}; \
+             GRANT SELECT, INSERT ON org_scope_test.t TO {role}; \
+             GRANT INSERT ON org_scope_test.audit_probe TO {role}; \
+             GRANT USAGE, SELECT ON SEQUENCE org_scope_test.audit_probe_id_seq TO {role};",
+        ))
+        .execute(&admin)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO organization.org_units (id, kind, parent_id, code, name) VALUES \
+                 ($1, 'root',    NULL, 'ROOT', 'Tenant root'), \
+                 ($2, 'company', $1,   'CO',   'Company')",
+        )
+        .bind(root)
+        .bind(company)
+        .execute(&admin)
+        .await
+        .unwrap();
+
+        let pool = app_pool(&proof_dsn, &role).await;
+        let scope = {
+            let mut conn = admin.acquire().await.unwrap();
+            resolve_org_scope(&mut conn, company, &[]).await.unwrap()
+        };
+
+        // 1. The audited twin: every attribution variable is set on the connection writes ride
+        //    (inventory proof, same style as the fence-variable inventory above), and a trigger
+        //    on a real insert reads them — the seam the auditlog capture function depends on.
+        let audit = RequestAuditContext {
+            actor: "user-77".to_string(),
+            correlation_id: "corr-77".to_string(),
+            client_ip: "203.0.113.7".to_string(),
+            user_agent: "probe-agent/1.0".to_string(),
+            http_method: "POST".to_string(),
+            resource_path: "/api/v1/probe/widgets".to_string(),
+        };
+        let inserted = Uuid::new_v4();
+        let settings: Vec<(String, String)> = with_org_request_scope_and_audit(
+            &pool,
+            scope.clone(),
+            audit.clone(),
+            async {
+                crate::company_scope::execute_scoped(
+                    &pool,
+                    sqlx::query("INSERT INTO org_scope_test.t (id, code) VALUES ($1, 'AUDITED')")
+                        .bind(inserted),
+                )
+                .await
+                .unwrap();
+                crate::company_scope::fetch_all_scoped(
+                    &pool,
+                    sqlx::query_as::<_, (String, String)>(
+                        "SELECT s.name, current_setting(s.name, true) FROM unnest(ARRAY[\
+                         'app.actor','app.correlation_id','app.client_ip','app.user_agent',\
+                         'app.http_method','app.resource_path']) AS s(name)",
+                    ),
+                )
+                .await
+                .unwrap()
+            },
+        )
+        .await
+        .unwrap();
+        for (var, want) in audit.pairs() {
+            let got = settings
+                .iter()
+                .find(|(n, _)| n == var)
+                .map(|(_, v)| v.as_str())
+                .unwrap_or_else(|| panic!("{var} missing from the inventory query"));
+            assert_eq!(got, want, "{var} must ride the request connection");
+        }
+        // The fence still works under the audited twin: the acting-unit DEFAULT filled the row.
+        let landed: Uuid = sqlx::query_scalar("SELECT org_unit_id FROM org_scope_test.t WHERE id = $1")
+            .bind(inserted)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+        assert_eq!(landed, company, "audit channel must not disturb the fence");
+        let probe: (String, String) =
+            sqlx::query_as("SELECT actor, correlation_id FROM org_scope_test.audit_probe ORDER BY id DESC LIMIT 1")
+                .fetch_one(&admin)
+                .await
+                .unwrap();
+        assert_eq!(probe, ("user-77".to_string(), "corr-77".to_string()),
+            "a row-level trigger on the insert must read the bound attribution");
+
+        // 2. Pool hygiene: after the scope, no audit variable survives on the pooled connection.
+        let mut after = pool.acquire().await.unwrap();
+        for var in crate::audit_context::AUDIT_CONTEXT_VARS {
+            let v: String = sqlx::query_scalar("SELECT current_setting($1, true)")
+                .bind(var)
+                .fetch_one(&mut *after)
+                .await
+                .unwrap();
+            assert_eq!(v, "", "{var} leaked onto the pooled connection");
+        }
+        drop(after);
+
+        // 3. The unaudited twin leaves the channel unset — the capture function's `'system'`
+        //    fallback and NULL columns read exactly this empty wire form.
+        let plain = Uuid::new_v4();
+        with_org_request_scope(&pool, scope, async {
+            crate::company_scope::execute_scoped(
+                &pool,
+                sqlx::query("INSERT INTO org_scope_test.t (id, code) VALUES ($1, 'PLAIN')")
+                    .bind(plain),
+            )
+            .await
+            .unwrap();
+        })
+        .await
+        .unwrap();
+        let probe: (String, String) =
+            sqlx::query_as("SELECT actor, correlation_id FROM org_scope_test.audit_probe ORDER BY id DESC LIMIT 1")
+                .fetch_one(&admin)
+                .await
+                .unwrap();
+        assert_eq!(probe, (String::new(), String::new()),
+            "without an audit context the channel reads empty, never the previous request's");
+
+        // Zero residue: schemas + role in the proof database, then the database itself.
+        sqlx::raw_sql(&format!(
+            "DROP SCHEMA organization CASCADE; DROP SCHEMA org_scope_test CASCADE; DROP ROLE {role};"
+        ))
+        .execute(&admin)
+        .await
+        .unwrap();
+        pool.close().await;
+        admin.close().await;
+        sqlx::raw_sql(&format!("DROP DATABASE IF EXISTS {PROOF_DB} WITH (FORCE);"))
+            .execute(&maintenance)
+            .await
+            .unwrap();
+        maintenance.close().await;
     }
 }
