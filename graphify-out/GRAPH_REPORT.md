@@ -1,16 +1,16 @@
-# Graph Report - backbone-framework  (2026-07-22)
+# Graph Report - backbone-framework  (2026-09-11)
 
 ## Corpus Check
-- 303 files · ~334,359 words
+- 319 files · ~357,551 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 8414 nodes · 20224 edges · 324 communities (316 shown, 8 thin omitted)
-- Extraction: 100% EXTRACTED · 0% INFERRED · 0% AMBIGUOUS · INFERRED: 51 edges (avg confidence: 0.8)
+- 8755 nodes · 20982 edges · 336 communities (328 shown, 8 thin omitted)
+- Extraction: 100% EXTRACTED · 0% INFERRED · 0% AMBIGUOUS · INFERRED: 58 edges (avg confidence: 0.8)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `1654f880`
+- Built from commit: `93bc559c`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -61,7 +61,7 @@
 - bulk.rs
 - ConfigurationBus
 - ServiceResult
-- company_scope.rs
+- request_conn
 - Backbone Cache
 - Backbone Search
 - Backbone Auth
@@ -96,7 +96,7 @@
 - backbone-search/src/types.rs
 - crud_event.rs
 - PostgresRepository<T>
-- Self
+- GlPostLine
 - messaging_tests.rs
 - backbone-search/src/traits.rs
 - backbone-core/src/integration.rs
@@ -140,7 +140,7 @@
 - JobSchedulerBuilder
 - PgCronManager
 - MonitoringDashboard
-- monitoring_tests.rs
+- resolve.rs
 - Result
 - InMemoryJobStorage
 - metrics.rs
@@ -174,8 +174,8 @@
 - value_object.rs
 - EmailServiceStats
 - SimpleHealthServer
-- QueueStats
-- RabbitMQConfig
+- backbone-queue/src/lib.rs
+- tenant_route
 - api_integration.rs
 - real_world_scenarios.rs
 - 📡 Backbone Core — API Reference
@@ -198,7 +198,7 @@
 - .get_or_build
 - PasswordService
 - auth_service_tests.rs
-- .get_handler
+- router.rs
 - routes.rs
 - TenantId
 - Changelog
@@ -229,7 +229,7 @@
 - backbone-tenant/src/lib.rs
 - Developer Guide
 - The reasoning
-- SimplePermission
+- org_guard.rs
 - 🏛️ Backbone Core — Architecture
 - OutboxRecord
 - SimpleMessageProcessor
@@ -254,12 +254,12 @@
 - permissions.rs
 - cli.rs
 - main
-- ConnectionManager
+- org_scope.rs
 - parser.rs
 - validate_schema
 - ProcessorStats
 - run_all_tests
-- .build
+- router_live.rs
 - Maintainer Guide
 - Philosophy & Motivation
 - backbone-auth/src/audit.rs
@@ -268,30 +268,30 @@
 - .from_request
 - HealthConfig
 - redis_integration.rs
-- provision.rs
+- org.rs
 - Contribution Guide
 - Backbone Framework
 - MonitoringConfig
 - state_machine.rs
 - raw_query.rs
-- once
+- OrgIssuer
 - Advanced Examples
 - Message Creation
 - QueueService
 - Architecture
 - .new
-- BackboneCrudHandler
+- org_session_live.rs
 - filter/validation.rs
 - 📋 Best Practices
 - RetryConfig
-- UserRepository
-- ApiResponse<T>
+- Self
+- idempotency.rs
 - backbone-graphql/src/error.rs
 - main
 - main
 - 🔧 Advanced Usage
 - OutboxError
-- relay_runner.rs
+- company_scope.rs
 - main
 - main
 - Queue Operations
@@ -299,7 +299,7 @@
 - Common Issues
 - ADR-0001: Distribute via git tags, not crates.io
 - AuthorizationServiceTrait
-- ListRequest
+- generic_repository.rs
 - Projector
 - PaginationInfo
 - 🔧 Best Practices
@@ -310,33 +310,43 @@
 - Advanced Usage
 - Overview
 - Backend Implementations
-- Real-World Examples
+- Command
 - Testing
 - Backbone Framework — Handbook
-- BackboneHttpHandler
+- backbone-storage/src/lib.rs
 - 📋 Predefined Job Types
 - 🔧 Configuration Options
 - 🚀 Quick Start
 - 🐛 Troubleshooting
 - 📊 Monitoring & Health Checks
 - Monitoring and Metrics
-- SearchService
+- migrate_legacy.rs
 - backbone-tenant
 - GraphQLListResult<E>
 - openapi.rs
 - backbone-outbox/README.md
+- User
+- logging_config.rs
+- rls_scope_live.rs
+- OrgContext
+- ⚙️ Backbone Core — Configuration
+- ADR-0002: Self-describing crates; no workspace dependency inheritance
+- ADR-0003: Protocol-agnostic core with pluggable backends
+- ADR-0004: One version for the whole workspace
+- CqrsReadService
+- Configuration Reference
 
 ## God Nodes (most connected - your core abstractions)
-1. `String` - 993 edges
-2. `T` - 164 edges
-3. `QueueMessage` - 90 edges
-4. `Job` - 62 edges
-5. `RepositoryError` - 54 edges
-6. `ApiResponse` - 52 edges
-7. `StorageFile` - 49 edges
-8. `JobScheduler` - 47 edges
-9. `QueueManager` - 40 edges
-10. `GenericCrudService<E, C, U, R>` - 39 edges
+1. `T` - 164 edges
+2. `QueueMessage` - 90 edges
+3. `Job` - 62 edges
+4. `RepositoryError` - 54 edges
+5. `ApiResponse` - 52 edges
+6. `StorageFile` - 49 edges
+7. `JobScheduler` - 47 edges
+8. `QueueManager` - 40 edges
+9. `GenericCrudService<E, C, U, R>` - 39 edges
+10. `HealthChecker` - 38 edges
 
 ## Surprising Connections (you probably didn't know these)
 - `RegisterRequest` --references--> `String`  [EXTRACTED]
@@ -347,22 +357,22 @@
   backbone-cache/examples/basic_usage.rs → backbone-core/src/persistence/adapter.rs
 - `CartSummary` --references--> `String`  [EXTRACTED]
   backbone-cache/examples/real_world_scenarios.rs → backbone-core/src/persistence/adapter.rs
-- `EmailError` --references--> `String`  [EXTRACTED]
-  backbone-email/src/lib.rs → backbone-core/src/persistence/adapter.rs
+- `seed_tenant()` --calls--> `row()`  [INFERRED]
+  backbone-tenant/tests/router_live.rs → backbone-core/src/http.rs
 
 ## Import Cycles
 - 1-file cycle: `backbone-queue/src/fifo.rs -> backbone-queue/src/fifo.rs`
 - 2-file cycle: `backbone-orm/src/query_builder.rs -> backbone-orm/src/raw_query.rs -> backbone-orm/src/query_builder.rs`
 
-## Communities (324 total, 8 thin omitted)
+## Communities (336 total, 8 thin omitted)
 
 ### Community 0 - "Result"
 Cohesion: 0.05
-Nodes (51): AuthContext, main(), MockMongoUserRepository, MockPostgresUserRepository, MongoUserRepository, PostgresSessionRepository, PostgresUserRepository, Box (+43 more)
+Nodes (52): AuthContext, main(), MockMongoUserRepository, MockPostgresUserRepository, MongoUserRepository, PostgresSessionRepository, PostgresUserRepository, Box (+44 more)
 
 ### Community 1 - "jwt.rs"
 Cohesion: 0.06
-Nodes (48): Algorithm, Claims, JwtAlgorithm, JwtKey, JwtService, KeyMaterial, KeyRotationConfig, make_test_claims() (+40 more)
+Nodes (48): Claims, JwtAlgorithm, JwtKey, JwtService, KeyMaterial, KeyRotationConfig, make_test_claims(), make_test_refresh_claims() (+40 more)
 
 ### Community 2 - "AlertEvent"
 Cohesion: 0.06
@@ -373,8 +383,8 @@ Cohesion: 0.05
 Nodes (32): batch_process_webhooks(), main(), monitor_webhook_processing(), process_incoming_webhook(), process_priority_webhooks(), retry_failed_webhook(), Box, Error (+24 more)
 
 ### Community 4 - "RedisCache"
-Cohesion: 0.08
-Nodes (42): LargeData, LoadTestConfig, main(), NestedData, OperationType, PerformanceMetrics, PerformanceTestSuite, Box (+34 more)
+Cohesion: 0.06
+Nodes (53): LargeData, LoadTestConfig, main(), NestedData, OperationType, PerformanceMetrics, PerformanceTestSuite, Box (+45 more)
 
 ### Community 5 - "backbone-storage/src/compression.rs"
 Cohesion: 0.06
@@ -382,19 +392,19 @@ Nodes (45): CompressionAlgorithm, CompressionConfig, CompressionQuality, Compres
 
 ### Community 6 - "Error"
 Cohesion: 0.09
-Nodes (25): CrudService, AdapterError, CrudServiceAdapter, CrudServiceAdapter<R, E, C, U>, Arc, C, E, Error (+17 more)
+Nodes (28): BackboneHttpHandler, CrudService, Send, Sync, AdapterError, CrudServiceAdapter, CrudServiceAdapter<R, E, C, U>, Arc (+20 more)
 
 ### Community 7 - "MemoryCache"
-Cohesion: 0.06
-Nodes (43): AdvancedCacheManager, ApiRequest, CachedResponse, CacheStrategy, main(), ProfileData, Box, DateTime (+35 more)
+Cohesion: 0.10
+Nodes (32): AdvancedCacheManager, ApiRequest, CachedResponse, CacheStrategy, main(), ProfileData, Box, DateTime (+24 more)
 
 ### Community 8 - "ModuleRegistry"
 Cohesion: 0.05
 Nodes (33): BackboneModule, MigrationInfo, CircularA, CircularB, ModuleRegistry, ModuleRegistryError, Arc, Default (+25 more)
 
 ### Community 9 - "Result"
-Cohesion: 0.08
-Nodes (27): and_conditions(), build_update_parts(), bulk_update_rows(), company_fence(), fetch_by_ids_as_json(), GenericCrudRepository, GenericCrudRepository<T, D>, GenericCrudRepository<T, HardDelete> (+19 more)
+Cohesion: 0.10
+Nodes (16): and_conditions(), build_update_parts(), bulk_update_rows(), GenericCrudRepository<T, D>, GenericCrudRepository<T, HardDelete>, GenericCrudRepository<T, SoftDelete>, id_in_placeholders(), HashMap (+8 more)
 
 ### Community 10 - "JobError"
 Cohesion: 0.06
@@ -409,20 +419,20 @@ Cohesion: 0.07
 Nodes (43): Display, Error, Formatter, From, Result, UseCaseError, entity_validator_collects_all_errors(), EntityValidator (+35 more)
 
 ### Community 13 - "RedisQueue"
-Cohesion: 0.08
-Nodes (38): RedisQueue, RedisQueueBuilder, RedisQueueConfig, Client, Default, Into, Option, QueueResult (+30 more)
+Cohesion: 0.07
+Nodes (64): create_test_monitor(), create_test_queue(), Box, Error, Result, test_alert_event_creation(), test_alert_thresholds_default(), test_console_alert_callback() (+56 more)
 
 ### Community 14 - "backbone-maintenance/src/lib.rs"
-Cohesion: 0.06
-Nodes (58): AtomicBool, admin_toggle_handler(), apply_update_estimated_end_at_empty_string_clears(), apply_update_toggle_off_clears_started_at(), apply_update_toggle_on_stamps_started_at(), build_503(), constant_time_eq(), default_config_has_safe_allow_paths() (+50 more)
+Cohesion: 0.05
+Nodes (67): AtomicBool, admin_toggle_handler(), apply_update_estimated_end_at_empty_string_clears(), apply_update_toggle_off_clears_started_at(), apply_update_toggle_on_stamps_started_at(), build_503(), constant_time_eq(), default_config_has_safe_allow_paths() (+59 more)
 
 ### Community 15 - "SecurityEngine"
-Cohesion: 0.08
-Nodes (35): default_config(), from_env(), require_env_non_empty(), Box, StorageConfig, StorageResult, test_default_config(), test_require_env_non_empty_blank() (+27 more)
+Cohesion: 0.12
+Nodes (24): ContentAnalysis, DigitalSignature, ExecutableMetadata, FileCategory, MalwareSignature, Default, FileCategory, Option (+16 more)
 
 ### Community 16 - "cqrs.rs"
-Cohesion: 0.06
-Nodes (51): Command, CommandDispatcher, CommandHandler, C, Error, Result, Send, Sync (+43 more)
+Cohesion: 0.18
+Nodes (24): delete_command_carries_id(), GenericCommandHandler, GenericCommandHandler<E, C, U, S>, GenericCreateCommand, GenericDeleteCommand, GenericGetQuery, GenericListDeletedQuery, GenericListQuery (+16 more)
 
 ### Community 17 - "usecase.rs"
 Cohesion: 0.09
@@ -434,7 +444,7 @@ Nodes (31): all_of_denies_when_any_denies(), AllOfPolicy, AllOfPolicy<E>, any_of
 
 ### Community 19 - "StorageFile"
 Cohesion: 0.07
-Nodes (37): AccessControlConfig, AccessPolicy, ByteRange, CorsConfig, EncryptionAlgorithm, EncryptionConfig, FileMetadata, GcsStorageConfig (+29 more)
+Nodes (36): AccessControlConfig, AccessPolicy, CorsConfig, EncryptionAlgorithm, EncryptionConfig, FileMetadata, GcsStorageConfig, HttpMethod (+28 more)
 
 ### Community 20 - "QueueResult"
 Cohesion: 0.08
@@ -442,7 +452,7 @@ Nodes (30): DeduplicationCache, DeduplicationCacheBackend, DeduplicationConfig, 
 
 ### Community 21 - "http.rs"
 Cohesion: 0.05
-Nodes (38): BatchIdsRequest, bulk_patch_request_parses_per_item_shape(), bulk_patch_request_parses_shared_shape(), BulkCreateRequest, BulkPatchItem, BulkPatchRequest, BulkResponse, camel_to_snake_case() (+30 more)
+Nodes (72): JsonOrForm, AccessScope, ApiResponse<T>, apply_field_security(), BackboneCrudHandler, BackboneCrudHandler<S, E, C, U, R>, batch_size_error(), BatchIdsRequest (+64 more)
 
 ### Community 22 - "JobId"
 Cohesion: 0.06
@@ -450,27 +460,27 @@ Nodes (22): JobExecutionAttempt, JobExecutionContext, JobExecutionResult, JobId,
 
 ### Community 23 - "LocalStorage"
 Cohesion: 0.09
-Nodes (23): LocalStorage, LocalStorageBuilder, AsyncRead, AsyncWrite, Box, Bytes, Default, HashMap (+15 more)
+Nodes (24): LocalStorage, LocalStorageBuilder, AsyncRead, AsyncWrite, Box, Bytes, Default, HashMap (+16 more)
 
 ### Community 24 - "String"
-Cohesion: 0.07
-Nodes (37): AuthContext, AuthExtractor, AuthMiddleware, Self, Vec, CacheConfig, CacheError, CacheKey (+29 more)
+Cohesion: 0.08
+Nodes (28): AuthContext, AuthExtractor, AuthMiddleware, Self, Vec, CacheConfig, CacheError, CacheKey (+20 more)
 
 ### Community 25 - "GenericCrudService<E, C, U, R>"
-Cohesion: 0.13
-Nodes (19): check_batch_size(), first_duplicate_id(), GenericCrudService<E, C, U, R>, InMemoryWidgetRepo, C, Clone, CrudRepository, E (+11 more)
+Cohesion: 0.14
+Nodes (15): check_batch_size(), GenericCrudService<E, C, U, R>, InMemoryWidgetRepo, C, Clone, CrudRepository, E, HashMap (+7 more)
 
 ### Community 26 - "T"
 Cohesion: 0.08
-Nodes (36): AlwaysFalse, AlwaysFalse<T>, AlwaysTrue, AlwaysTrue<T>, AndSpecification, AndSpecification<L, R, T>, IsActive, NotSpecification (+28 more)
+Nodes (37): AlwaysFalse, AlwaysFalse<T>, AlwaysTrue, AlwaysTrue<T>, AndSpecification, AndSpecification<L, R, T>, IsActive, NotSpecification (+29 more)
 
 ### Community 27 - "ElasticsearchSearch"
-Cohesion: 0.09
-Nodes (15): ElasticsearchConfig, ElasticsearchSearch, ElasticsearchSearchBuilder, Default, HashMap, Into, Option, Result (+7 more)
+Cohesion: 0.10
+Nodes (13): ElasticsearchConfig, ElasticsearchSearch, ElasticsearchSearchBuilder, Default, HashMap, Into, Option, Result (+5 more)
 
 ### Community 28 - "TaskService"
-Cohesion: 0.11
-Nodes (21): demonstrate_error_handling(), main(), DateTime, Entity, HashMap, Mutex, Option, Result (+13 more)
+Cohesion: 0.15
+Nodes (17): demonstrate_error_handling(), main(), Entity, HashMap, Mutex, Result, Self, User (+9 more)
 
 ### Community 29 - "EmailAddress"
 Cohesion: 0.09
@@ -509,8 +519,8 @@ Cohesion: 0.09
 Nodes (23): detect_mime_type(), LocalStorage, LocalStorageBuilder, md5_compute(), AsyncRead, AsyncWrite, Box, Bytes (+15 more)
 
 ### Community 38 - "ServiceContainer"
-Cohesion: 0.08
-Nodes (25): Any, Application, ApplicationBuilder, Module, ModuleError, Arc, AtomicU32, Box (+17 more)
+Cohesion: 0.09
+Nodes (24): Application, ApplicationBuilder, Module, ModuleError, Arc, AtomicU32, Box, Default (+16 more)
 
 ### Community 39 - "InMemoryRepository<E>"
 Cohesion: 0.10
@@ -518,7 +528,7 @@ Nodes (20): InMemoryRepository, InMemoryRepository<E>, CrudRepository, DateTime,
 
 ### Community 40 - "ServiceRegistry"
 Cohesion: 0.09
-Nodes (30): HealthStatus, ModuleService, RegistryHealth, RegistryStatistics, Arc, DateTime, Default, HashMap (+22 more)
+Nodes (31): Any, HealthStatus, ModuleService, RegistryHealth, RegistryStatistics, Arc, DateTime, Default (+23 more)
 
 ### Community 41 - "QueueManager"
 Cohesion: 0.10
@@ -540,9 +550,9 @@ Nodes (22): ConfigChangeEvent, ConfigurationBus, ConfigValue, Arc, DateTime, Def
 Cohesion: 0.10
 Nodes (26): create_and_query_roundtrip(), CreateItemInput, FakeItemService, GenericGraphQLResolver, GenericGraphQLResolver<E, C, U, S>, GraphQLCapableService, GraphQLListResult, GraphQLPaginationInput (+18 more)
 
-### Community 46 - "company_scope.rs"
-Cohesion: 0.14
-Nodes (48): admin_pool(), app_pool(), bind_company(), bind_company_on(), bind_current_company(), current_company(), dsn(), execute_scoped() (+40 more)
+### Community 46 - "request_conn"
+Cohesion: 0.29
+Nodes (27): bind_company(), bind_company_on(), bind_current_company(), current_company(), execute_scoped(), fetch_all_rows_scoped(), fetch_all_scoped(), fetch_one_row_scoped() (+19 more)
 
 ### Community 47 - "Backbone Cache"
 Cohesion: 0.04
@@ -561,8 +571,8 @@ Cohesion: 0.10
 Nodes (21): Arc, DateTime, Default, EmailResult, Error, HashMap, Into, Message (+13 more)
 
 ### Community 51 - "EventEnvelope"
-Cohesion: 0.10
-Nodes (25): EventBus, EventBus<E>, EventBusConfig, Arc, Clone, DateTime, Default, E (+17 more)
+Cohesion: 0.11
+Nodes (24): EventBus, EventBus<E>, EventBusConfig, Arc, Clone, DateTime, Default, E (+16 more)
 
 ### Community 52 - "MessageCompressor"
 Cohesion: 0.10
@@ -570,7 +580,7 @@ Nodes (20): CompressedMessageBuilder, CompressionAlgorithm, CompressionConfig, C
 
 ### Community 53 - "User"
 Cohesion: 0.12
-Nodes (16): main(), DateTime, Entity, HashMap, Mutex, Option, Result, Self (+8 more)
+Nodes (15): main(), DateTime, Entity, HashMap, Mutex, Option, Result, Self (+7 more)
 
 ### Community 54 - "SqsQueue"
 Cohesion: 0.13
@@ -597,8 +607,8 @@ Cohesion: 0.09
 Nodes (17): HealthChecker, HealthCheckerBuilder, Arc, Box, Clone, Debug, Default, Duration (+9 more)
 
 ### Community 60 - "Self"
-Cohesion: 0.09
-Nodes (22): ActionExecutor, event_matches(), Arc, C, Default, HashMap, Into, Option (+14 more)
+Cohesion: 0.10
+Nodes (21): ActionExecutor, event_matches(), Arc, C, Default, HashMap, Into, Option (+13 more)
 
 ### Community 61 - "JobSchedulerBuilder"
 Cohesion: 0.14
@@ -634,7 +644,7 @@ Nodes (20): AdvancedSecurityService, main(), Box, Error, HashMap, Instant, Optio
 
 ### Community 69 - "GrpcResponse"
 Cohesion: 0.11
-Nodes (27): BackboneGrpcService, GenericGrpcService, GenericGrpcService<E, C, U, S>, GrpcBulkCreateRequest, GrpcBulkResponse, GrpcCapableService, GrpcConfig, GrpcListResponse (+19 more)
+Nodes (28): BackboneGrpcService, GenericGrpcService, GenericGrpcService<E, C, U, S>, GrpcBulkCreateRequest, GrpcBulkResponse, GrpcCapableService, GrpcConfig, GrpcListRequest (+20 more)
 
 ### Community 70 - "MonitoringService"
 Cohesion: 0.13
@@ -653,8 +663,8 @@ Cohesion: 0.10
 Nodes (18): MinIOStorage, AsyncRead, AsyncWrite, Box, Bytes, HashMap, Item, Option (+10 more)
 
 ### Community 74 - "ApiResponse"
-Cohesion: 0.14
-Nodes (18): demonstrate_advanced_pagination(), main(), Product, ProductService, DateTime, Entity, HashMap, Mutex (+10 more)
+Cohesion: 0.15
+Nodes (17): demonstrate_advanced_pagination(), main(), Product, ProductService, DateTime, Entity, HashMap, Mutex (+9 more)
 
 ### Community 75 - "MockQueueService"
 Cohesion: 0.11
@@ -669,36 +679,36 @@ Cohesion: 0.09
 Nodes (29): create_test_fifo_message(), MockQueueService, Arc, Mutex, Option, QueueResult, Self, Value (+21 more)
 
 ### Community 78 - "backbone-search/src/types.rs"
-Cohesion: 0.13
-Nodes (34): Aggregation, AggregationType, DocumentMetadata, FacetBucket, FacetConfig, FacetResult, FacetSort, FacetType (+26 more)
+Cohesion: 0.11
+Nodes (37): Aggregation, AggregationType, DocumentMetadata, FacetBucket, FacetConfig, FacetResult, FacetSort, FacetType (+29 more)
 
 ### Community 79 - "crud_event.rs"
 Cohesion: 0.10
-Nodes (25): aggregate_id_roundtrips(), CrudEvent, CrudEvent<E>, CrudEventPublisher, event_type_names_are_stable(), EventMetadata, FakeEntity, meta() (+17 more)
+Nodes (22): aggregate_id_roundtrips(), CrudEvent, CrudEvent<E>, event_type_names_are_stable(), EventMetadata, FakeEntity, meta(), metadata_correlation_id() (+14 more)
 
 ### Community 80 - "PostgresRepository<T>"
 Cohesion: 0.09
 Nodes (20): DatabaseOperations, Entity, FilterCondition, FilterParams, PaginationInfo, PaginationParams, PostgresRepository, PostgresRepository<T> (+12 more)
 
-### Community 81 - "Self"
-Cohesion: 0.26
-Nodes (11): JsonOrForm, BackboneCrudHandler<S, E, C, U, R>, batch_size_error(), Arc, C, IntoResponse, Path, Response (+3 more)
+### Community 81 - "GlPostLine"
+Cohesion: 0.09
+Nodes (27): AccountingPostEnvelope, GlPostAck, GlPostLine, GlPostRejected, GlPostSink, Decimal, Into, Option (+19 more)
 
 ### Community 82 - "messaging_tests.rs"
 Cohesion: 0.09
 Nodes (18): CollectingIntegrationHandler, FailingIntegrationHandler, Arc, AtomicU32, Self, Vec, test_concurrent_publishing(), test_config_disables_dead_letter() (+10 more)
 
 ### Community 83 - "backbone-search/src/traits.rs"
-Cohesion: 0.14
-Nodes (34): Analyzer, BulkError, BulkOperation, BulkOperationResult, BulkOperationType, BulkResult, CountPoint, DynamicMapping (+26 more)
+Cohesion: 0.13
+Nodes (37): Analyzer, BulkError, BulkOperation, BulkOperationResult, BulkOperationType, BulkResult, CountPoint, DynamicMapping (+29 more)
 
 ### Community 84 - "backbone-core/src/integration.rs"
 Cohesion: 0.10
 Nodes (23): A, adapter_maps_fields_correctly(), EventBridge, EventBridge<External, Internal, A>, ExternalUserEvent, identity_adapter(), identity_adapter_roundtrips(), IdentityAdapter (+15 more)
 
 ### Community 85 - "backbone-core/src/service.rs"
-Cohesion: 0.15
-Nodes (25): bulk_partial_update_success(), bulk_restore_and_restore_all(), bulk_soft_delete_is_all_or_nothing_on_missing_id(), bulk_soft_delete_rejects_oversized_batch(), bulk_soft_delete_success(), bulk_soft_delete_tolerates_duplicate_ids(), bulk_update_is_all_or_nothing_on_missing_id(), bulk_update_rejects_duplicate_ids() (+17 more)
+Cohesion: 0.13
+Nodes (29): bulk_partial_update_success(), bulk_restore_and_restore_all(), bulk_soft_delete_is_all_or_nothing_on_missing_id(), bulk_soft_delete_rejects_oversized_batch(), bulk_soft_delete_success(), bulk_soft_delete_tolerates_duplicate_ids(), bulk_update_is_all_or_nothing_on_missing_id(), bulk_update_rejects_duplicate_ids() (+21 more)
 
 ### Community 86 - "JobSchedulerConfig"
 Cohesion: 0.10
@@ -725,20 +735,20 @@ Cohesion: 0.08
 Nodes (17): parse_filters(), test_audit_metadata_does_not_affect_other_fields(), test_audit_metadata_rewrite_bracket(), test_audit_metadata_rewrite_orderby(), test_audit_metadata_rewrite_simple_equality(), test_enum_normalization_already_snake_case(), test_enum_normalization_bracket_notation(), test_enum_normalization_does_not_affect_builtin_types() (+9 more)
 
 ### Community 92 - "AuthService"
-Cohesion: 0.16
-Nodes (13): AuthResult, AuthService, AuthServiceConfig, email_regex(), Default, Option, Result, Self (+5 more)
+Cohesion: 0.15
+Nodes (15): AuthResult, AuthService, AuthServiceConfig, email_regex(), Default, Option, Result, Self (+7 more)
 
 ### Community 93 - "Backbone Core Examples"
 Cohesion: 0.06
 Nodes (33): 1. **Basic Usage** (`basic_usage.rs`), 2. **Advanced Pagination** (`advanced_pagination.rs`), 3. **E-commerce Scenario** (`scenario_ecommerce.rs`), 4. **Error Handling** (`error_handling.rs`), Adding Custom Fields, Adding New Examples, 📚 Additional Resources, Async Database Operations (+25 more)
 
 ### Community 94 - "EventError"
-Cohesion: 0.10
-Nodes (19): EventError, Error, From, Into, Self, NoOpEventBus, NoOpPublisher, NoOpPublisher<E> (+11 more)
+Cohesion: 0.09
+Nodes (20): EventEnvelopeBuilder, EventError, Error, From, Into, Self, NoOpEventBus, NoOpPublisher (+12 more)
 
 ### Community 95 - "SimpleUser"
-Cohesion: 0.11
-Nodes (17): AuthContext, AuthResultEnhanced, PasswordPolicy, PasswordResetConfirmation, PasswordResetRequest, DateTime, Default, Option (+9 more)
+Cohesion: 0.10
+Nodes (19): AuthContext, AuthenticatableUser, PasswordPolicy, PasswordResetConfirmation, PasswordResetRequest, Clone, DateTime, Default (+11 more)
 
 ### Community 96 - "backbone-authorization/src/types.rs"
 Cohesion: 0.11
@@ -753,7 +763,7 @@ Cohesion: 0.16
 Nodes (12): ComponentStatus, HealthReport, HealthStatus, HealthSummary, DateTime, Default, Duration, HashMap (+4 more)
 
 ### Community 99 - "QueryValue"
-Cohesion: 0.13
+Cohesion: 0.14
 Nodes (9): QueryBuilder, QueryValue, NaiveDateTime, Option, PgPool, Result, Self, Uuid (+1 more)
 
 ### Community 100 - "orm_tests.rs"
@@ -788,13 +798,9 @@ Nodes (4): Entity, NaiveDateTime, Option, TestUser
 Cohesion: 0.10
 Nodes (17): RateLimiter<B>, B, Self, RateLimitMiddleware<B>, RateLimitMiddleware<crate::redis_storage::RedisStorage>, RateLimitMiddleware<InMemoryStorage>, Result, Self (+9 more)
 
-### Community 108 - "docs/architecture.md"
-Cohesion: 0.14
-Nodes (16): ADR-0002: Self-describing crates; no workspace dependency inheritance, Alternatives considered, Consequences, Context, Decision, ADR-0003: Protocol-agnostic core with pluggable backends, Alternatives considered, Consequences (+8 more)
-
 ### Community 109 - "RabbitMQQueue"
-Cohesion: 0.14
-Nodes (15): AMQPValue, ConnectionPool, RabbitMQQueue, Arc, Channel, Connection, Consumer, Mutex (+7 more)
+Cohesion: 0.09
+Nodes (29): AMQPValue, QueueStats, HashMap, Value, AckMode, ConnectionPool, dev_config(), ExchangeType (+21 more)
 
 ### Community 110 - "AuthorizationService"
 Cohesion: 0.17
@@ -838,7 +844,7 @@ Nodes (28): 1. Add Dependency, 2. Define Your Entity, 3. Implement HTTP Handler,
 
 ### Community 120 - "company.rs"
 Cohesion: 0.12
-Nodes (22): company_auth(), CompanyClaims, CompanyContext, CompanyVerifier, internal_error(), Arc, Error, Next (+14 more)
+Nodes (22): company_auth(), CompanyClaims, CompanyContext, CompanyVerifier, internal_error(), Arc, DecodingKey, Error (+14 more)
 
 ### Community 121 - "backbone-observability/src/audit.rs"
 Cohesion: 0.12
@@ -853,12 +859,12 @@ Cohesion: 0.14
 Nodes (13): PgCronJobInfo, PgCronManager, PgCronStatistics, DateTime, JobResult, Option, PgPool, Self (+5 more)
 
 ### Community 124 - "MonitoringDashboard"
-Cohesion: 0.17
+Cohesion: 0.16
 Nodes (16): AlertThresholds, main(), MonitoringDashboard, QueueMetrics, Arc, Box, Default, Error (+8 more)
 
-### Community 125 - "monitoring_tests.rs"
-Cohesion: 0.31
-Nodes (26): create_test_monitor(), create_test_queue(), Box, Error, Result, test_alert_event_creation(), test_alert_thresholds_default(), test_console_alert_callback() (+18 more)
+### Community 125 - "resolve.rs"
+Cohesion: 0.15
+Nodes (19): apex_host_has_no_tenant_signal(), custom_domains_map_to_their_tenant(), DomainMap, header_override_only_when_enabled(), HostResolver, malformed_subdomains_are_rejected_not_routed(), normalize_host(), ResolveError (+11 more)
 
 ### Community 127 - "Result"
 Cohesion: 0.18
@@ -921,7 +927,7 @@ Cohesion: 0.20
 Nodes (5): LogLine, DateTime, Option, Utc, Thing
 
 ### Community 143 - "CollectingHandler<E>"
-Cohesion: 0.13
+Cohesion: 0.14
 Nodes (9): CollectingHandler, CollectingHandler<E>, LoggingHandler, Arc, E, Result, RwLock, Self (+1 more)
 
 ### Community 144 - "IntegrationEvent"
@@ -969,8 +975,8 @@ Cohesion: 0.10
 Nodes (21): Additional Resources, AWS SQS Setup, Backbone Queue Examples, Best Practices, Common Requirements, Connection Issues, Contributing, Custom Alert Thresholds (+13 more)
 
 ### Community 155 - "SearchStats"
-Cohesion: 0.10
-Nodes (12): DateTime, Default, HashMap, Option, Self, Utc, Value, SearchBackend (+4 more)
+Cohesion: 0.12
+Nodes (11): DateTime, Default, HashMap, Option, Self, Utc, Value, SearchBackend (+3 more)
 
 ### Community 156 - "AppState"
 Cohesion: 0.15
@@ -992,13 +998,13 @@ Nodes (13): EmailQueue, EmailService, EmailServiceStats, DateTime, HashMap, Opti
 Cohesion: 0.19
 Nodes (9): Arc, HealthResult, Self, SimpleHealthServer, test_detailed_health_json_generation(), test_health_json_generation(), test_simple_health_server_creation(), BufWriter (+1 more)
 
-### Community 161 - "QueueStats"
-Cohesion: 0.11
-Nodes (8): QueueBackend, QueueConfig, QueueStats, Default, HashMap, Option, Self, Value
+### Community 161 - "backbone-queue/src/lib.rs"
+Cohesion: 0.15
+Nodes (5): QueueBackend, QueueConfig, Default, Option, Self
 
-### Community 162 - "RabbitMQConfig"
-Cohesion: 0.21
-Nodes (11): AckMode, dev_config(), ExchangeType, prod_config(), QosConfig, RabbitMQConfig, Default, HashMap (+3 more)
+### Community 162 - "tenant_route"
+Cohesion: 0.13
+Nodes (18): error_response(), Arc, Clone, F, Next, Option, PgPool, Request (+10 more)
 
 ### Community 163 - "api_integration.rs"
 Cohesion: 0.16
@@ -1025,20 +1031,20 @@ Cohesion: 0.16
 Nodes (9): Error, From, Into, Option, Response, Self, StorageError, DecodeError (+1 more)
 
 ### Community 169 - "developer-guide.md"
-Cohesion: 0.22
-Nodes (10): 🗂️ Application configuration (`config` module), ⚙️ Backbone Core — Configuration, 🧩 Cargo feature matrix, Limits (public constants), Mount path, 🎛️ Runtime knobs, 📚 Backbone Core — Documentation, 🧩 Feature flags (+2 more)
+Cohesion: 0.41
+Nodes (4): 📚 Backbone Core — Documentation, 🧩 Feature flags, 🔗 Related, 🗺️ Start here
 
 ### Community 170 - "TestAggregate"
 Cohesion: 0.23
 Nodes (7): DateTime, Event, Option, Utc, Vec, test_aggregate_events(), TestAggregate
 
 ### Community 171 - "RawQueryBuilder"
-Cohesion: 0.30
-Nodes (7): RawQuery, RawQueryBuilder, Option, PgPool, Result, Vec, WindowFunction
+Cohesion: 0.35
+Nodes (5): RawQuery, RawQueryBuilder, PgPool, Result, Vec
 
 ### Community 173 - "company_guard.rs"
-Cohesion: 0.23
-Nodes (15): a_bare_token_without_the_bearer_prefix_is_rejected(), app(), call(), guarded_handler(), Option, Response, Router, Uuid (+7 more)
+Cohesion: 0.19
+Nodes (18): a_bare_token_without_the_bearer_prefix_is_rejected(), app(), call(), guarded_handler(), Option, Response, Router, Uuid (+10 more)
 
 ### Community 174 - "RateLimitResult"
 Cohesion: 0.21
@@ -1073,40 +1079,40 @@ Cohesion: 0.17
 Nodes (11): CounterState, InMemoryStorage, Arc, Default, HashMap, Option, RwLock, Self (+3 more)
 
 ### Community 185 - ".get_or_build"
-Cohesion: 0.13
-Nodes (8): RegistryError, E, Error, F, Result, S, Self, TenantRegistry<F>
+Cohesion: 0.15
+Nodes (6): Error, F, Result, S, Self, TenantRegistry<F>
 
 ### Community 186 - "PasswordService"
-Cohesion: 0.23
+Cohesion: 0.25
 Nodes (6): Argon2, PasswordService, PasswordValidator, Default, Result, Self
 
 ### Community 187 - "auth_service_tests.rs"
 Cohesion: 0.17
 Nodes (7): Result, test_auth_service_creation(), test_auth_service_with_secret(), test_complete_auth_flow(), test_jwt_validation(), test_password_hashing(), test_permission_service_flow()
 
-### Community 188 - ".get_handler"
-Cohesion: 0.36
-Nodes (11): AccessScope, apply_field_security(), include_relations(), is_bad_query_error(), ListQueryParams, pagination_depth_error(), Option, Uuid (+3 more)
+### Community 188 - "router.rs"
+Cohesion: 0.14
+Nodes (20): ProvidesDatabase, a_subdomain_request_lands_on_its_tenant_runtime(), a_tenant_that_cannot_build_answers_unavailable_not_someone_elses_runtime(), an_override_header_against_a_strict_resolver_is_refused(), app(), body(), EchoFactory, Arc (+12 more)
 
 ### Community 189 - "routes.rs"
 Cohesion: 0.31
 Nodes (15): checker(), detailed_returns_200_with_report_body(), health(), health_detailed(), health_returns_200_with_status_body(), health_routes(), livez(), livez_returns_200() (+7 more)
 
 ### Community 190 - "TenantId"
-Cohesion: 0.39
-Nodes (7): From, TenantId, ProvisionError, Error, PgConnection, Result, TenantProvisioner
+Cohesion: 0.16
+Nodes (18): From, TenantId, injection_shaped_ids_are_rejected(), over_length_names_are_rejected(), PgPoolFactory, provisioner(), ProvisionError, render_dsn() (+10 more)
 
 ### Community 191 - "Changelog"
-Cohesion: 0.12
-Nodes (16): [2.0.0], [2.2.0], [2.2.1], [2.2.2], [2.3.0], Added, Added, Added (+8 more)
+Cohesion: 0.06
+Nodes (32): [2.0.0], [2.2.0], [2.2.1], [2.2.2], [2.3.0], [2.7.12] - 2026-09-07, [2.7.13] - 2026-09-07, [2.7.14] - 2026-09-07 (+24 more)
 
 ### Community 192 - "Environment"
 Cohesion: 0.16
 Nodes (10): AppConfig, Environment, Default, Display, Err, Formatter, FromStr, Option (+2 more)
 
 ### Community 193 - "Widget"
-Cohesion: 0.26
-Nodes (7): ApplyUpdateDto, CreateWidgetDto, FromCreateDto, DateTime, Sized, Utc, Widget
+Cohesion: 0.21
+Nodes (10): ApplyUpdateDto, first_duplicate_id(), FromCreateDto, DateTime, Item, Option, Sized, Utc (+2 more)
 
 ### Community 194 - "main"
 Cohesion: 0.50
@@ -1121,8 +1127,8 @@ Cohesion: 0.37
 Nodes (10): demo_cleanup_operations(), demo_content_deduplication(), demo_deduplication_statistics(), demo_exactly_once_processing(), demo_message_id_deduplication(), main(), Box, Error (+2 more)
 
 ### Community 198 - "InMemoryPermissionService<R>"
-Cohesion: 0.25
-Nodes (4): InMemoryPermissionService<R>, R, Result, Vec
+Cohesion: 0.17
+Nodes (7): InMemoryPermissionService<R>, Option, R, Result, Vec, SimplePermission, SimpleRole
 
 ### Community 199 - "RedisPermissionCache"
 Cohesion: 0.33
@@ -1190,15 +1196,15 @@ Nodes (12): create_activity_message(), create_fifo_message(), create_order_messa
 
 ### Community 216 - "Technical Details"
 Cohesion: 0.15
-Nodes (13): Configuration Reference, Core Architecture, Dependencies, Error Handling Strategy, Latency (P99), Message Flow, Performance Characteristics, QueueService Trait (+5 more)
+Nodes (13): Background Job Processing, Core Architecture, Dependencies, Error Handling Strategy, Latency (P99), Message Flow, Microservices Communication, Performance Characteristics (+5 more)
 
 ### Community 217 - "BatchProcessingResult"
 Cohesion: 0.23
 Nodes (6): BatchProcessingResult, DateTime, Duration, QueueResult, Utc, Vec
 
 ### Community 218 - "backbone-tenant/src/lib.rs"
-Cohesion: 0.23
-Nodes (12): Entry, Inner, Arc, HashMap, Mutex, R, Send, Sync (+4 more)
+Cohesion: 0.24
+Nodes (11): Entry, Inner, RegistryError, Arc, E, HashMap, R, Send (+3 more)
 
 ### Community 219 - "Developer Guide"
 Cohesion: 0.15
@@ -1208,16 +1214,16 @@ Nodes (13): Configuration, Developer Guide, How do I expand a related object (re
 Cohesion: 0.15
 Nodes (13): Axum + Tower / tower-http — the HTTP adapter, Deeper reasoning, Rust, edition 2021 — *the whole premise*, Serde family — one serialization model, three formats, SQLx — persistence, and why it is *optional* in core, Technology & the "Why", The cross-cutting rule: features gate the weight, The reasoning (+5 more)
 
-### Community 221 - "SimplePermission"
-Cohesion: 0.35
-Nodes (3): Option, SimplePermission, SimpleRole
+### Community 221 - "org_guard.rs"
+Cohesion: 0.13
+Nodes (13): app(), call(), og2_token_without_org_unit_id_is_rejected(), og3_expired_token_is_rejected(), og4_token_signed_with_wrong_secret_is_rejected(), og6_unknown_typed_token_is_rejected(), og7_typless_legacy_token_reaches_the_pool_check(), Option (+5 more)
 
 ### Community 222 - "🏛️ Backbone Core — Architecture"
 Cohesion: 0.17
 Nodes (12): 400 vs 500 classification, 🏛️ Backbone Core — Architecture, 📐 Guard rails (constants), 🧱 Layers, Lifecycle hooks & events, Module map (`src/`), 🔁 Request lifecycle, Route precedence (+4 more)
 
 ### Community 223 - "OutboxRecord"
-Cohesion: 0.29
+Cohesion: 0.30
 Nodes (8): OutboxRecord, DateTime, Into, Option, Self, Utc, Uuid, Value
 
 ### Community 224 - "SimpleMessageProcessor"
@@ -1237,8 +1243,8 @@ Cohesion: 0.27
 Nodes (7): AggregateMetadata, AggregateRoot, EventSourcedAggregate, InvariantAggregate, Self, test_aggregate_metadata(), TestEvent
 
 ### Community 228 - "runner.rs"
-Cohesion: 0.24
-Nodes (9): RelayConfig, Duration, F, Into, PgPool, Result, S, Self (+1 more)
+Cohesion: 0.18
+Nodes (13): RelayConfig, Duration, F, Into, PgPool, Result, S, Self (+5 more)
 
 ### Community 229 - "mechanics.rs"
 Cohesion: 0.49
@@ -1265,8 +1271,8 @@ Cohesion: 0.33
 Nodes (10): algolia_example(), bulk_operations_example(), demonstrate_error_handling(), elasticsearch_example(), main(), Box, Error, Result (+2 more)
 
 ### Community 235 - "Metaphor Crate"
-Cohesion: 0.18
-Nodes (10): Anti-patterns, Common tasks, Deeper knowledge (load on demand), Folder cheatsheet, Golden path, graphify, Key files to read before editing, Metaphor Crate (+2 more)
+Cohesion: 0.20
+Nodes (9): Anti-patterns, Common tasks, Deeper knowledge (load on demand), Folder cheatsheet, Golden path, Key files to read before editing, Metaphor Crate, Rules (+1 more)
 
 ### Community 236 - ".new"
 Cohesion: 0.24
@@ -1297,7 +1303,7 @@ Cohesion: 0.33
 Nodes (8): main(), Box, Error, Result, test_basic_auth_flow(), test_permission_system(), test_role_management(), test_wildcard_permissions()
 
 ### Community 243 - "permissions.rs"
-Cohesion: 0.39
+Cohesion: 0.33
 Nodes (8): InMemoryPermissionService, PermissionChecker, PermissionLike, RoleLike, Clone, HashMap, Send, Sync
 
 ### Community 244 - "cli.rs"
@@ -1308,17 +1314,17 @@ Nodes (8): empty_healthcheck_url_does_not_override_port(), healthcheck_url(), pr
 Cohesion: 0.67
 Nodes (8): main(), Box, Error, Result, schedule_archiving_jobs(), schedule_cleanup_jobs(), schedule_optimization_jobs(), show_job_summary()
 
-### Community 246 - "ConnectionManager"
-Cohesion: 0.33
-Nodes (4): ConnectionManager, PgPool, Result, Self
+### Community 246 - "org_scope.rs"
+Cohesion: 0.08
+Nodes (45): RequestAuditContext, Error, Into, PgConnection, Result, Self, ConnectionManager, PgPool (+37 more)
 
 ### Community 247 - "parser.rs"
 Cohesion: 0.25
 Nodes (8): audit_metadata_sql_expr(), is_custom_enum_type(), normalize_enum_value(), HashMap, HashSet, Option, Result, to_snake_case()
 
 ### Community 248 - "validate_schema"
-Cohesion: 0.36
-Nodes (8): Result, validate_schema(), migrate(), pending_count(), E, PgPool, Result, stage()
+Cohesion: 0.19
+Nodes (14): Result, validate_schema(), once(), E, PgPool, Result, Uuid, was_consumed() (+6 more)
 
 ### Community 249 - "ProcessorStats"
 Cohesion: 0.28
@@ -1328,9 +1334,9 @@ Nodes (3): ProcessorStats, HashMap, Value
 Cohesion: 0.31
 Nodes (7): Box, Error, Result, run_all_tests(), test_config_parsing(), test_in_memory_backend(), test_redis_backend()
 
-### Community 251 - ".build"
-Cohesion: 0.33
-Nodes (4): PgPoolFactory, Into, PgPool, Self
+### Community 251 - "router_live.rs"
+Cohesion: 0.17
+Nodes (17): dsn(), items(), mint(), Extension, Option, PgPool, Response, Router (+9 more)
 
 ### Community 252 - "Maintainer Guide"
 Cohesion: 0.22
@@ -1360,9 +1366,9 @@ Nodes (6): HealthConfig, HealthError, Default, Duration, Option, Self
 Cohesion: 0.39
 Nodes (5): test_config(), test_redis_custom_prefix(), test_redis_storage_get_count(), test_redis_storage_increment(), test_redis_storage_reset()
 
-### Community 260 - "provision.rs"
-Cohesion: 0.43
-Nodes (7): injection_shaped_ids_are_rejected(), over_length_names_are_rejected(), provisioner(), render_dsn(), Option, tenant_dsn_swaps_the_database(), valid_slugs_produce_prefixed_names()
+### Community 260 - "org.rs"
+Cohesion: 0.20
+Nodes (17): audit_context_of(), client_ip_of(), correlation_id_of(), forbidden(), internal_error(), normalize_fact(), org_auth(), OrgVerifier (+9 more)
 
 ### Community 261 - "Contribution Guide"
 Cohesion: 0.25
@@ -1381,12 +1387,12 @@ Cohesion: 0.29
 Nodes (6): Display, Sized, StateMachineBehavior, StateMachineError, TransitionMeta, Copy
 
 ### Community 265 - "raw_query.rs"
-Cohesion: 0.38
-Nodes (3): CteClause, JoinClause, JoinType
+Cohesion: 0.28
+Nodes (5): CteClause, JoinClause, JoinType, Option, WindowFunction
 
-### Community 266 - "once"
-Cohesion: 0.38
-Nodes (6): once(), E, PgPool, Result, Uuid, was_consumed()
+### Community 266 - "OrgIssuer"
+Cohesion: 0.22
+Nodes (12): IssuedSessionClaims, OrgClaims, OrgIssuer, Algorithm, Duration, EncodingKey, Error, Option (+4 more)
 
 ### Community 267 - "Advanced Examples"
 Cohesion: 0.29
@@ -1408,9 +1414,9 @@ Nodes (7): 1. Context, 2. Containers — the crates, 3. Components / modules —
 Cohesion: 0.53
 Nodes (3): InMemoryPermissionService<SimpleRole>, Default, Self
 
-### Community 272 - "BackboneCrudHandler"
-Cohesion: 0.33
-Nodes (6): BackboneCrudHandler, BulkUpdateItem, E, PhantomData, R, U
+### Community 272 - "org_session_live.rs"
+Cohesion: 0.26
+Nodes (18): acting_unit_default_fills_scoped_inserts_and_fails_loud_unbound(), admin_pool(), app_pool(), audit_attribution_flows_from_request_to_audit_row(), audit_lane_write(), call(), dsn(), issuer_guard_spine_fence_chain() (+10 more)
 
 ### Community 273 - "filter/validation.rs"
 Cohesion: 0.47
@@ -1424,9 +1430,13 @@ Nodes (6): 1. Use Appropriate Exchange Types, 2. Implement Proper Error Handling
 Cohesion: 0.47
 Nodes (3): RetryConfig, RetryHandler, RetryPolicy
 
-### Community 276 - "UserRepository"
-Cohesion: 0.50
-Nodes (5): AuthenticatableUser, Clone, Send, Sync, UserRepository
+### Community 276 - "Self"
+Cohesion: 0.14
+Nodes (10): create_command_carries_payload(), GenericCreateCommand<E, DTO>, GenericDeleteCommand<E>, GenericGetQuery<E>, GenericListDeletedQuery<E>, GenericListQuery<E, F>, GenericRestoreCommand<E>, GenericUpdateCommand<E, DTO> (+2 more)
+
+### Community 277 - "idempotency.rs"
+Cohesion: 0.20
+Nodes (16): company_from_request(), idempotency_middleware(), IdempotencyState, lookup(), migrate(), Error, Next, Option (+8 more)
 
 ### Community 278 - "backbone-graphql/src/error.rs"
 Cohesion: 0.60
@@ -1448,9 +1458,9 @@ Nodes (5): 🔧 Advanced Usage, Custom Job Configuration, Job Lifecycle Manageme
 Cohesion: 0.40
 Nodes (4): OutboxError, Error, ok_publish(), Result
 
-### Community 283 - "relay_runner.rs"
-Cohesion: 0.80
-Nodes (4): fresh_schema(), pool(), PgPool, runner_delivers_then_stops()
+### Community 283 - "company_scope.rs"
+Cohesion: 0.25
+Nodes (17): admin_pool(), app_pool(), current_request_conn(), dsn(), lingering_request_conn_clone_does_not_dirty_the_pooled_connection(), role_name(), Arc, F (+9 more)
 
 ### Community 284 - "main"
 Cohesion: 0.40
@@ -1480,9 +1490,9 @@ Nodes (5): ADR-0001: Distribute via git tags, not crates.io, Alternatives consid
 Cohesion: 0.50
 Nodes (3): AuthorizationServiceTrait, Send, Sync
 
-### Community 291 - "ListRequest"
-Cohesion: 0.50
-Nodes (3): ListRequest, Default, SortOrder
+### Community 291 - "generic_repository.rs"
+Cohesion: 0.19
+Nodes (15): company_fence(), fetch_by_ids_as_json(), fetch_rows_as_json(), GenericCrudRepository, is_undefined_table(), MissingCompanyScope, qualify_relation_table(), D (+7 more)
 
 ### Community 292 - "Projector"
 Cohesion: 0.50
@@ -1520,9 +1530,9 @@ Nodes (4): Architecture, Key Features, Overview, Supported Backends
 Cohesion: 0.50
 Nodes (4): AWS SQS Backend, Backend Implementations, RabbitMQ Backend, Redis Backend
 
-### Community 303 - "Real-World Examples"
-Cohesion: 0.50
-Nodes (4): Background Job Processing, Microservices Communication, Real-World Examples, Webhook Processing
+### Community 303 - "Command"
+Cohesion: 0.24
+Nodes (13): Command, CommandDispatcher, CommandHandler, C, Error, Result, Send, Sync (+5 more)
 
 ### Community 304 - "Testing"
 Cohesion: 0.50
@@ -1532,9 +1542,9 @@ Nodes (4): Integration Tests, Test Coverage, Testing, Unit Tests
 Cohesion: 0.50
 Nodes (4): Backbone Framework — Handbook, Per-crate documentation, Start here by who you are, The whole handbook
 
-### Community 306 - "BackboneHttpHandler"
-Cohesion: 0.67
-Nodes (3): BackboneHttpHandler, Send, Sync
+### Community 306 - "backbone-storage/src/lib.rs"
+Cohesion: 0.20
+Nodes (11): default_config(), from_env(), require_env_non_empty(), Box, StorageConfig, StorageResult, test_default_config(), test_require_env_non_empty_blank() (+3 more)
 
 ### Community 307 - "📋 Predefined Job Types"
 Cohesion: 0.67
@@ -1560,28 +1570,68 @@ Nodes (3): Configuration Validation, Health Monitoring, 📊 Monitoring & Health
 Cohesion: 0.67
 Nodes (3): Health Check, Monitoring and Metrics, Queue Statistics
 
-### Community 313 - "SearchService"
+### Community 313 - "migrate_legacy.rs"
+Cohesion: 0.36
+Nodes (12): company_id_column(), company_index_exists(), drop_schema(), fence_policy_exists(), legacy_schema(), legacy_table_without_company_id_is_healed_in_place(), pool(), populated_legacy_table_migrates_and_null_company_rows_stay_fail_closed() (+4 more)
+
+### Community 324 - "User"
+Cohesion: 0.33
+Nodes (4): DateTime, Option, Utc, User
+
+### Community 325 - "logging_config.rs"
+Cohesion: 0.26
+Nodes (9): default_log_format(), default_log_level(), default_log_targets(), LoggingConfig, LoggingFileConfig, Default, Option, Self (+1 more)
+
+### Community 326 - "rls_scope_live.rs"
+Cohesion: 0.38
+Nodes (9): admin_dsn(), app_pool(), orm_reads_and_writes_are_company_fenced(), request_scope_publishes_the_company_task_local(), Option, PgPool, Uuid, setup() (+1 more)
+
+### Community 327 - "OrgContext"
+Cohesion: 0.40
+Nodes (5): OrgContext, FromRequestParts, Parts, Rejection, S
+
+### Community 328 - "⚙️ Backbone Core — Configuration"
+Cohesion: 0.33
+Nodes (6): 🗂️ Application configuration (`config` module), ⚙️ Backbone Core — Configuration, 🧩 Cargo feature matrix, Limits (public constants), Mount path, 🎛️ Runtime knobs
+
+### Community 330 - "ADR-0002: Self-describing crates; no workspace dependency inheritance"
+Cohesion: 0.40
+Nodes (5): ADR-0002: Self-describing crates; no workspace dependency inheritance, Alternatives considered, Consequences, Context, Decision
+
+### Community 331 - "ADR-0003: Protocol-agnostic core with pluggable backends"
+Cohesion: 0.40
+Nodes (5): ADR-0003: Protocol-agnostic core with pluggable backends, Alternatives considered, Consequences, Context, Decision
+
+### Community 332 - "ADR-0004: One version for the whole workspace"
+Cohesion: 0.40
+Nodes (5): ADR-0004: One version for the whole workspace, Alternatives considered, Consequences, Context, Decision
+
+### Community 333 - "CqrsReadService"
 Cohesion: 0.67
-Nodes (3): Send, Sync, SearchService
+Nodes (4): CqrsReadService, CqrsService, Send, Sync
+
+### Community 334 - "Configuration Reference"
+Cohesion: 0.50
+Nodes (4): Configuration Reference, RabbitMQ Configuration, Redis Configuration, SQS Configuration
 
 ## Knowledge Gaps
-- **644 isolated node(s):** `AuthMiddleware`, `AuthExtractor`, `SecurityAlertType`, `GraphQLListResult<E>`, `GrpcService` (+639 more)
+- **653 isolated node(s):** `AuthMiddleware`, `AuthExtractor`, `SecurityAlertType`, `GraphQLListResult<E>`, `GrpcService` (+648 more)
   These have ≤1 connection - possible missing edges or undocumented components.
 - **8 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `String` connect `String` to `Result`, `jwt.rs`, `AlertEvent`, `RabbitMQQueueSimple`, `RedisCache`, `backbone-storage/src/compression.rs`, `Error`, `MemoryCache`, `ModuleRegistry`, `Result`, `JobError`, `IntegrationEventBus`, `E`, `RedisQueue`, `backbone-maintenance/src/lib.rs`, `SecurityEngine`, `cqrs.rs`, `usecase.rs`, `E`, `StorageFile`, `QueueResult`, `http.rs`, `JobId`, `LocalStorage`, `GenericCrudService<E, C, U, R>`, `T`, `ElasticsearchSearch`, `TaskService`, `EmailAddress`, `SeedManager`, `Result`, `ECommerceService`, `QueueMessage`, `testing_examples.rs`, `AlgoliaSearch`, `MailgunEmailService`, `LocalStorage`, `ServiceContainer`, `InMemoryRepository<E>`, `ServiceRegistry`, `QueueManager`, `S3Storage`, `bulk.rs`, `ConfigurationBus`, `ServiceResult`, `company_scope.rs`, `SmtpEmailService`, `EventEnvelope`, `MessageCompressor`, `User`, `SqsQueue`, `RepositoryError`, `SesEmailService`, `HealthChecker`, `Self`, `JobSchedulerBuilder`, `MigrationManager`, `cron.rs`, `modules_config.rs`, `utils.rs`, `FifoQueueServiceWrapper`, `SecureUserDatabase`, `GrpcResponse`, `MonitoringService`, `subscriber.rs`, `InMemoryStore<T>`, `MinIOStorage`, `ApiResponse`, `MockQueueService`, `backbone-observability/src/middleware.rs`, `fifo_tests.rs`, `backbone-search/src/types.rs`, `crud_event.rs`, `PostgresRepository<T>`, `Self`, `backbone-search/src/traits.rs`, `backbone-core/src/integration.rs`, `backbone-core/src/service.rs`, `JobSchedulerConfig`, `Self`, `backbone-storage/src/traits.rs`, `Job`, `logging.rs`, `filter/tests.rs`, `AuthService`, `EventError`, `SimpleUser`, `backbone-authorization/src/types.rs`, `FlowInstance`, `ComponentStatus`, `QueryValue`, `orm_tests.rs`, `BackboneConfig`, `JobBuilder`, `ErrorHandlingService`, `repository_tests.rs`, `RateLimitConfig`, `RabbitMQQueue`, `AuthorizationService`, `schema.rs`, `backbone-core/src/error.rs`, `cache.rs`, `backbone-authorization/src/middleware.rs`, `processor_demo.rs`, `EcommerceCacheService`, `company.rs`, `backbone-observability/src/audit.rs`, `JobSchedulerBuilder`, `PgCronManager`, `MonitoringDashboard`, `Result`, `metrics.rs`, `Result`, `CustomHealthCheck`, `cache_tests.rs`, `QueueWorker`, `MockQueue`, `integration_tests.rs`, `tests/registry.rs`, `database_config.rs`, `LogLine`, `IntegrationEvent`, `tracing.rs`, `.substitute_env_vars`, `Query`, `security_config.rs`, `DomainEvent`, `.from_event`, `SearchStats`, `AppState`, `ConfigError`, `value_object.rs`, `EmailServiceStats`, `SimpleHealthServer`, `QueueStats`, `RabbitMQConfig`, `api_integration.rs`, `real_world_scenarios.rs`, `Self`, `StorageError`, `TestAggregate`, `RawQueryBuilder`, `company_guard.rs`, `RateLimitResult`, `ServerConfig`, `FilterValue`, `company_fence.rs`, `AdvancedQueryBuilder`, `rabbitmq_realtime_chat.rs`, `InMemoryStorage`, `.get_or_build`, `PasswordService`, `.get_handler`, `TenantId`, `Environment`, `Widget`, `InMemoryPermissionService<R>`, `RedisPermissionCache`, `crud_macro_compile.rs`, `filter_bench.rs`, `FilterCondition`, `QueryFilter`, `rate_limit_middleware`, `backbone-cache/examples/basic_usage.rs`, `features_config.rs`, `OutboxRow`, `BatchProcessingResult`, `SimplePermission`, `OutboxRecord`, `SimpleMessageProcessor`, `aggregate.rs`, `runner.rs`, `mechanics.rs`, `ProcessedMessage`, `EmailConfig`, `main`, `permissions.rs`, `cli.rs`, `parser.rs`, `ProcessorStats`, `.build`, `backbone-auth/src/audit.rs`, `HealthConfig`, `provision.rs`, `state_machine.rs`, `raw_query.rs`, `BackboneCrudHandler`, `filter/validation.rs`, `ApiResponse<T>`, `OutboxError`, `relay_runner.rs`, `ListRequest`?**
-  _High betweenness centrality (0.748) - this node is a cross-community bridge._
+- **Why does `String` connect `String` to `Result`, `jwt.rs`, `AlertEvent`, `RabbitMQQueueSimple`, `RedisCache`, `backbone-storage/src/compression.rs`, `Error`, `MemoryCache`, `ModuleRegistry`, `Result`, `JobError`, `IntegrationEventBus`, `E`, `RedisQueue`, `backbone-maintenance/src/lib.rs`, `SecurityEngine`, `cqrs.rs`, `usecase.rs`, `E`, `StorageFile`, `QueueResult`, `http.rs`, `JobId`, `LocalStorage`, `GenericCrudService<E, C, U, R>`, `T`, `ElasticsearchSearch`, `TaskService`, `EmailAddress`, `SeedManager`, `Result`, `ECommerceService`, `QueueMessage`, `testing_examples.rs`, `AlgoliaSearch`, `MailgunEmailService`, `LocalStorage`, `ServiceContainer`, `InMemoryRepository<E>`, `ServiceRegistry`, `QueueManager`, `S3Storage`, `bulk.rs`, `ConfigurationBus`, `ServiceResult`, `SmtpEmailService`, `EventEnvelope`, `MessageCompressor`, `User`, `SqsQueue`, `RepositoryError`, `SesEmailService`, `HealthChecker`, `Self`, `JobSchedulerBuilder`, `MigrationManager`, `cron.rs`, `modules_config.rs`, `utils.rs`, `FifoQueueServiceWrapper`, `SecureUserDatabase`, `GrpcResponse`, `MonitoringService`, `subscriber.rs`, `InMemoryStore<T>`, `MinIOStorage`, `ApiResponse`, `MockQueueService`, `backbone-observability/src/middleware.rs`, `fifo_tests.rs`, `backbone-search/src/types.rs`, `crud_event.rs`, `PostgresRepository<T>`, `GlPostLine`, `backbone-search/src/traits.rs`, `backbone-core/src/integration.rs`, `backbone-core/src/service.rs`, `JobSchedulerConfig`, `Self`, `backbone-storage/src/traits.rs`, `Job`, `logging.rs`, `filter/tests.rs`, `AuthService`, `EventError`, `SimpleUser`, `backbone-authorization/src/types.rs`, `FlowInstance`, `ComponentStatus`, `QueryValue`, `orm_tests.rs`, `BackboneConfig`, `JobBuilder`, `ErrorHandlingService`, `repository_tests.rs`, `RateLimitConfig`, `RabbitMQQueue`, `AuthorizationService`, `schema.rs`, `backbone-core/src/error.rs`, `cache.rs`, `backbone-authorization/src/middleware.rs`, `processor_demo.rs`, `EcommerceCacheService`, `company.rs`, `backbone-observability/src/audit.rs`, `JobSchedulerBuilder`, `PgCronManager`, `MonitoringDashboard`, `resolve.rs`, `Result`, `metrics.rs`, `Result`, `CustomHealthCheck`, `cache_tests.rs`, `QueueWorker`, `MockQueue`, `integration_tests.rs`, `tests/registry.rs`, `database_config.rs`, `LogLine`, `IntegrationEvent`, `tracing.rs`, `.substitute_env_vars`, `Query`, `security_config.rs`, `DomainEvent`, `.from_event`, `SearchStats`, `AppState`, `ConfigError`, `value_object.rs`, `EmailServiceStats`, `SimpleHealthServer`, `backbone-queue/src/lib.rs`, `api_integration.rs`, `real_world_scenarios.rs`, `Self`, `StorageError`, `TestAggregate`, `RawQueryBuilder`, `company_guard.rs`, `RateLimitResult`, `ServerConfig`, `FilterValue`, `company_fence.rs`, `AdvancedQueryBuilder`, `rabbitmq_realtime_chat.rs`, `InMemoryStorage`, `PasswordService`, `router.rs`, `TenantId`, `Environment`, `Widget`, `InMemoryPermissionService<R>`, `RedisPermissionCache`, `crud_macro_compile.rs`, `filter_bench.rs`, `FilterCondition`, `QueryFilter`, `rate_limit_middleware`, `backbone-cache/examples/basic_usage.rs`, `features_config.rs`, `OutboxRow`, `BatchProcessingResult`, `backbone-tenant/src/lib.rs`, `org_guard.rs`, `OutboxRecord`, `SimpleMessageProcessor`, `aggregate.rs`, `runner.rs`, `mechanics.rs`, `ProcessedMessage`, `EmailConfig`, `main`, `permissions.rs`, `cli.rs`, `org_scope.rs`, `parser.rs`, `ProcessorStats`, `router_live.rs`, `backbone-auth/src/audit.rs`, `HealthConfig`, `org.rs`, `state_machine.rs`, `raw_query.rs`, `OrgIssuer`, `org_session_live.rs`, `filter/validation.rs`, `Self`, `idempotency.rs`, `OutboxError`, `company_scope.rs`, `generic_repository.rs`, `backbone-storage/src/lib.rs`, `migrate_legacy.rs`, `User`, `logging_config.rs`, `rls_scope_live.rs`, `OrgContext`?**
+  _High betweenness centrality (0.733) - this node is a cross-community bridge._
 - **Why does `QueueMessage` connect `QueueMessage` to `RabbitMQQueueSimple`, `sqs_tests.rs`, `QueueWorker`, `MockQueue`, `integration_tests.rs`, `RedisQueue`, `QueueResult`, `String`, `MessageCompressor`, `SqsQueue`, `FifoQueueServiceWrapper`, `BatchingProcessor`, `MockQueueService`, `fifo_tests.rs`, `fifo_queue_demo.rs`, `BatchProcessingResult`, `compression_tests.rs`, `ProcessedMessage`, `RabbitMQQueue`?**
-  _High betweenness centrality (0.047) - this node is a cross-community bridge._
-- **Why does `extract_path_template()` connect `backbone-observability/src/middleware.rs` to `String`?**
-  _High betweenness centrality (0.028) - this node is a cross-community bridge._
+  _High betweenness centrality (0.042) - this node is a cross-community bridge._
+- **Why does `T` connect `T` to `jwt.rs`, `RedisCache`, `MemoryCache`, `Result`, `tests/registry.rs`, `Query`, `http.rs`, `DomainEvent`, `String`, `value_object.rs`, `SeedManager`, `QueueMessage`, `generic_repository.rs`, `ServiceContainer`, `RawQueryBuilder`, `request_conn`, `CrudRepository`, `Self`, `GrpcResponse`, `InMemoryStore<T>`, `ApiResponse`, `backbone-search/src/types.rs`, `PostgresRepository<T>`, `backbone-core/src/integration.rs`, `Self`, `QueryValue`, `JobBuilder`, `MonitoringDashboard`?**
+  _High betweenness centrality (0.033) - this node is a cross-community bridge._
 - **What connects `AuthMiddleware`, `AuthExtractor`, `SecurityAlertType` to the rest of the system?**
-  _644 weakly-connected nodes found - possible documentation gaps or missing edges._
+  _653 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `Result` be split into smaller, more focused modules?**
-  _Cohesion score 0.053019145802650956 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.05277262420119563 - nodes in this community are weakly interconnected._
 - **Should `jwt.rs` be split into smaller, more focused modules?**
   _Cohesion score 0.0616729088639201 - nodes in this community are weakly interconnected._
 - **Should `AlertEvent` be split into smaller, more focused modules?**
