@@ -49,6 +49,10 @@ use uuid::Uuid;
 const ORG_FENCE_VARS: [&str; 3] = ["app.scope_unit_ids", "app.company_id", "app.acting_unit_id"];
 
 tokio::task_local! {
+    /// Identity of the pool the ambient request connection was drawn from. Kept beside the scope so
+    /// a nested call can prove it is asking for the SAME database before reusing that connection —
+    /// with a database per tenant, reusing across pools would run the query on the wrong one.
+    static ORG_SCOPE_POOL: std::sync::Arc<sqlx::postgres::PgConnectOptions>;
     /// The resolved org scope of the current request: entitled unit ids (union of subtrees,
     /// root included) and the acting node. Unset for platform callers and non-request code.
     static ORG_SCOPE: Arc<OrgScope>;
@@ -57,7 +61,7 @@ tokio::task_local! {
 /// A resolved session scope over the org tree (ADR-0028).
 ///
 /// Built by [`resolve_org_scope`]; carried by [`with_org_request_scope`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrgScope {
     scope_unit_ids: Vec<Uuid>,
     acting_unit_id: Uuid,
@@ -271,6 +275,48 @@ async fn with_org_request_scope_internal<F, R>(
 where
     F: Future<Output = R>,
 {
+    // Everything below the fast path lives in `open_org_request_scope`, behind a Box::pin. That is
+    // what keeps a nest cheap: this function's future would otherwise carry the whole slow path's
+    // locals — a pool connection, the Arc/Mutex holder, the bind statements and the task-local
+    // scope futures — and a three-level nest would stack three of those frames whether or not the
+    // slow path ever runs. Boxing moves them to the heap, so a nesting level costs a pointer.
+    // Reuse an ambient scope that already matches, instead of nesting a second one.
+    //
+    // A nested wrapper used to acquire a second connection, re-run the fence binds, and lay another
+    // prologue on the stack — roughly 600 KB per level in a debug build, so two levels plus the
+    // caller's own depth overflowed a default 2 MB worker thread and killed the task. It also held
+    // two pool connections for one logical request, which self-deadlocks a small pool.
+    //
+    // Three things must all hold before reuse is safe: a request connection is bound, the incoming
+    // scope is exactly the ambient one (a different scope needs its own binds), and the pool is the
+    // same (with a database per tenant, the ambient connection may be another tenant's entirely).
+    // A call carrying audit attribution always takes the slow path — its variables are not part of
+    // the scope comparison, so matching scopes say nothing about matching attribution.
+    if audit.is_none()
+        && crate::company_scope::current_request_conn().is_some()
+        && ORG_SCOPE.try_with(|ambient| **ambient == scope).unwrap_or(false)
+        && ORG_SCOPE_POOL
+            .try_with(|ambient| std::sync::Arc::ptr_eq(ambient, &pool.connect_options()))
+            .unwrap_or(false)
+    {
+        // The ambient scope owns the connection and will reset it; this call adds nothing to undo.
+        return Ok(f.await);
+    }
+
+    Box::pin(open_org_request_scope(pool, scope, audit, f)).await
+}
+
+/// The slow path: acquire a request-dedicated connection, bind the fence (and audit) variables on
+/// it, run `f` inside the task-locals, then reset every variable it may have set.
+async fn open_org_request_scope<F, R>(
+    pool: &PgPool,
+    scope: OrgScope,
+    audit: Option<&RequestAuditContext>,
+    f: F,
+) -> Result<R, sqlx::Error>
+where
+    F: Future<Output = R>,
+{
     let mut conn = pool.acquire().await?;
     sqlx::query("SELECT set_config('app.scope_unit_ids', $1, false)")
         .bind(scope.scope_unit_ids_csv())
@@ -290,13 +336,18 @@ where
 
     let holder = Arc::new(Mutex::new(conn));
     let scope_arc = Arc::new(scope);
-    let result = ORG_SCOPE.scope(scope_arc.clone(), async {
-        crate::company_scope::with_company_scope_internal(scope_arc.legacy_company_id, async {
-            crate::company_scope::with_request_conn_internal(holder.clone(), f).await
-        })
-        .await
-    })
-    .await;
+    let pool_identity = pool.connect_options();
+    let result = ORG_SCOPE_POOL
+        .scope(
+            pool_identity,
+            ORG_SCOPE.scope(scope_arc.clone(), async {
+                crate::company_scope::with_company_scope_internal(scope_arc.legacy_company_id, async {
+                    crate::company_scope::with_request_conn_internal(holder.clone(), f).await
+                })
+                .await
+            }),
+        )
+        .await;
 
     // Unconditional reset of every variable the scope may have set — fence always, audit when
     // the request carried a context (resetting anyway when it did not costs six cheap
