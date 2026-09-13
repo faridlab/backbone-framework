@@ -15,6 +15,15 @@
 //! 3. **Inbox** — [`inbox::once`] dedups a `(consumer, event_id)` in the consumer's own transaction, so
 //!    at-least-once delivery becomes an **exactly-once effect**.
 //!
+//! **When the transport gives up.** A `publish` sink that has exhausted its own retries returns
+//! [`OutboxError::Exhausted`], and the relay marks that row dead — `failed_at` set, `published_at`
+//! still NULL — instead of publishing it. This matters because the two alternatives both lose work
+//! silently: answering `Ok` stamps the row published, so a dropped effect reads as delivered and the
+//! only record of it is gone, while answering [`OutboxError::Publish`] re-hands the same doomed
+//! record on every pass forever. A dead row is excluded from the drain, counted by
+//! [`outbox::dead_count`], listed by [`relay::list_dead`], and handed back by [`relay::reemit`] once
+//! the cause is fixed. Nothing revives it on its own — that is the point of a dead letter.
+//!
 //! `backbone-outbox` is framework plumbing: it depends on `sqlx` + `serde` only, never on a domain
 //! module or the bus. The relay's transport is a closure the caller wires.
 //!

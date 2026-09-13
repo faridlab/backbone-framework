@@ -2,12 +2,26 @@
 
 use sqlx::{PgExecutor, PgPool};
 
-use crate::error::{validate_schema, Result};
+use crate::error::{validate_schema, OutboxError, Result};
 use crate::record::OutboxRecord;
 
 /// Create the `outbox_events` + `inbox_consumed` tables in `schema` (idempotent). A module is both a
 /// producer (its outbox) and a consumer (its inbox), so both are created together. Safe to run on every
 /// boot.
+/// Build an index name the way Postgres will store it.
+///
+/// Identifiers are truncated to 63 bytes on creation. Constructing the same name twice — once to
+/// create and once to drop — only works if both are truncated identically: a long schema name would
+/// otherwise be created truncated and dropped by a name that matches nothing, silently leaving the
+/// index behind. Schema names are validated as ASCII (`^[a-z_][a-z0-9_]*$`), so byte truncation
+/// cannot split a character.
+fn index_name(schema: &str, suffix: &str) -> String {
+    const MAX_IDENTIFIER_BYTES: usize = 63;
+    let mut name = format!("idx_{schema}_{suffix}");
+    name.truncate(MAX_IDENTIFIER_BYTES);
+    name
+}
+
 pub async fn migrate(pool: &PgPool, schema: &str) -> Result<()> {
     validate_schema(schema)?;
     sqlx::query(&format!("CREATE SCHEMA IF NOT EXISTS {schema}")).execute(pool).await?;
@@ -40,13 +54,44 @@ pub async fn migrate(pool: &PgPool, schema: &str) -> Result<()> {
     ))
     .execute(pool)
     .await?;
-    // Partial index over just the un-drained tail — keeps the relay's poll cheap as the table grows.
+    // A record the transport has given up on is marked dead here rather than published: not
+    // delivered, still visible, and re-emittable. Added the same way as `company_id` above — nullable
+    // and IF NOT EXISTS — so a table created by an older version of this function heals in place.
     sqlx::query(&format!(
-        "CREATE INDEX IF NOT EXISTS idx_{schema}_outbox_unpublished
-           ON {schema}.outbox_events (occurred_at) WHERE published_at IS NULL"
+        "ALTER TABLE {schema}.outbox_events ADD COLUMN IF NOT EXISTS failed_at timestamptz"
     ))
     .execute(pool)
     .await?;
+    sqlx::query(&format!(
+        "ALTER TABLE {schema}.outbox_events ADD COLUMN IF NOT EXISTS failure_reason text"
+    ))
+    .execute(pool)
+    .await?;
+
+    // Partial index over just the un-drained tail — keeps the relay's poll cheap as the table grows.
+    // Dead rows are excluded because the relay no longer offers them to the transport.
+    let pending_idx = index_name(schema, "outbox_pending");
+    sqlx::query(&format!(
+        "CREATE INDEX IF NOT EXISTS {pending_idx}
+           ON {schema}.outbox_events (occurred_at) WHERE published_at IS NULL AND failed_at IS NULL"
+    ))
+    .execute(pool)
+    .await?;
+    // Retire the predecessor, whose predicate still admitted dead rows. Dropped rather than left in
+    // place so the tail is covered by exactly one partial index; `IF EXISTS` makes the boot after the
+    // first one a no-op.
+    let legacy_idx = index_name(schema, "outbox_unpublished");
+    if legacy_idx == pending_idx {
+        // Truncation ate both suffixes, so the drop below would remove the index just created and
+        // the create above would have been skipped over a stale one. No real schema name is this
+        // long; refuse rather than quietly leave the drain's tail wrongly indexed.
+        return Err(OutboxError::InvalidSchema(format!(
+            "{schema}: too long to build distinct index names within Postgres's 63-byte limit"
+        )));
+    }
+    sqlx::query(&format!("DROP INDEX IF EXISTS {schema}.{legacy_idx}"))
+        .execute(pool)
+        .await?;
 
     // ADR-0011: fence `outbox_events` by `company_id` so a tenant's event stream is isolated. This is
     // the table OWNER applying the fence (the correct home — it was previously a hand-authored backfill
@@ -60,8 +105,9 @@ pub async fn migrate(pool: &PgPool, schema: &str) -> Result<()> {
     // per-table bypass, NOT a BYPASSRLS attribute, so every other table's fence still holds.
     #[cfg(feature = "multi_tenant")]
     {
+        let company_idx = index_name(schema, "outbox_company_id");
         sqlx::query(&format!(
-            "CREATE INDEX IF NOT EXISTS idx_{schema}_outbox_company_id ON {schema}.outbox_events (company_id)"
+            "CREATE INDEX IF NOT EXISTS {company_idx} ON {schema}.outbox_events (company_id)"
         ))
         .execute(pool)
         .await?;
@@ -131,13 +177,70 @@ where
     Ok(done.rows_affected() == 1)
 }
 
-/// Count of un-drained events in `schema.outbox_events` (for monitoring / tests).
-pub async fn pending_count(pool: &PgPool, schema: &str) -> Result<i64> {
+/// Count of events the transport gave up on — dead-lettered, awaiting a re-emit.
+///
+/// Worth alerting on: it is the number of cross-module effects that did not happen. A silently
+/// published row used to hide exactly this figure.
+pub async fn dead_count(pool: &PgPool, schema: &str) -> Result<i64> {
     validate_schema(schema)?;
     let n: i64 = sqlx::query_scalar(&format!(
-        "SELECT count(*) FROM {schema}.outbox_events WHERE published_at IS NULL"
+        "SELECT count(*) FROM {schema}.outbox_events WHERE failed_at IS NOT NULL"
     ))
     .fetch_one(pool)
     .await?;
     Ok(n)
+}
+
+/// Count of un-drained events in `schema.outbox_events` (for monitoring / tests).
+pub async fn pending_count(pool: &PgPool, schema: &str) -> Result<i64> {
+    validate_schema(schema)?;
+    let n: i64 = sqlx::query_scalar(&format!(
+        "SELECT count(*) FROM {schema}.outbox_events WHERE published_at IS NULL AND failed_at IS NULL"
+    ))
+    .fetch_one(pool)
+    .await?;
+    Ok(n)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::index_name;
+
+    #[test]
+    fn a_short_schema_keeps_its_full_index_name() {
+        assert_eq!(index_name("payment", "outbox_pending"), "idx_payment_outbox_pending");
+    }
+
+    #[test]
+    fn a_long_schema_is_truncated_the_way_postgres_truncates() {
+        // Long enough that "idx_<schema>_outbox_pending" passes the 63-byte identifier cap.
+        let schema = "a".repeat(50);
+        let name = index_name(&schema, "outbox_pending");
+        assert_eq!(name.len(), 63, "the name is capped at the identifier limit");
+        assert_eq!(name, index_name(&schema, "outbox_pending"), "create and drop name the same index");
+    }
+
+    #[test]
+    fn a_schema_long_enough_to_collapse_both_suffixes_is_refused() {
+        // At this length truncation eats the suffix entirely and both index names become the same
+        // string, so dropping the predecessor would remove the index just created. `migrate` refuses
+        // instead; this records where that line sits.
+        let schema = "b".repeat(60);
+        assert_eq!(
+            index_name(&schema, "outbox_pending"),
+            index_name(&schema, "outbox_unpublished"),
+            "the two names collapse, which is what migrate refuses"
+        );
+    }
+
+    #[test]
+    fn realistic_schema_names_are_nowhere_near_the_limit() {
+        for schema in ["payment", "billing", "messaging", "tax", "selling"] {
+            assert!(index_name(schema, "outbox_unpublished").len() < 63);
+            assert_ne!(
+                index_name(schema, "outbox_pending"),
+                index_name(schema, "outbox_unpublished")
+            );
+        }
+    }
 }

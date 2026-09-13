@@ -12,6 +12,16 @@ pub enum OutboxError {
     /// The relay's `publish` callback failed for a record; the row is left unpublished for retry.
     #[error("publish failed: {0}")]
     Publish(String),
+    /// The relay's `publish` callback GAVE UP on a record — its transport exhausted its own retries
+    /// or dead-lettered it, and will not deliver this event however many times it is handed over.
+    ///
+    /// Distinct from [`OutboxError::Publish`] on purpose. A transport that has given up used to have
+    /// no way to say so: returning `Ok` marked the row published, which reads as delivered while the
+    /// effect was dropped, and returning `Publish` re-handed the same doomed record on every pass
+    /// forever. This variant marks the row dead — not published, visible in the table, and
+    /// re-emittable once the cause is fixed.
+    #[error("publish exhausted: {0}")]
+    Exhausted(String),
 }
 
 /// Result alias for outbox operations.
