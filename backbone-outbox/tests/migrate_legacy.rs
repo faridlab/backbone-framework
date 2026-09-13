@@ -97,10 +97,10 @@ async fn company_id_column(pool: &PgPool, schema: &str) -> (bool, bool) {
     }
 }
 
-async fn company_index_exists(pool: &PgPool, schema: &str) -> bool {
+async fn fence_index_exists(pool: &PgPool, schema: &str) -> bool {
     let n: i64 = sqlx::query_scalar(&format!(
         "SELECT count(*) FROM pg_indexes
-          WHERE schemaname='{schema}' AND indexname='idx_{schema}_outbox_company_id'"
+          WHERE schemaname='{schema}' AND indexname='idx_{schema}_outbox_org_unit_id'"
     ))
     .fetch_one(pool)
     .await
@@ -112,7 +112,7 @@ async fn fence_policy_exists(pool: &PgPool, schema: &str) -> bool {
     let n: i64 = sqlx::query_scalar(&format!(
         "SELECT count(*) FROM pg_policies
           WHERE schemaname='{schema}' AND tablename='outbox_events'
-            AND policyname='outbox_events_company_isolation'"
+            AND policyname='outbox_events_org_unit_isolation'"
     ))
     .fetch_one(pool)
     .await
@@ -153,7 +153,7 @@ async fn legacy_table_without_company_id_is_healed_in_place() {
     assert!(exists, "company_id column is added to the legacy table");
     assert!(nullable, "the healed company_id column is nullable");
 
-    assert!(company_index_exists(&pool, &schema).await, "fence index is created");
+    assert!(fence_index_exists(&pool, &schema).await, "fence index is created");
     assert!(fence_policy_exists(&pool, &schema).await, "fence policy is created");
     assert!(rls_enabled_and_forced(&pool, &schema).await, "RLS is enabled and forced");
 
@@ -209,9 +209,15 @@ async fn populated_legacy_table_migrates_and_null_company_rows_stay_fail_closed(
     .unwrap();
     assert_eq!(null_rows, 2, "legacy rows survive the heal with company_id NULL");
 
-    // One new-era event with a real company, staged through the normal path.
+    // One new-era event on a real org unit, staged through the normal path. The acting unit is
+    // bound so the fill trigger stamps it — that column, not the company, is what the fence reads.
     let owner = Uuid::new_v4();
     let mut tx = pool.begin().await.unwrap();
+    sqlx::query("SELECT set_config('app.acting_unit_id', $1, true)")
+        .bind(owner.to_string())
+        .execute(&mut *tx)
+        .await
+        .unwrap();
     outbox::stage(&mut *tx, &schema, &staged_record(owner)).await.unwrap();
     tx.commit().await.unwrap();
 
@@ -255,7 +261,7 @@ async fn populated_legacy_table_migrates_and_null_company_rows_stay_fail_closed(
     let n_owner: i64 = {
         sqlx::query(&format!("SET ROLE {probe}")).execute(&mut *conn).await.unwrap();
         let mut tx = conn.begin().await.unwrap();
-        sqlx::query("SELECT set_config('app.company_id', $1, true)")
+        sqlx::query("SELECT set_config('app.scope_unit_ids', $1, true)")
             .bind(owner.to_string())
             .execute(&mut *tx)
             .await
@@ -276,7 +282,7 @@ async fn populated_legacy_table_migrates_and_null_company_rows_stay_fail_closed(
         let other = Uuid::new_v4();
         sqlx::query(&format!("SET ROLE {probe}")).execute(&mut *conn).await.unwrap();
         let mut tx = conn.begin().await.unwrap();
-        sqlx::query("SELECT set_config('app.company_id', $1, true)")
+        sqlx::query("SELECT set_config('app.scope_unit_ids', $1, true)")
             .bind(other.to_string())
             .execute(&mut *tx)
             .await

@@ -1,4 +1,4 @@
-//! Proves the `multi_tenant` outbox fence and the relay bypass work TOGETHER (ADR-0011) — the
+//! Proves the `multi_tenant` outbox fence and the relay bypass work TOGETHER (ADR-0029) — the
 //! combination that has never previously been exercised end-to-end.
 //!
 //! Run with the feature on, against a DISPOSABLE test database where resetting these two roles
@@ -8,8 +8,8 @@
 //!     cargo test --features multi_tenant --test relay_rls -- --nocapture
 //!
 //! What it proves:
-//!   - the APP role (NOBYPASSRLS) with no `app.company_id` sees ZERO rows (the fence works);
-//!   - the APP role scoped to company A sees A's rows, not B's (tenant isolation);
+//!   - the APP role (NOBYPASSRLS) with no `app.scope_unit_ids` sees ZERO rows (the fence works);
+//!   - the APP role scoped to unit A sees A's rows, not B's (tenant isolation);
 //!   - the RELAY role (`metaphor_relay`) with NO scope drains ALL rows (the `current_user` bypass),
 //!     including the exact row the fence hid from the unscoped app — so event delivery does not stall.
 
@@ -38,10 +38,16 @@ async fn admin_pool() -> PgPool {
     PgPool::connect(&admin_url()).await.expect("connect admin (needs superuser/role-create)")
 }
 
-/// Bind `app.company_id` on a connection-scoped/tx-local basis.
-async fn scope(conn: &mut sqlx::PgConnection, company: Uuid) {
-    sqlx::query("SELECT set_config('app.company_id', $1, true)")
-        .bind(company.to_string())
+/// Bind the org scope on a tx-local basis: the entitlement union the fence reads, and the acting
+/// unit the fill trigger stamps onto a staged row.
+async fn scope(conn: &mut sqlx::PgConnection, unit: Uuid) {
+    sqlx::query("SELECT set_config('app.scope_unit_ids', $1, true)")
+        .bind(unit.to_string())
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    sqlx::query("SELECT set_config('app.acting_unit_id', $1, true)")
+        .bind(unit.to_string())
         .execute(conn)
         .await
         .unwrap();
@@ -90,14 +96,15 @@ async fn fence_hides_rows_from_unscoped_app_but_relay_drains_all() {
     let app = PgPool::connect_with(base.clone().username(APP_ROLE).password(APP_PW)).await.unwrap();
     let relay = PgPool::connect_with(base.clone().username(RELAY_ROLE).password(RELAY_PW)).await.unwrap();
 
-    let company_a = Uuid::new_v4();
-    let company_b = Uuid::new_v4();
+    let unit_a = Uuid::new_v4();
+    let unit_b = Uuid::new_v4();
 
-    // 5. Stage one event for company A as the APP role, scoped to A.
+    // 5. Stage one event on unit A as the APP role, scoped to A. The record still carries a company
+    //    id — the type is unchanged — while the fence reads the org unit the fill trigger stamps.
     {
         let mut tx = app.begin().await.unwrap();
-        scope(&mut tx, company_a).await;
-        let rec = OutboxRecord::new("TestEvent", "Thing", "1", company_a, serde_json::json!({"k":"v"}), chrono::Utc::now());
+        scope(&mut tx, unit_a).await;
+        let rec = OutboxRecord::new("TestEvent", "Thing", "1", unit_a, serde_json::json!({"k":"v"}), chrono::Utc::now());
         outbox::stage(&mut *tx, SCHEMA, &rec).await.unwrap();
         tx.commit().await.unwrap();
     }
@@ -111,12 +118,12 @@ async fn fence_hides_rows_from_unscoped_app_but_relay_drains_all() {
     // 7. APP role scoped to A sees 1; scoped to B sees 0 (tenant isolation).
     {
         let mut tx = app.begin().await.unwrap();
-        scope(&mut tx, company_a).await;
+        scope(&mut tx, unit_a).await;
         assert_eq!(count(&mut tx).await, 1, "scoped-to-A sees its row");
     }
     {
         let mut tx = app.begin().await.unwrap();
-        scope(&mut tx, company_b).await;
+        scope(&mut tx, unit_b).await;
         assert_eq!(count(&mut tx).await, 0, "scoped-to-B sees nothing");
     }
 
@@ -132,7 +139,7 @@ async fn fence_hides_rows_from_unscoped_app_but_relay_drains_all() {
     {
         let got = delivered.lock().unwrap();
         assert_eq!(got.len(), 1);
-        assert_eq!(got[0].company_id, company_a);
+        assert_eq!(got[0].company_id, unit_a);
         assert_eq!(got[0].event_type, "TestEvent");
     }
 
