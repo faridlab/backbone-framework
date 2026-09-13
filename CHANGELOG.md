@@ -15,6 +15,32 @@ back to the `## [Unreleased]` section.
 
 ## [Unreleased]
 
+## [2.7.19] - 2026-09-13
+
+### Fixed
+
+- **backbone-orm** — a generic `create` no longer overrides column defaults. The insert named no
+  columns and selected every column of the row type, so a column the entity does not know about
+  arrived as an explicit NULL, and an explicit NULL is not an absent value: it beats the DEFAULT.
+  Composition-installed tenancy (ADR-0029) defaults `org_unit_id` from the acting unit, so generic
+  creates over a scoped table wrote NULL and the write-path guard refused them. The insert now names
+  only the columns the payload carries; a column sent as an explicit JSON null is still written as
+  NULL. A serialized field with no matching column is now an error that says so, where it was
+  silently discarded before.
+- **backbone-orm** — a nested `with_org_request_scope` no longer costs a connection and a stack
+  frame. When a request connection is already bound, the incoming scope is exactly the ambient one,
+  and the pool is the same, the call reuses what is there rather than acquiring a second connection
+  and re-running the binds. The scope's own machinery moved behind a boxed future as well, so a
+  nesting level costs a pointer instead of the whole slow path's locals — two levels used to consume
+  about 1.23 MB and abort a 2 MB worker mid-delivery; four levels now fit in 1 MB.
+- **backbone-outbox** — a transport that gives up can say so. `OutboxError::Exhausted` marks the row
+  dead — visible, not published, and re-emittable — instead of the two options that both lost work
+  silently: answering `Ok`, which reported a delivery that never happened, or answering `Publish`,
+  which re-handed the same doomed record forever. Dead rows are excluded from the drain, counted by
+  `outbox::dead_count`, listed by `relay::list_dead`, and revived by `relay::reemit`. Index names are
+  also truncated the way Postgres truncates them, and `migrate` refuses a schema name whose two index
+  names would collapse into one rather than dropping the index it just created.
+
 ## [2.7.18] - 2026-09-11
 
 ### Added
