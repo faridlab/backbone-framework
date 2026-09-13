@@ -68,6 +68,53 @@ pub async fn migrate(pool: &PgPool, schema: &str) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // ADR-0029's org axis. Installed unconditionally, the same way `company_id` is: the column
+    // belongs with the record, only the RLS fence below is opt-in. Nullable on purpose — a table
+    // created by an older version of this function heals in place, and a deployment with no org
+    // spine simply leaves it NULL.
+    sqlx::query(&format!(
+        "ALTER TABLE {schema}.outbox_events ADD COLUMN IF NOT EXISTS org_unit_id uuid"
+    ))
+    .execute(pool)
+    .await?;
+    // Carry existing rows over. The org spine copied company ids verbatim when it was built, so the
+    // two identifiers are the same value for any row staged before the re-key — the same identity
+    // the tenancy decorator relies on when it backfills a module's table.
+    sqlx::query(&format!(
+        "UPDATE {schema}.outbox_events SET org_unit_id = company_id
+           WHERE org_unit_id IS NULL AND company_id IS NOT NULL"
+    ))
+    .execute(pool)
+    .await?;
+    // Stamp the acting unit on a row that arrives without one. `stage` does not name the column, so
+    // this is what fills it; a writer that names every column and sends an explicit NULL is covered
+    // too, since the trigger tests the value rather than its absence. An unbound scope leaves NULL,
+    // which the fence below then refuses — fail-closed, not fail-quiet.
+    sqlx::query(&format!(
+        r#"CREATE OR REPLACE FUNCTION {schema}.outbox_events_org_unit_fill() RETURNS trigger AS $$
+           BEGIN
+               IF NEW.org_unit_id IS NULL THEN
+                   NEW.org_unit_id := NULLIF(current_setting('app.acting_unit_id', true), '')::uuid;
+               END IF;
+               RETURN NEW;
+           END;
+           $$ LANGUAGE plpgsql"#
+    ))
+    .execute(pool)
+    .await?;
+    sqlx::query(&format!(
+        "DROP TRIGGER IF EXISTS outbox_events_org_unit_fill ON {schema}.outbox_events"
+    ))
+    .execute(pool)
+    .await?;
+    sqlx::query(&format!(
+        "CREATE TRIGGER outbox_events_org_unit_fill
+           BEFORE INSERT ON {schema}.outbox_events
+           FOR EACH ROW EXECUTE FUNCTION {schema}.outbox_events_org_unit_fill()"
+    ))
+    .execute(pool)
+    .await?;
+
     // Partial index over just the un-drained tail — keeps the relay's poll cheap as the table grows.
     // Dead rows are excluded because the relay no longer offers them to the transport.
     let pending_idx = index_name(schema, "outbox_pending");
@@ -93,7 +140,7 @@ pub async fn migrate(pool: &PgPool, schema: &str) -> Result<()> {
         .execute(pool)
         .await?;
 
-    // ADR-0011: fence `outbox_events` by `company_id` so a tenant's event stream is isolated. This is
+    // ADR-0029: fence `outbox_events` by `org_unit_id` so a tenant's event stream is isolated. This is
     // the table OWNER applying the fence (the correct home — it was previously a hand-authored backfill
     // migration bolted onto each module). Opt-in via the `multi_tenant` feature so the framework stays
     // tenant-agnostic; a company-tenant service enables it. The `company_id` column is guaranteed
@@ -105,9 +152,9 @@ pub async fn migrate(pool: &PgPool, schema: &str) -> Result<()> {
     // per-table bypass, NOT a BYPASSRLS attribute, so every other table's fence still holds.
     #[cfg(feature = "multi_tenant")]
     {
-        let company_idx = index_name(schema, "outbox_company_id");
+        let org_idx = index_name(schema, "outbox_org_unit_id");
         sqlx::query(&format!(
-            "CREATE INDEX IF NOT EXISTS {company_idx} ON {schema}.outbox_events (company_id)"
+            "CREATE INDEX IF NOT EXISTS {org_idx} ON {schema}.outbox_events (org_unit_id)"
         ))
         .execute(pool)
         .await?;
@@ -115,21 +162,35 @@ pub async fn migrate(pool: &PgPool, schema: &str) -> Result<()> {
             .execute(pool).await?;
         sqlx::query(&format!("ALTER TABLE {schema}.outbox_events FORCE ROW LEVEL SECURITY"))
             .execute(pool).await?;
-        sqlx::query(&format!(
-            "DROP POLICY IF EXISTS outbox_events_company_isolation ON {schema}.outbox_events"
-        ))
-        .execute(pool)
-        .await?;
-        sqlx::query(&format!(
-            r#"CREATE POLICY outbox_events_company_isolation ON {schema}.outbox_events
+        // The org fence, in the shape the tenancy decorator installs everywhere else: membership of
+        // the session's entitlement union, not equality with a single id. A session may be entitled
+        // to a subtree, and a row staged on any unit of it is the session's to see.
+        //
+        // The whole swap goes in ONE simple query, which Postgres runs in a single implicit
+        // transaction. That is what makes it both repeatable and safe. `CREATE POLICY` has no
+        // IF NOT EXISTS, so a second boot needs the drop in front of it; but a table under FORCE RLS
+        // with no policy denies everything, so a drop that is visible on its own would stall the
+        // relay mid-drain. Inside one transaction no other session ever observes the gap.
+        sqlx::raw_sql(&format!(
+            r#"DROP POLICY IF EXISTS outbox_events_org_unit_isolation ON {schema}.outbox_events;
+               CREATE POLICY outbox_events_org_unit_isolation ON {schema}.outbox_events
                  FOR ALL
-                 USING      (company_id = NULLIF(current_setting('app.company_id', true), '')::uuid
+                 USING      (org_unit_id = ANY(string_to_array(
+                                 current_setting('app.scope_unit_ids', true), ',')::uuid[])
                              OR current_user = 'metaphor_relay')
-                 WITH CHECK (company_id = NULLIF(current_setting('app.company_id', true), '')::uuid
-                             OR current_user = 'metaphor_relay')"#
+                 WITH CHECK (org_unit_id = ANY(string_to_array(
+                                 current_setting('app.scope_unit_ids', true), ',')::uuid[])
+                             OR current_user = 'metaphor_relay');
+               DROP POLICY IF EXISTS outbox_events_company_isolation ON {schema}.outbox_events;"#
         ))
         .execute(pool)
         .await?;
+        // The company index goes with the policy that used it. The column itself stays until every
+        // producer stops filling it.
+        let company_idx = index_name(schema, "outbox_company_id");
+        sqlx::query(&format!("DROP INDEX IF EXISTS {schema}.{company_idx}"))
+            .execute(pool)
+            .await?;
     }
 
     sqlx::query(&format!(

@@ -15,6 +15,22 @@ back to the `## [Unreleased]` section.
 
 ## [Unreleased]
 
+### Changed
+
+- **backbone-outbox** — the outbox estate moves from the company axis to the org-unit axis
+  (ADR-0029). `migrate` installs an `org_unit_id` column, carries existing rows over from
+  `company_id` (the org spine copied company ids verbatim, so the two are the same value for any row
+  staged before the re-key), and stamps a staged row with `app.acting_unit_id` through a BEFORE
+  INSERT trigger — `stage` does not name the column, so no producer changes. The RLS fence now reads
+  the session's entitlement union (`app.scope_unit_ids`) in the shape the tenancy decorator installs
+  everywhere else, and the company-keyed policy and its index are retired. The whole policy swap runs
+  in one implicit transaction: `CREATE POLICY` has no IF NOT EXISTS so the drop must come first, but a
+  table under FORCE RLS with no policy denies everything, and no other session may observe that gap.
+  The relay's `current_user = 'metaphor_relay'` bypass is unchanged, so delivery stays cross-tenant.
+  `OutboxRecord` still carries `company_id`: removing it is a breaking change across every producing
+  module and belongs to the API-surface retirement, not here.
+
+
 ## [2.7.19] - 2026-09-13
 
 ### Fixed
