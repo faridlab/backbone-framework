@@ -208,3 +208,141 @@ async fn m5_crash_window_exactly_once_draw() {
         .fetch_one(&pool).await.unwrap();
     assert_eq!(outstanding, 60.0, "redelivery did NOT double-draw (exactly-once effect)");
 }
+
+/// M9 — a transport that gives up marks the row DEAD, not published.
+///
+/// The shape this guards against: the bus retried a refusing consumer, dead-lettered it in memory,
+/// and answered `Ok`. The relay believed it and stamped `published_at`, so the outbox read as
+/// delivered while the effect was dropped and the only record of it was gone.
+#[tokio::test]
+async fn m9_exhausted_publish_is_dead_not_published() {
+    let pool = pool().await;
+    let schema = fresh_schema(&pool).await;
+    let r = rec("Doomed", "1");
+    outbox::stage(&pool, &schema, &r).await.unwrap();
+
+    let published = relay::drain_once(&pool, &schema, 10, |_r: OutboxRecord| async {
+        Err(OutboxError::Exhausted("consumer refused three times".into()))
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(published, 0, "an exhausted record is not counted as published");
+    assert_eq!(
+        outbox::pending_count(&pool, &schema).await.unwrap(),
+        0,
+        "a dead record is not offered to the transport again"
+    );
+    assert_eq!(outbox::dead_count(&pool, &schema).await.unwrap(), 1, "it is visible as dead");
+
+    let published_at: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(&format!(
+        "SELECT published_at FROM {schema}.outbox_events WHERE id=$1"
+    ))
+    .bind(r.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(published_at.is_none(), "a dropped effect must never read as delivered");
+}
+
+/// M10 — a dead record carries why, and the relay stops handing it over.
+#[tokio::test]
+async fn m10_dead_record_is_listed_with_its_reason() {
+    let pool = pool().await;
+    let schema = fresh_schema(&pool).await;
+    outbox::stage(&pool, &schema, &rec("Doomed", "1")).await.unwrap();
+
+    relay::drain_once(&pool, &schema, 10, |_r: OutboxRecord| async {
+        Err(OutboxError::Exhausted("downstream service is gone".into()))
+    })
+    .await
+    .unwrap();
+
+    let dead = relay::list_dead(&pool, &schema, 10).await.unwrap();
+    assert_eq!(dead.len(), 1);
+    assert_eq!(dead[0].event_type, "Doomed");
+    assert_eq!(dead[0].failure_reason.as_deref(), Some("downstream service is gone"));
+
+    // A second pass must not re-offer it: the transport already gave up.
+    let handed_over = Arc::new(AtomicUsize::new(0));
+    let seen = handed_over.clone();
+    relay::drain_once(&pool, &schema, 10, move |_r: OutboxRecord| {
+        let seen = seen.clone();
+        async move {
+            seen.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(handed_over.load(Ordering::SeqCst), 0, "a dead record is not re-handed");
+}
+
+/// M11 — re-emit revives a dead record, and the next drain delivers it.
+#[tokio::test]
+async fn m11_reemit_revives_a_dead_record() {
+    let pool = pool().await;
+    let schema = fresh_schema(&pool).await;
+    let r = rec("Doomed", "1");
+    outbox::stage(&pool, &schema, &r).await.unwrap();
+
+    relay::drain_once(&pool, &schema, 10, |_r: OutboxRecord| async {
+        Err(OutboxError::Exhausted("consumer was misconfigured".into()))
+    })
+    .await
+    .unwrap();
+    assert_eq!(outbox::dead_count(&pool, &schema).await.unwrap(), 1);
+
+    assert!(relay::reemit(&pool, &schema, r.id).await.unwrap(), "the row is revived");
+    assert_eq!(outbox::dead_count(&pool, &schema).await.unwrap(), 0);
+    assert_eq!(outbox::pending_count(&pool, &schema).await.unwrap(), 1, "it is pending again");
+
+    // The cause is fixed; this pass delivers it.
+    let published = relay::drain_once(&pool, &schema, 10, ok_publish).await.unwrap();
+    assert_eq!(published, 1);
+    assert_eq!(outbox::pending_count(&pool, &schema).await.unwrap(), 0);
+
+    // Re-emitting a published row is a no-op, not a redelivery.
+    assert!(!relay::reemit(&pool, &schema, r.id).await.unwrap());
+}
+
+/// M12 — one shared cause can be cleared in one move.
+#[tokio::test]
+async fn m12_reemit_all_revives_the_batch() {
+    let pool = pool().await;
+    let schema = fresh_schema(&pool).await;
+    for i in 0..3 {
+        outbox::stage(&pool, &schema, &rec("Doomed", &format!("{i}"))).await.unwrap();
+    }
+
+    relay::drain_once(&pool, &schema, 10, |_r: OutboxRecord| async {
+        Err(OutboxError::Exhausted("downstream was down".into()))
+    })
+    .await
+    .unwrap();
+    assert_eq!(outbox::dead_count(&pool, &schema).await.unwrap(), 3);
+
+    assert_eq!(relay::reemit_all(&pool, &schema).await.unwrap(), 3);
+    assert_eq!(relay::drain_once(&pool, &schema, 10, ok_publish).await.unwrap(), 3);
+    assert_eq!(outbox::dead_count(&pool, &schema).await.unwrap(), 0);
+}
+
+/// M13 — a retryable failure still behaves exactly as before: left pending, handed over again.
+///
+/// The dead-letter arm must not have turned ordinary transport flakiness into a dropped event.
+#[tokio::test]
+async fn m13_retryable_failure_is_still_retried() {
+    let pool = pool().await;
+    let schema = fresh_schema(&pool).await;
+    outbox::stage(&pool, &schema, &rec("Flaky", "1")).await.unwrap();
+
+    relay::drain_once(&pool, &schema, 10, |_r: OutboxRecord| async {
+        Err(OutboxError::Publish("connection reset".into()))
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(outbox::dead_count(&pool, &schema).await.unwrap(), 0, "a retryable failure is not dead");
+    assert_eq!(outbox::pending_count(&pool, &schema).await.unwrap(), 1, "it stays pending");
+    assert_eq!(relay::drain_once(&pool, &schema, 10, ok_publish).await.unwrap(), 1, "and is delivered");
+}
