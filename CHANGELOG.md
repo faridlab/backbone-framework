@@ -13,8 +13,6 @@ The release workflow reads the section matching the git tag's version and
 uses it as the GitHub Release body. If no matching section is found it falls
 back to the `## [Unreleased]` section.
 
-## [Unreleased]
-
 ### Changed
 
 - **backbone-outbox** — the outbox estate moves from the company axis to the org-unit axis
@@ -30,6 +28,13 @@ back to the `## [Unreleased]` section.
   `OutboxRecord` still carries `company_id`: removing it is a breaking change across every producing
   module and belongs to the API-surface retirement, not here.
 
+
+## [2.7.20] - 2026-09-14
+
+### Changed
+
+- **backbone-outbox** — the outbox estate moves from the company axis to the org-unit axis
+  (ADR-0029). See the Unreleased notes folded in below.
 
 ## [2.7.19] - 2026-09-13
 
