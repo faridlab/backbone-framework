@@ -13,6 +13,38 @@ The release workflow reads the section matching the git tag's version and
 uses it as the GitHub Release body. If no matching section is found it falls
 back to the `## [Unreleased]` section.
 
+## [2.7.22] - 2026-09-15
+
+### Added
+
+- **backbone-core / backbone-orm** — `GET /api/v1/{collection}/aggregate` on the generic CRUD
+  router, so every entity gains it at once. Takes the list endpoint's own filter and search syntax
+  plus `group_by` and `sum`/`avg`/`min`/`max`, and answers with one entry per distinct group and the
+  overall total together. Groups and total come from a single `GROUP BY GROUPING SETS ((col), ())`
+  statement, which is also what keeps them consistent — a separate total query could observe a
+  different set of rows. `GROUPING()` is what makes a null group key representable: the rows whose
+  group column is null and the overall total both carry a null key, and nothing else distinguishes
+  them. Reductions cross the wire as strings, because Postgres `numeric` carries more precision than
+  a JSON double and money columns are exactly where that would show. Group and reduction column
+  names are resolved against the entity's declared columns and the declared key is what reaches the
+  SQL, so a caller's string is never escaped into an identifier position — it either matches a real
+  column or is refused. The group count is capped and the response says `truncated` when it was, so
+  a partial chart is never mistaken for a complete one. The `CrudRepository` default returns an
+  error rather than zeros: a repository that cannot group says so, instead of rendering an empty
+  chart that reads as a real answer about an empty table.
+
+### Fixed
+
+- **backbone-core** — `GET /api/v1/{collection}/count` ignored the filters it was sent and answered
+  with the whole-table active count. The route mounted a handler with no query extractor at all, so
+  the query string never arrived, and the count below it had no condition beyond the soft-delete
+  guard. The filtered count now delegates to the list path, whose total is already built from the
+  same where-clause as its data query, so the two cannot drift apart again — a second implementation
+  of filter parsing is how they drifted in the first place. Filter normalization is now one function
+  shared by both endpoints; previously it lived inline in the list handler, so the count path would
+  have read `fields=` as a column predicate. A malformed filter on `/count` is now a 400 rather than
+  a 500, which only became reachable once the filters were read at all.
+
 ## [2.7.20] - 2026-09-14
 
 ### Changed

@@ -221,6 +221,18 @@ where
             .map_err(ServiceError::Repository)
     }
 
+    /// Group and reduce the rows `list` would return, under the same filters.
+    pub async fn aggregate(
+        &self,
+        spec: &backbone_orm::repository::AggregateSpec,
+        filters: HashMap<String, String>,
+    ) -> ServiceResult<backbone_orm::repository::AggregateResult> {
+        self.repository
+            .aggregate_filtered(spec, filters)
+            .await
+            .map_err(ServiceError::Repository)
+    }
+
     pub async fn create(&self, dto: C) -> ServiceResult<E> {
         let mut entity = E::from_create_dto(dto)?;
         self.lifecycle.before_create(&mut entity).await?;
@@ -752,6 +764,14 @@ where
         filters: HashMap<String, String>,
     ) -> Result<(Vec<E>, u64), ServiceError> {
         self.list(page, limit, filters).await
+    }
+
+    async fn aggregate(
+        &self,
+        spec: &backbone_orm::repository::AggregateSpec,
+        filters: HashMap<String, String>,
+    ) -> Result<backbone_orm::repository::AggregateResult, ServiceError> {
+        self.aggregate(spec, filters).await
     }
 
     async fn create(&self, dto: C) -> Result<E, ServiceError> {

@@ -575,3 +575,327 @@ where
         Ok(result.rows_affected())
     }
 }
+
+// ─── Aggregation ──────────────────────────────────────────────────────────────
+
+/// Which reduction to apply to a column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AggregateFn {
+    Sum,
+    Avg,
+    Min,
+    Max,
+}
+
+impl AggregateFn {
+    fn sql(self) -> &'static str {
+        match self {
+            AggregateFn::Sum => "SUM",
+            AggregateFn::Avg => "AVG",
+            AggregateFn::Min => "MIN",
+            AggregateFn::Max => "MAX",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            AggregateFn::Sum => "sum",
+            AggregateFn::Avg => "avg",
+            AggregateFn::Min => "min",
+            AggregateFn::Max => "max",
+        }
+    }
+
+    /// `SUM`/`AVG` on a text column is a type error, not a zero. `MIN`/`MAX`
+    /// order any comparable type, so they carry no such restriction.
+    fn requires_numeric(self) -> bool {
+        matches!(self, AggregateFn::Sum | AggregateFn::Avg)
+    }
+}
+
+/// What to group by and what to reduce — the parsed form of the query string.
+#[derive(Debug, Clone, Default)]
+pub struct AggregateSpec {
+    /// Column whose distinct values become groups. `None` asks for one total.
+    pub group_by: Option<String>,
+    /// `(function, column)` pairs, in the order the caller asked for them.
+    pub reductions: Vec<(AggregateFn, String)>,
+    /// Most groups to return before reporting the answer as truncated.
+    pub group_limit: usize,
+}
+
+/// The default ceiling on distinct groups.
+///
+/// A `group_by` on a uuid or a timestamp yields one group per row, which is a
+/// table scan wearing a chart's clothes. Rather than refusing those columns —
+/// a list that would be wrong for some schema sooner or later — the answer is
+/// capped and the cap is *reported*, so a caller can tell a complete picture
+/// from a partial one instead of quietly drawing the wrong one.
+pub const DEFAULT_GROUP_LIMIT: usize = 200;
+
+/// One group's numbers. `key` is the group's value; `None` is a real answer —
+/// the rows whose group column is null — and is distinct from "no rows".
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AggregateGroup {
+    pub key: Option<String>,
+    pub count: u64,
+    /// Reduction results keyed `"sum:amount"`, carried as strings.
+    ///
+    /// Postgres `numeric` holds more precision than an IEEE double, and money
+    /// columns are exactly where that bites: a tenant large enough for the
+    /// total to matter is a tenant large enough to round it. The string is the
+    /// exact value Postgres computed; the caller decides how to parse it.
+    /// `None` is SQL NULL — no rows contributed — which is not zero.
+    pub values: HashMap<String, Option<String>>,
+}
+
+/// Groups plus the overall total, computed together.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AggregateResult {
+    pub groups: Vec<AggregateGroup>,
+    pub total: AggregateGroup,
+    /// True when more distinct groups exist than `group_limit` allowed.
+    pub truncated: bool,
+}
+
+/// A column name rejected by the allow-list, or a reduction that its type
+/// cannot answer.
+#[derive(Debug, Clone)]
+pub struct AggregateFieldError(pub String);
+
+impl std::fmt::Display for AggregateFieldError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for AggregateFieldError {}
+
+/// True for the Postgres types `SUM`/`AVG` accept.
+fn is_numeric_pg_type(pg_type: &str) -> bool {
+    let t = pg_type.trim().to_ascii_lowercase();
+    let t = t.split('(').next().unwrap_or(&t).trim();
+    matches!(
+        t,
+        "numeric" | "decimal" | "money"
+            | "smallint" | "int2" | "integer" | "int" | "int4" | "bigint" | "int8"
+            | "real" | "float4" | "double precision" | "float8"
+            | "smallserial" | "serial" | "bigserial"
+    )
+}
+
+/// Resolve a caller-supplied column name against the entity's real columns.
+///
+/// This is the whole defence for the aggregate path. Unlike a filter *value*,
+/// which is bound as a parameter, a `group_by` or `sum` column is spliced into
+/// the SQL as an identifier — binding cannot protect it. So the name is never
+/// escaped or quoted into safety; it is *replaced* by the matching key already
+/// present in the entity's declared column map, and a name with no match is
+/// refused. Nothing a caller types can reach the query text.
+fn resolve_column<'a>(
+    name: &str,
+    column_types: &'a HashMap<String, String>,
+) -> Result<(&'a str, &'a str), AggregateFieldError> {
+    column_types
+        .get_key_value(name)
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .ok_or_else(|| {
+            AggregateFieldError(format!("unknown field `{name}` — not a column of this entity"))
+        })
+}
+
+impl<T: for<'a> FromRow<'a, PgRow> + Send + Unpin> PostgresRepository<T> {
+    /// Group and reduce rows in one statement, under the same filters, the same
+    /// soft-delete convention and the same tenancy fence as the list endpoint.
+    ///
+    /// Groups and the overall total come back from a single `GROUPING SETS`
+    /// query, which is what lets a caller draw a chart and its headline from
+    /// one reply, and what keeps the two numbers consistent — a separate total
+    /// query could observe a different set of rows.
+    pub async fn aggregate_with_filters(
+        &self,
+        spec: &AggregateSpec,
+        filters: &HashMap<String, String>,
+        column_types: &HashMap<String, String>,
+        search_fields: &[&str],
+    ) -> anyhow::Result<AggregateResult> {
+        let mut query_filter = parse_query_filter(filters, column_types, None)?;
+        if !search_fields.is_empty() {
+            query_filter.search_fields = search_fields.iter().map(|s| s.to_string()).collect();
+        }
+        // Grouping replaces row output entirely: paging and ordering describe a
+        // page of rows, and there are none.
+        query_filter.limit = None;
+        query_filter.offset = None;
+        let (where_clause, filter_params) = query_filter.build_where_clause();
+
+        // Every identifier below comes from `column_types`, never from the caller.
+        let mut selects: Vec<String> = Vec::new();
+        let mut value_keys: Vec<String> = Vec::new();
+        for (func, field) in &spec.reductions {
+            let (column, pg_type) = resolve_column(field, column_types)?;
+            if func.requires_numeric() && !is_numeric_pg_type(pg_type) {
+                return Err(AggregateFieldError(format!(
+                    "cannot {} `{}`: its type is {} — {} needs a numeric column",
+                    func.label(),
+                    column,
+                    pg_type,
+                    func.label()
+                ))
+                .into());
+            }
+            let key = format!("{}:{}", func.label(), column);
+            // Cast to text in SQL so the exact value Postgres computed is what
+            // crosses the wire — see `AggregateGroup::values`.
+            selects.push(format!("{}({})::text AS \"{}\"", func.sql(), column, key));
+            value_keys.push(key);
+        }
+
+        let group_limit = if spec.group_limit == 0 { DEFAULT_GROUP_LIMIT } else { spec.group_limit };
+        let reductions = if selects.is_empty() { String::new() } else { format!(", {}", selects.join(", ")) };
+
+        let sql = match &spec.group_by {
+            Some(field) => {
+                let (column, _) = resolve_column(field, column_types)?;
+                format!(
+                    "SELECT GROUPING({column}) AS __is_total, ({column})::text AS __group_key, \
+                     COUNT(*) AS __count{reductions} \
+                     FROM {table}{where_clause} \
+                     GROUP BY GROUPING SETS (({column}), ()) \
+                     ORDER BY __is_total DESC, __count DESC \
+                     LIMIT {limit}",
+                    column = column,
+                    reductions = reductions,
+                    table = self.table_name,
+                    where_clause = where_clause,
+                    // One total row, the groups themselves, and one more to
+                    // detect that a further group existed.
+                    limit = group_limit + 2,
+                )
+            }
+            None => format!(
+                "SELECT 1 AS __is_total, NULL::text AS __group_key, COUNT(*) AS __count{reductions} \
+                 FROM {table}{where_clause}",
+                reductions = reductions,
+                table = self.table_name,
+                where_clause = where_clause,
+            ),
+        };
+
+        let mut builder = sqlx::query(&sql);
+        for param in &filter_params {
+            builder = builder.bind(param);
+        }
+        let rows = crate::company_scope::fetch_all_rows_scoped(&self.pool, builder).await?;
+
+        let read_group = |row: &PgRow| -> AggregateGroup {
+            use sqlx::Row as _;
+            let mut values = HashMap::with_capacity(value_keys.len());
+            for key in &value_keys {
+                values.insert(key.clone(), row.try_get::<Option<String>, _>(key.as_str()).ok().flatten());
+            }
+            AggregateGroup {
+                key: row.try_get::<Option<String>, _>("__group_key").ok().flatten(),
+                count: row.try_get::<i64, _>("__count").unwrap_or(0).max(0) as u64,
+                values,
+            }
+        };
+
+        use sqlx::Row as _;
+        let mut total: Option<AggregateGroup> = None;
+        let mut groups: Vec<AggregateGroup> = Vec::new();
+        for row in &rows {
+            let is_total = row.try_get::<i32, _>("__is_total").unwrap_or(0) == 1;
+            if is_total {
+                // Ordered first, so it survives the cap.
+                total = Some(read_group(row));
+            } else {
+                groups.push(read_group(row));
+            }
+        }
+
+        let truncated = groups.len() > group_limit;
+        groups.truncate(group_limit);
+
+        // No rows at all means no total row either: an empty result is a real
+        // answer of zero, not a missing one.
+        let total = total.unwrap_or_else(|| AggregateGroup {
+            key: None,
+            count: 0,
+            values: value_keys.iter().map(|k| (k.clone(), None)).collect(),
+        });
+
+        Ok(AggregateResult { groups, total, truncated })
+    }
+}
+
+#[cfg(test)]
+mod aggregate_field_tests {
+    use super::*;
+
+    fn columns() -> HashMap<String, String> {
+        [
+            ("status", "text"),
+            ("total", "numeric"),
+            ("qty", "integer"),
+            ("notes", "text"),
+        ]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
+    }
+
+    #[test]
+    fn resolves_only_declared_columns() {
+        let cols = columns();
+        assert_eq!(resolve_column("total", &cols).unwrap().0, "total");
+        assert!(resolve_column("password_hash", &cols).is_err());
+    }
+
+    /// The allow-list is the entire defence, because a group/sum column is
+    /// spliced into SQL as an identifier and cannot be bound as a parameter.
+    #[test]
+    fn rejects_injection_attempts_rather_than_escaping_them() {
+        let cols = columns();
+        for probe in [
+            "total) FROM selling.sales_orders; DROP TABLE users --",
+            "status\"",
+            "1=1",
+            "total, (SELECT password FROM users)",
+            "",
+        ] {
+            assert!(
+                resolve_column(probe, &cols).is_err(),
+                "`{probe}` must be refused, never escaped into the query"
+            );
+        }
+    }
+
+    /// The returned name is the map's own key, not the caller's string, so no
+    /// caller-controlled bytes can reach the SQL even on a match.
+    #[test]
+    fn returns_the_declared_key_not_the_callers_string() {
+        let cols = columns();
+        let (name, _) = resolve_column("total", &cols).unwrap();
+        assert!(std::ptr::eq(name, cols.get_key_value("total").unwrap().0.as_str()));
+    }
+
+    #[test]
+    fn sum_and_avg_require_a_numeric_type() {
+        assert!(AggregateFn::Sum.requires_numeric());
+        assert!(AggregateFn::Avg.requires_numeric());
+        // Ordering works on any comparable column, so these stay open.
+        assert!(!AggregateFn::Min.requires_numeric());
+        assert!(!AggregateFn::Max.requires_numeric());
+    }
+
+    #[test]
+    fn recognises_the_numeric_postgres_types() {
+        for t in ["numeric", "NUMERIC(14,2)", "integer", "bigint", "double precision", "money"] {
+            assert!(is_numeric_pg_type(t), "{t} should count as numeric");
+        }
+        for t in ["text", "uuid", "timestamptz", "boolean", "jsonb", "USER-DEFINED"] {
+            assert!(!is_numeric_pg_type(t), "{t} must not accept a SUM");
+        }
+    }
+}

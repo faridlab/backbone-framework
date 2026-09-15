@@ -373,6 +373,32 @@ where
             .list_with_filters(pagination, &filters_map, column_types, search_fields)
             .await
     }
+
+    /// The aggregate twin of [`Self::run_filtered_query`].
+    ///
+    /// Takes the same `base_condition` so an aggregate is computed over exactly
+    /// the row set the matching list would return — a total that counted
+    /// soft-deleted rows, or another tenant's, would be wrong in a way no
+    /// caller could see.
+    pub async fn run_aggregate_query(
+        &self,
+        spec: &crate::repository::AggregateSpec,
+        base_condition: Option<&str>,
+        filters: &HashMap<String, String>,
+        column_types: &HashMap<String, String>,
+        search_fields: &[&str],
+    ) -> Result<crate::repository::AggregateResult>
+    where
+        T: Send + Sync,
+    {
+        let mut filters_map = filters.clone();
+        if let Some(cond) = base_condition {
+            filters_map.insert("__base_condition".to_string(), cond.to_string());
+        }
+        self.inner
+            .aggregate_with_filters(spec, &filters_map, column_types, search_fields)
+            .await
+    }
 }
 
 // ─── SoftDelete mode ──────────────────────────────────────────────────────────
@@ -428,6 +454,21 @@ where
             &column_types,
             &search_fields_owned,
         ).await
+    }
+
+    /// Group and reduce active entities, skipping the soft-deleted.
+    pub async fn aggregate_filtered(
+        &self,
+        spec: &crate::repository::AggregateSpec,
+        filters: Option<&HashMap<String, String>>,
+    ) -> Result<crate::repository::AggregateResult>
+    where
+        T: EntityRepoMeta + Send + Sync,
+    {
+        let filters_map = filters.cloned().unwrap_or_default();
+        let column_types = T::column_types();
+        let search_fields_owned: Vec<&'static str> = T::search_fields().iter().copied().collect();
+        self.run_aggregate_query(spec, Some("metadata->>'deleted_at' IS NULL"), &filters_map, &column_types, &search_fields_owned).await
     }
 
     /// Paginate active entities, fenced to `company`.
@@ -932,6 +973,21 @@ where
         let column_types = T::column_types();
         let search_fields_owned: Vec<&'static str> = T::search_fields().iter().copied().collect();
         self.run_filtered_query(pagination, None, &filters_map, &column_types, &search_fields_owned).await
+    }
+
+    /// Group and reduce entities. This mode has no trash to exclude.
+    pub async fn aggregate_filtered(
+        &self,
+        spec: &crate::repository::AggregateSpec,
+        filters: Option<&HashMap<String, String>>,
+    ) -> Result<crate::repository::AggregateResult>
+    where
+        T: EntityRepoMeta + Send + Sync,
+    {
+        let filters_map = filters.cloned().unwrap_or_default();
+        let column_types = T::column_types();
+        let search_fields_owned: Vec<&'static str> = T::search_fields().iter().copied().collect();
+        self.run_aggregate_query(spec, None, &filters_map, &column_types, &search_fields_owned).await
     }
 
     /// Find an entity by primary key.

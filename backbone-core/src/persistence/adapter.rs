@@ -144,6 +144,14 @@ where
         Ok(self.repository.list(page, limit).await?)
     }
 
+    async fn aggregate(
+        &self,
+        spec: &backbone_orm::repository::AggregateSpec,
+        filters: HashMap<String, String>,
+    ) -> Result<backbone_orm::repository::AggregateResult, Self::Error> {
+        Ok(self.repository.aggregate_filtered(spec, filters).await?)
+    }
+
     async fn create(&self, dto: C) -> Result<E, Self::Error> {
         let entity = (self.create_mapper)(dto);
         Ok(self.repository.create(entity).await?)
@@ -285,6 +293,14 @@ where
         _filters: HashMap<String, String>,
     ) -> Result<(Vec<E>, u64), Self::Error> {
         Ok(self.repository.list(page, limit).await?)
+    }
+
+    async fn aggregate(
+        &self,
+        spec: &backbone_orm::repository::AggregateSpec,
+        filters: HashMap<String, String>,
+    ) -> Result<backbone_orm::repository::AggregateResult, Self::Error> {
+        Ok(self.repository.aggregate_filtered(spec, filters).await?)
     }
 
     async fn create(&self, entity: E) -> Result<E, Self::Error> {
@@ -458,6 +474,14 @@ where
         } else {
             Ok(self.repository.search(filters, page, limit).await?)
         }
+    }
+
+    async fn aggregate(
+        &self,
+        spec: &backbone_orm::repository::AggregateSpec,
+        filters: HashMap<String, String>,
+    ) -> Result<backbone_orm::repository::AggregateResult, Self::Error> {
+        Ok(self.repository.aggregate_filtered(spec, filters).await?)
     }
 
     async fn create(&self, dto: C) -> Result<E, Self::Error> {

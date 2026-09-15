@@ -104,6 +104,85 @@ const RESERVED_QUERY_KEYS: [&str; 3] = ["fields", "include", "with"];
 
 /// Parse the reserved `fields` key (comma-separated) into trimmed field names.
 /// Absent/empty → empty vec, meaning "no projection — return every field".
+/// Query keys the aggregate endpoint consumes itself.
+///
+/// They name columns and reductions, so they are grammar rather than
+/// predicates — left in the filter map they would be read as filters on
+/// columns called `sum` or `group_by`.
+const AGGREGATE_QUERY_KEYS: [&str; 6] =
+    ["group_by", "sum", "avg", "min", "max", "group_limit"];
+
+/// Read an aggregate request off the query string.
+///
+/// Column names are NOT validated here; they are resolved against the entity's
+/// declared columns down in the repository, which is the only layer that knows
+/// them. Nothing between here and there splices a caller's string into SQL.
+fn aggregate_spec(params: &ListQueryParams) -> backbone_orm::repository::AggregateSpec {
+    use backbone_orm::repository::{AggregateFn, AggregateSpec};
+
+    let mut reductions = Vec::new();
+    for (key, func) in [
+        ("sum", AggregateFn::Sum),
+        ("avg", AggregateFn::Avg),
+        ("min", AggregateFn::Min),
+        ("max", AggregateFn::Max),
+    ] {
+        if let Some(raw) = params.filters.get(key) {
+            for field in raw.split(',').map(str::trim).filter(|f| !f.is_empty()) {
+                reductions.push((func, field.to_string()));
+            }
+        }
+    }
+
+    AggregateSpec {
+        group_by: params
+            .filters
+            .get("group_by")
+            .map(|g| g.trim().to_string())
+            .filter(|g| !g.is_empty()),
+        reductions,
+        group_limit: params
+            .filters
+            .get("group_limit")
+            .and_then(|l| l.trim().parse::<usize>().ok())
+            .unwrap_or(0),
+    }
+}
+
+/// Reduce a list-style query into the filters the repository should actually see.
+///
+/// `fields`/`include`/`with` shape the response, not the row set, so they are
+/// dropped before they can be mistaken for column predicates; `search` and
+/// `status` arrive as typed fields and are folded back in under the names the
+/// repository expects.
+///
+/// `/count` answers a question about the same rows `/` returns, so both must
+/// normalize identically. They did not — the count route never read the query
+/// at all — which is why this lives in one function instead of two copies.
+fn repository_filters(params: &ListQueryParams) -> HashMap<String, String> {
+    let mut filters = params.filters.clone();
+    for key in RESERVED_QUERY_KEYS {
+        filters.remove(key);
+    }
+    if let Some(search) = params.search.clone() {
+        filters.insert("search".to_string(), search);
+    }
+    if let Some(status) = params.status.clone() {
+        filters.insert("status".to_string(), status);
+    }
+    filters
+}
+
+/// The filters an aggregate should apply: the same rows `/` would list, with
+/// the aggregate's own grammar removed.
+fn aggregate_filters(params: &ListQueryParams) -> HashMap<String, String> {
+    let mut filters = repository_filters(params);
+    for key in AGGREGATE_QUERY_KEYS {
+        filters.remove(key);
+    }
+    filters
+}
+
 fn sparse_fields(query: &HashMap<String, String>) -> Vec<String> {
     query
         .get("fields")
@@ -374,6 +453,11 @@ fn is_bad_query_error(msg: &str) -> bool {
     m.contains("does not exist")
         || m.contains("invalid input syntax")
         || m.contains("42703")
+        // Aggregate field rejections: the caller named a column this entity
+        // does not have, or asked to sum something that is not a number. Both
+        // are faults in the request, so they must not read as server errors.
+        || m.contains("not a column of this entity")
+        || m.contains("needs a numeric column")
 }
 
 /// Pagination response metadata
@@ -665,6 +749,35 @@ where
     /// 15. Count active (non-deleted) entities
     async fn count_active(&self) -> Result<u64, Self::Error>;
 
+    /// Group and reduce the rows `list` would return, under the same filters.
+    ///
+    /// The default refuses rather than inventing an answer — see the repository
+    /// trait for why a zero-filled default would be worse than an error.
+    async fn aggregate(
+        &self,
+        spec: &backbone_orm::repository::AggregateSpec,
+        filters: HashMap<String, String>,
+    ) -> Result<backbone_orm::repository::AggregateResult, Self::Error>;
+
+    /// Count active entities MATCHING the caller's filters.
+    ///
+    /// The generated client has always sent filters to `/count`; the handler
+    /// never read them, so a filtered count silently answered with the whole
+    /// table. Nothing caught it because the wrong number is a plausible one.
+    ///
+    /// The default delegates to `list`, whose total is already built from the
+    /// same where-clause as its data query — so the filtered count is correct
+    /// by construction rather than by a second implementation of the same
+    /// filter parsing, which is exactly how the two drifted apart. It asks for
+    /// a single row because the rows are discarded; an implementor that can
+    /// count without fetching may override.
+    async fn count_active_filtered(
+        &self,
+        filters: HashMap<String, String>,
+    ) -> Result<u64, Self::Error> {
+        self.list(1, 1, filters).await.map(|(_, total)| total)
+    }
+
     /// 16. Count deleted entities in trash
     async fn count_deleted(&self) -> Result<u64, Self::Error>;
 
@@ -877,10 +990,17 @@ where
                 }
             }))
             // GET /collection/count - Count active entities
+            // GET /collection/aggregate - Group and reduce
+            .route(&format!("{}/aggregate", base_path), get({
+                let h = handler.clone();
+                move |query: axum::extract::Query<ListQueryParams>| async move {
+                    Self::aggregate_handler(h, query).await
+                }
+            }))
             .route(&format!("{}/count", base_path), get({
                 let h = handler.clone();
-                move || async move {
-                    Self::count_active_handler(h).await
+                move |query: axum::extract::Query<ListQueryParams>| async move {
+                    Self::count_active_handler(h, query).await
                 }
             }))
             // GET /collection/trash/count - Count deleted entities
@@ -1050,17 +1170,7 @@ where
         let includes = include_relations(&params.filters);
         let scope = access.map(|axum::Extension(s)| s);
 
-        // Merge search and status into filters HashMap
-        let mut filters = params.filters.clone();
-        for key in RESERVED_QUERY_KEYS {
-            filters.remove(key);
-        }
-        if let Some(search) = params.search {
-            filters.insert("search".to_string(), search);
-        }
-        if let Some(status) = params.status {
-            filters.insert("status".to_string(), status);
-        }
+        let filters = repository_filters(&params);
 
         match handler.service.list(params.page, params.limit, filters).await {
             Ok((entities, total)) => {
@@ -1554,15 +1664,89 @@ where
     /// 15. GET /collection/count - Count active entities
     async fn count_active_handler(
         handler: Arc<Self>,
+        axum::extract::Query(params): axum::extract::Query<ListQueryParams>,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
 
-        match handler.service.count_active().await {
+        // An unfiltered request still answers the whole-table count, which is
+        // what every existing caller expects; a filtered one now answers the
+        // question it actually asked.
+        match handler.service.count_active_filtered(repository_filters(&params)).await {
             Ok(count) => {
                 (StatusCode::OK, Json(ApiResponse::ok(serde_json::json!({ "count": count }))))
             }
             Err(e) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<serde_json::Value>::error(e.to_string())))
+                // Now that the filters are read, a malformed one is the
+                // caller's fault — the same classification the list path uses.
+                let msg = e.to_string();
+                let code = if is_bad_query_error(&msg) {
+                    StatusCode::BAD_REQUEST
+                } else {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                };
+                (code, Json(ApiResponse::<serde_json::Value>::error(msg)))
+            }
+        }
+    }
+
+    /// GET /collection/aggregate - Group and reduce
+    ///
+    /// Answers with one entry per distinct group plus the overall total, so a
+    /// caller can draw a chart and its headline figure from a single reply.
+    async fn aggregate_handler(
+        handler: Arc<Self>,
+        axum::extract::Query(params): axum::extract::Query<ListQueryParams>,
+    ) -> impl axum::response::IntoResponse {
+        use axum::{http::StatusCode, Json};
+
+        let spec = aggregate_spec(&params);
+        match handler.service.aggregate(&spec, aggregate_filters(&params)).await {
+            Ok(result) => {
+                let render = |g: &backbone_orm::repository::AggregateGroup| {
+                    // Flat `"sum:amount"` keys become nested `sum: { amount }`,
+                    // so a caller reads `groups[i].sum.amount` without having to
+                    // reassemble a compound key.
+                    let mut out = serde_json::Map::new();
+                    out.insert("key".into(), match &g.key {
+                        Some(k) => serde_json::Value::String(k.clone()),
+                        None => serde_json::Value::Null,
+                    });
+                    out.insert("count".into(), serde_json::json!(g.count));
+                    for (compound, value) in &g.values {
+                        let Some((func, field)) = compound.split_once(':') else { continue };
+                        let slot = out
+                            .entry(func.to_string())
+                            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+                        if let Some(obj) = slot.as_object_mut() {
+                            obj.insert(field.to_string(), match value {
+                                // Strings, not numbers: Postgres `numeric` carries
+                                // more precision than a JSON double, and money
+                                // columns are exactly where rounding would show.
+                                Some(v) => serde_json::Value::String(v.clone()),
+                                None => serde_json::Value::Null,
+                            });
+                        }
+                    }
+                    serde_json::Value::Object(out)
+                };
+
+                let body = serde_json::json!({
+                    "groups": result.groups.iter().map(render).collect::<Vec<_>>(),
+                    "total": render(&result.total),
+                    // Says plainly that groups were dropped, so a partial chart
+                    // is never mistaken for a complete one.
+                    "truncated": result.truncated,
+                });
+                (StatusCode::OK, Json(ApiResponse::ok(body)))
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                let code = if is_bad_query_error(&msg) {
+                    StatusCode::BAD_REQUEST
+                } else {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                };
+                (code, Json(ApiResponse::<serde_json::Value>::error(msg)))
             }
         }
     }

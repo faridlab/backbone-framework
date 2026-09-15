@@ -194,6 +194,16 @@ macro_rules! impl_crud_repository {
                     .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
             }
 
+            async fn aggregate_filtered(
+                &self,
+                spec: &backbone_orm::repository::AggregateSpec,
+                filters: std::collections::HashMap<String, String>,
+            ) -> Result<backbone_orm::repository::AggregateResult, backbone_core::RepositoryError> {
+                (&**self).aggregate_filtered(spec, Some(&filters))
+                    .await
+                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+            }
+
             async fn list_deleted(
                 &self,
                 page: u32,
@@ -406,6 +416,16 @@ macro_rules! impl_crud_repository {
                 (&**self).list_paginated_filtered(pagination, Some(&filters))
                     .await
                     .map(|r| (r.data, r.pagination.total))
+                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+            }
+
+            async fn aggregate_filtered(
+                &self,
+                spec: &backbone_orm::repository::AggregateSpec,
+                filters: std::collections::HashMap<String, String>,
+            ) -> Result<backbone_orm::repository::AggregateResult, backbone_core::RepositoryError> {
+                (&**self).aggregate_filtered(spec, Some(&filters))
+                    .await
                     .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
             }
 

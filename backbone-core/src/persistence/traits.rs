@@ -204,6 +204,24 @@ where
         self.list(page, limit).await
     }
 
+    /// Group and reduce entities under the same filters as `list_filtered`.
+    ///
+    /// There is deliberately no useful default. A repository that cannot group
+    /// must SAY so: an honest error tells the caller its chart is unavailable,
+    /// whereas a default returning zeros would render an empty chart that looks
+    /// like a real answer about a real, empty table. The Postgres-backed
+    /// generated repositories override this via `impl_crud_repository!`.
+    async fn aggregate_filtered(
+        &self,
+        spec: &backbone_orm::repository::AggregateSpec,
+        filters: HashMap<String, String>,
+    ) -> Result<backbone_orm::repository::AggregateResult, RepositoryError> {
+        let _ = (spec, filters);
+        Err(RepositoryError::DatabaseError(
+            "aggregate is not supported by this repository".to_string(),
+        ))
+    }
+
     /// Hydrate `?include=` relations: fetch rows from `table` by id list, as JSON
     /// (raw `row_to_json`). `table` comes from `EntityRepoMeta::relations()`
     /// (generator-emitted), never client input. Default: no expansion. The
