@@ -13,6 +13,35 @@ The release workflow reads the section matching the git tag's version and
 uses it as the GitHub Release body. If no matching section is found it falls
 back to the `## [Unreleased]` section.
 
+## [2.7.23] - 2026-09-15
+
+### Added
+
+- **backbone-core** — `GET /api/v1/{collection}/{id}/history`: what has been recorded about one
+  record. The framework does not learn that an audit module exists — it defines a `HistoryProvider`
+  trait and reads an optional one from the request extensions, so a composing service installs a
+  provider (or does not, and the route says so). Three outcomes are kept deliberately distinct,
+  because collapsing any two of them renders as "nothing ever happened to this record": no provider
+  installed answers 501; a table with no capture trigger answers `audited: false` with a null entry
+  list; an audited table answers `audited: true` with its entries, where an empty list genuinely
+  means nothing changed. The record is keyed by the schema-qualified table the repository names
+  itself by — the same string the capture trigger writes as `subject_type` — rather than by the
+  mount path, which would return an empty history whenever a route segment and a Postgres schema
+  disagreed. `CrudRepository`/`CrudService` gained a `table_name()` for this, defaulting to `None`
+  so anything that cannot name a table has no history rather than a wrong one.
+
+### Fixed
+
+- **backbone-orm** — the aggregate endpoint rejected every numeric column, which is the set it
+  exists for. Its allow-list was built from `EntityRepoMeta::column_types()`, which looks like a
+  column list and is not one: it carries only the columns the filter parser must CAST (uuids and
+  enums), so `numeric` columns are absent from it by design. Column names are now resolved against
+  `information_schema.columns`, which is complete, carries the real type for the numeric check, and
+  cannot drift from the table the query runs against. The security property is unchanged — the
+  resolved name is the catalog's own string, never the caller's. Costs one catalog read per
+  aggregate request; deliberately not cached, so a column added by a migration is usable without
+  restarting the service.
+
 ## [2.7.22] - 2026-09-15
 
 ### Added

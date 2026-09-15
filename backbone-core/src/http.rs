@@ -104,6 +104,52 @@ const RESERVED_QUERY_KEYS: [&str; 3] = ["fields", "include", "with"];
 
 /// Parse the reserved `fields` key (comma-separated) into trimmed field names.
 /// Absent/empty → empty vec, meaning "no projection — return every field".
+// ─── Per-record history ───────────────────────────────────────────────────────
+
+/// One recorded change to a record.
+///
+/// `changed` is the capture layer's diff shape, carried through verbatim:
+/// `{field: {"from": old, "to": new}}` for an update, and the full image as
+/// `{field: {"to": v}}` / `{field: {"from": v}}` for an insert / delete. The
+/// trail is DIFF-ONLY, so an update entry names only the fields that actually
+/// changed — a consumer wanting the record's state at a point in time must
+/// re-anchor on the nearest full image and replay forward, which is what the
+/// insert/delete images exist for.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryEntry {
+    pub occurred_at: String,
+    /// `insert` | `update` | `delete`, or a verb-emitted action.
+    pub action: String,
+    pub actor: String,
+    pub changed: serde_json::Value,
+    pub reason: Option<String>,
+    pub correlation_id: Option<String>,
+}
+
+/// Supplies a record's change history to the generic CRUD router.
+///
+/// This exists so `backbone-core` never learns that an audit module exists.
+/// The composing service builds a provider and installs it as an axum
+/// `Extension`; a composition without one simply has no history to serve, and
+/// says so rather than pretending.
+#[async_trait::async_trait]
+pub trait HistoryProvider: Send + Sync {
+    /// History for one row of `table` (schema-qualified, e.g. `sapiens.users`).
+    ///
+    /// `Ok(None)` means **this table is not audited** — deliberately distinct
+    /// from `Ok(Some(vec![]))`, which means it is audited and genuinely never
+    /// changed. Collapsing the two would answer "nothing ever happened" to a
+    /// question that was never actually asked, which is the same defect as a
+    /// filtered count that quietly returns the whole table.
+    async fn history(
+        &self,
+        table: &str,
+        id: &str,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Option<Vec<HistoryEntry>>, String>;
+}
+
 /// Query keys the aggregate endpoint consumes itself.
 ///
 /// They name columns and reductions, so they are grammar rather than
@@ -749,6 +795,16 @@ where
     /// 15. Count active (non-deleted) entities
     async fn count_active(&self) -> Result<u64, Self::Error>;
 
+    /// The schema-qualified table this service reads, when it has one.
+    ///
+    /// Used to key a record's history. Derived from the mount path instead,
+    /// this would silently return an empty history whenever a route segment
+    /// and a Postgres schema disagreed — so it is read from the repository,
+    /// which is the same string the capture trigger writes.
+    fn table_name(&self) -> Option<&str> {
+        None
+    }
+
     /// Group and reduce the rows `list` would return, under the same filters.
     ///
     /// The default refuses rather than inventing an answer — see the repository
@@ -990,6 +1046,15 @@ where
                 }
             }))
             // GET /collection/count - Count active entities
+            // GET /collection/:id/history - This record's recorded changes
+            .route(&format!("{}/:id/history", base_path), get({
+                let h = handler.clone();
+                move |path: axum::extract::Path<String>,
+                      query: axum::extract::Query<ListQueryParams>,
+                      provider: Option<axum::Extension<std::sync::Arc<dyn HistoryProvider>>>| async move {
+                    Self::history_handler(h, path, query, provider).await
+                }
+            }))
             // GET /collection/aggregate - Group and reduce
             .route(&format!("{}/aggregate", base_path), get({
                 let h = handler.clone();
@@ -1748,6 +1813,72 @@ where
                 };
                 (code, Json(ApiResponse::<serde_json::Value>::error(msg)))
             }
+        }
+    }
+
+    /// GET /collection/:id/history - what has been recorded about this record
+    ///
+    /// Three outcomes, kept deliberately distinct, because collapsing any two
+    /// of them would render as "nothing ever happened to this record":
+    ///
+    /// - no provider installed -> 501, this service serves no history at all
+    /// - provider says the table is not audited -> 200, `audited: false`,
+    ///   `entries: null`
+    /// - audited -> 200, `audited: true`, `entries: [...]` (possibly empty,
+    ///   which here genuinely means nothing has changed)
+    async fn history_handler(
+        handler: Arc<Self>,
+        axum::extract::Path(id): axum::extract::Path<String>,
+        axum::extract::Query(params): axum::extract::Query<ListQueryParams>,
+        provider: Option<axum::Extension<std::sync::Arc<dyn HistoryProvider>>>,
+    ) -> impl axum::response::IntoResponse {
+        use axum::{http::StatusCode, Json};
+
+        let Some(axum::Extension(provider)) = provider else {
+            return (
+                StatusCode::NOT_IMPLEMENTED,
+                Json(ApiResponse::<serde_json::Value>::error(
+                    "history is not configured for this service".to_string(),
+                )),
+            );
+        };
+
+        // Keyed on the table the repository actually reads — the same string the
+        // capture trigger writes as `subject_type`. A service that cannot name
+        // its table has no history rather than a wrong one.
+        let Some(table) = handler.service.table_name().map(|t| t.to_string()) else {
+            return (
+                StatusCode::NOT_IMPLEMENTED,
+                Json(ApiResponse::<serde_json::Value>::error(
+                    "this entity cannot name its table, so its history cannot be keyed".to_string(),
+                )),
+            );
+        };
+
+        let limit = params.limit.clamp(1, 200);
+        let offset = params.page.saturating_sub(1) * limit;
+
+        match provider.history(&table, &id, limit, offset).await {
+            Ok(Some(entries)) => (
+                StatusCode::OK,
+                Json(ApiResponse::ok(serde_json::json!({
+                    "audited": true,
+                    "entries": entries,
+                }))),
+            ),
+            Ok(None) => (
+                StatusCode::OK,
+                Json(ApiResponse::ok(serde_json::json!({
+                    // Not a mistake and not an empty timeline: this table
+                    // records nothing, so there is nothing to have missed.
+                    "audited": false,
+                    "entries": serde_json::Value::Null,
+                }))),
+            ),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::<serde_json::Value>::error(e)),
+            ),
         }
     }
 

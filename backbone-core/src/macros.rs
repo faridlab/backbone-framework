@@ -194,6 +194,10 @@ macro_rules! impl_crud_repository {
                     .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
             }
 
+            fn table_name(&self) -> Option<&str> {
+                Some((&**self).table_name())
+            }
+
             async fn aggregate_filtered(
                 &self,
                 spec: &backbone_orm::repository::AggregateSpec,
@@ -417,6 +421,10 @@ macro_rules! impl_crud_repository {
                     .await
                     .map(|r| (r.data, r.pagination.total))
                     .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+            }
+
+            fn table_name(&self) -> Option<&str> {
+                Some((&**self).table_name())
             }
 
             async fn aggregate_filtered(

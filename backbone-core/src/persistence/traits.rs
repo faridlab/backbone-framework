@@ -211,6 +211,14 @@ where
     /// whereas a default returning zeros would render an empty chart that looks
     /// like a real answer about a real, empty table. The Postgres-backed
     /// generated repositories override this via `impl_crud_repository!`.
+    /// The schema-qualified table this repository reads, when it knows it.
+    ///
+    /// The Postgres-backed generated repositories override this; anything that
+    /// cannot name a table returns `None` and simply has no history.
+    fn table_name(&self) -> Option<&str> {
+        None
+    }
+
     async fn aggregate_filtered(
         &self,
         spec: &backbone_orm::repository::AggregateSpec,

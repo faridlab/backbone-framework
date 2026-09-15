@@ -152,6 +152,10 @@ where
         Ok(self.repository.aggregate_filtered(spec, filters).await?)
     }
 
+    fn table_name(&self) -> Option<&str> {
+        self.repository.table_name()
+    }
+
     async fn create(&self, dto: C) -> Result<E, Self::Error> {
         let entity = (self.create_mapper)(dto);
         Ok(self.repository.create(entity).await?)
@@ -301,6 +305,10 @@ where
         filters: HashMap<String, String>,
     ) -> Result<backbone_orm::repository::AggregateResult, Self::Error> {
         Ok(self.repository.aggregate_filtered(spec, filters).await?)
+    }
+
+    fn table_name(&self) -> Option<&str> {
+        self.repository.table_name()
     }
 
     async fn create(&self, entity: E) -> Result<E, Self::Error> {
@@ -482,6 +490,10 @@ where
         filters: HashMap<String, String>,
     ) -> Result<backbone_orm::repository::AggregateResult, Self::Error> {
         Ok(self.repository.aggregate_filtered(spec, filters).await?)
+    }
+
+    fn table_name(&self) -> Option<&str> {
+        self.repository.table_name()
     }
 
     async fn create(&self, dto: C) -> Result<E, Self::Error> {

@@ -684,6 +684,32 @@ fn is_numeric_pg_type(pg_type: &str) -> bool {
     )
 }
 
+/// Read a table's real columns and their types from the catalog.
+///
+/// `EntityRepoMeta::column_types()` looks like the natural allow-list and is
+/// not one: it carries only the columns the filter parser must CAST — uuids and
+/// enums — so every numeric column is absent from it, which is exactly the set
+/// `sum` and `avg` exist for. The catalog is the only complete and current
+/// answer, and it cannot drift from the table the query will actually run
+/// against.
+async fn catalog_columns(
+    pool: &PgPool,
+    qualified_table: &str,
+) -> anyhow::Result<HashMap<String, String>> {
+    let (schema, table) = match qualified_table.split_once('.') {
+        Some((s, t)) => (s.to_string(), t.to_string()),
+        None => ("public".to_string(), qualified_table.to_string()),
+    };
+    let q = sqlx::query_as::<Postgres, (String, String)>(
+        "SELECT column_name, data_type FROM information_schema.columns
+          WHERE table_schema = $1 AND table_name = $2",
+    )
+    .bind(schema)
+    .bind(table);
+    let rows = crate::company_scope::fetch_all_scoped(pool, q).await?;
+    Ok(rows.into_iter().collect())
+}
+
 /// Resolve a caller-supplied column name against the entity's real columns.
 ///
 /// This is the whole defence for the aggregate path. Unlike a filter *value*,
@@ -729,11 +755,12 @@ impl<T: for<'a> FromRow<'a, PgRow> + Send + Unpin> PostgresRepository<T> {
         query_filter.offset = None;
         let (where_clause, filter_params) = query_filter.build_where_clause();
 
-        // Every identifier below comes from `column_types`, never from the caller.
+        // Every identifier below comes from the catalog, never from the caller.
+        let columns = catalog_columns(&self.pool, &self.table_name).await?;
         let mut selects: Vec<String> = Vec::new();
         let mut value_keys: Vec<String> = Vec::new();
         for (func, field) in &spec.reductions {
-            let (column, pg_type) = resolve_column(field, column_types)?;
+            let (column, pg_type) = resolve_column(field, &columns)?;
             if func.requires_numeric() && !is_numeric_pg_type(pg_type) {
                 return Err(AggregateFieldError(format!(
                     "cannot {} `{}`: its type is {} — {} needs a numeric column",
@@ -756,7 +783,7 @@ impl<T: for<'a> FromRow<'a, PgRow> + Send + Unpin> PostgresRepository<T> {
 
         let sql = match &spec.group_by {
             Some(field) => {
-                let (column, _) = resolve_column(field, column_types)?;
+                let (column, _) = resolve_column(field, &columns)?;
                 format!(
                     "SELECT GROUPING({column}) AS __is_total, ({column})::text AS __group_key, \
                      COUNT(*) AS __count{reductions} \

@@ -774,6 +774,10 @@ where
         self.aggregate(spec, filters).await
     }
 
+    fn table_name(&self) -> Option<&str> {
+        self.repository.table_name()
+    }
+
     async fn create(&self, dto: C) -> Result<E, ServiceError> {
         self.create(dto).await
     }
