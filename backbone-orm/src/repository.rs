@@ -8,6 +8,8 @@ use chrono::NaiveDateTime;
 use std::collections::{HashMap, HashSet};
 
 use crate::filter::{parse_filters as parse_query_filter};
+use crate::filter::SortDirection as FilterSortDirection;
+use sqlx::Row as _;
 
 /// Generic entity trait that all repository entities must implement
 pub trait Entity {
@@ -96,6 +98,27 @@ pub struct PaginationInfo {
     pub per_page: u32,
     pub total: u64,
     pub total_pages: u32,
+    /// Keyset paging: the position of this page's last row, for the next
+    /// page's `after=`. None when the page is empty or no more rows follow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    /// Keyset paging: the position of this page's first row, for the
+    /// previous page's `before=`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev_cursor: Option<String>,
+    /// Whether another page follows (fetched with limit+1, so it is known
+    /// without a count).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub has_more: Option<bool>,
+    /// How `total` came to be: "exact" (counted), "estimate" (the planner's
+    /// row estimate — `estimate=1` asked for it), or "none" (a cursor walk
+    /// without an estimate; the exact figure is the separate count call).
+    #[serde(default = "default_count_mode")]
+    pub count_mode: String,
+}
+
+fn default_count_mode() -> String {
+    "exact".to_string()
 }
 
 impl PaginationInfo {
@@ -106,6 +129,10 @@ impl PaginationInfo {
             per_page,
             total,
             total_pages,
+            next_cursor: None,
+            prev_cursor: None,
+            has_more: None,
+            count_mode: default_count_mode(),
         }
     }
 }
@@ -235,50 +262,7 @@ impl<T: for<'a> FromRow<'a, PgRow> + Send + Unpin> PostgresRepository<T> {
             query_filter.search_fields = search_fields.iter().map(|s| s.to_string()).collect();
         }
 
-        // Apply pagination
-        let offset = pagination.offset();
-        let limit = pagination.limit();
-        query_filter.limit = Some(limit);
-        query_filter.offset = Some(offset);
-
-        // Build WHERE clause and collect parameters
-        let (where_clause, filter_params) = query_filter.build_where_clause();
-        let order_clause = query_filter.build_order_by_clause();
-
-        // Count query
-        let count_query = format!(
-            "SELECT COUNT(*) FROM {}{}",
-            self.table_name,
-            where_clause
-        );
-
-        let mut count_query_builder = sqlx::query_scalar::<_, i64>(&count_query);
-        for param in &filter_params {
-            count_query_builder = count_query_builder.bind(param);
-        }
-        let total = crate::company_scope::fetch_one_scalar_scoped(&self.pool, count_query_builder).await? as u64;
-
-        // Data query
-        let data_query = format!(
-            "SELECT * FROM {}{}{} LIMIT {} OFFSET {}",
-            self.table_name,
-            where_clause,
-            order_clause,
-            limit,
-            offset
-        );
-
-        let mut data_query_builder = sqlx::query_as::<Postgres, T>(&data_query);
-        for param in &filter_params {
-            data_query_builder = data_query_builder.bind(param);
-        }
-
-        let data = crate::company_scope::fetch_all_scoped(&self.pool, data_query_builder).await?;
-
-        Ok(PaginatedResult {
-            data,
-            pagination: PaginationInfo::new(pagination.page, pagination.per_page, total),
-        })
+        self.execute_list(pagination, query_filter).await
     }
 
     /// List entities with pagination, filtering, and field whitelist enforcement
@@ -331,50 +315,339 @@ impl<T: for<'a> FromRow<'a, PgRow> + Send + Unpin> PostgresRepository<T> {
             query_filter.search_fields = search_fields.iter().map(|s| s.to_string()).collect();
         }
 
-        // Apply pagination
-        let offset = pagination.offset();
-        let limit = pagination.limit();
-        query_filter.limit = Some(limit);
-        query_filter.offset = Some(offset);
+        self.execute_list(pagination, query_filter).await
+    }
 
-        // Build WHERE clause and collect parameters
-        let (where_clause, filter_params) = query_filter.build_where_clause();
-        let order_clause = query_filter.build_order_by_clause();
+    /// The shared list execution: filters, order, paging, and the total.
+    ///
+    /// Three shapes, chosen by the request:
+    ///
+    /// * **page mode** (today's behaviour, unchanged): exact COUNT, then
+    ///   `LIMIT l OFFSET o` in the requested order;
+    /// * **cursor mode** (`after=`/`before=`): the keyset predicate replaces
+    ///   the offset, the order always ends on the `id` tiebreaker, and one
+    ///   extra row is fetched so `has_more` is known without a count — the
+    ///   page costs the same at any depth, which is the point;
+    /// * **estimate** (`estimate=1`, either mode): the exact COUNT (a scan
+    ///   of the whole filtered set) is replaced by the planner's row
+    ///   estimate; the exact figure stays the separate count call.
+    #[allow(clippy::type_complexity)]
+    async fn execute_list(
+        &self,
+        pagination: PaginationParams,
+        mut query_filter: crate::QueryFilter,
+    ) -> anyhow::Result<PaginatedResult<T>> {
+        let limit = pagination.limit() as i64;
+        let backwards =
+            query_filter.cursor_before.is_some() && query_filter.cursor_after.is_none();
+        let cursor_walk = query_filter.cursor_after.is_some() || backwards;
 
-        // Count query
-        let count_query = format!(
-            "SELECT COUNT(*) FROM {}{}",
-            self.table_name,
-            where_clause
-        );
+        let (mut where_clause, mut filter_params) = query_filter.build_where_clause();
+        let order_clause;
+        // The deterministic order a cursor walks in (cursor mode only).
+        let mut boundary_sorts: Vec<(String, FilterSortDirection)> = Vec::new();
+        // Cast suffixes for the sort columns, for the keyset binds.
+        let mut boundary_casts: Vec<Option<String>> = Vec::new();
 
-        let mut count_query_builder = sqlx::query_scalar::<_, i64>(&count_query);
-        for param in &filter_params {
-            count_query_builder = count_query_builder.bind(param);
+        // The deterministic order: a cursor walks one, and a page-mode list
+        // that carries a sort gets the same treatment so it can HAND OUT a
+        // cursor to start a keyset walk from. Appending the id tiebreaker
+        // only reorders rows that tied — ties had no order to preserve.
+        let mut sorts: Vec<(String, FilterSortDirection)> = query_filter
+            .sorts
+            .iter()
+            .map(|s| (s.field.clone(), s.direction.clone()))
+            .collect();
+        if cursor_walk || !sorts.is_empty() {
+            if sorts.is_empty() {
+                sorts.push(("id".into(), FilterSortDirection::Asc));
+            } else if sorts.last().map(|(f, _)| f != "id").unwrap_or(true) {
+                sorts.push(("id".into(), FilterSortDirection::Asc));
+            }
         }
-        let total = crate::company_scope::fetch_one_scalar_scoped(&self.pool, count_query_builder).await? as u64;
 
-        // Data query
-        let data_query = format!(
-            "SELECT * FROM {}{}{} LIMIT {} OFFSET {}",
-            self.table_name,
-            where_clause,
-            order_clause,
-            limit,
-            offset
-        );
-
-        let mut data_query_builder = sqlx::query_as::<Postgres, T>(&data_query);
-        for param in &filter_params {
-            data_query_builder = data_query_builder.bind(param);
+        // Casts whenever there is a deterministic order to key: cursor mode
+        // walks on them, page mode encodes the handed-out cursor from them.
+        if !sorts.is_empty() {
+            boundary_casts = self.sort_column_casts(&sorts).await?;
         }
 
-        let data = crate::company_scope::fetch_all_scoped(&self.pool, data_query_builder).await?;
+        if cursor_walk {
+            let opaque = if backwards {
+                query_filter.cursor_before.clone().unwrap()
+            } else {
+                query_filter.cursor_after.clone().unwrap()
+            };
+            let payload = crate::filter::cursor::decode_cursor(&opaque, &sorts)
+                .map_err(|e| anyhow::anyhow!("cursor refused: {e}"))?;
+            let mut idx = filter_params.len() + 1;
+            let (keyset_sql, keyset_params) = crate::filter::cursor::build_keyset_predicate(
+                &payload,
+                &mut idx,
+                &boundary_casts,
+                backwards,
+            );
+            if where_clause.is_empty() {
+                where_clause = format!(" WHERE {}", keyset_sql);
+            } else {
+                where_clause = format!("{} AND ({})", where_clause, keyset_sql);
+            }
+            filter_params.extend(keyset_params);
+            let parts: Vec<String> = sorts
+                .iter()
+                .map(|(f, d)| {
+                    let dir = if (*d == FilterSortDirection::Desc) != backwards {
+                        "DESC"
+                    } else {
+                        "ASC"
+                    };
+                    format!("{} {}", f, dir)
+                })
+                .collect();
+            order_clause = format!(" ORDER BY {}", parts.join(", "));
+        } else {
+            // Page mode with a sort: the caller's order, made deterministic
+            // by the same id tiebreaker so the cursor it hands out is real.
+            if sorts.is_empty() {
+                order_clause = query_filter.build_order_by_clause();
+            } else {
+                let parts: Vec<String> = sorts
+                    .iter()
+                    .map(|(f, d)| {
+                        let dir =
+                            if *d == FilterSortDirection::Desc { "DESC" } else { "ASC" };
+                        format!("{} {}", f, dir)
+                    })
+                    .collect();
+                order_clause = format!(" ORDER BY {}", parts.join(", "));
+            }
+        }
+        boundary_sorts = sorts;
+
+        // The total: exact in page mode (today's behaviour), the planner's
+        // estimate when asked, nothing on a cursor walk that did not ask.
+        let (total, count_mode) = if query_filter.estimate_total {
+            (
+                self.estimate_filtered_rows(&where_clause, &filter_params).await?,
+                "estimate",
+            )
+        } else if cursor_walk {
+            (0u64, "none")
+        } else {
+            let count_query = format!("SELECT COUNT(*) FROM {}{}", self.table_name, where_clause);
+            let mut count_query_builder = sqlx::query_scalar::<_, i64>(&count_query);
+            for param in &filter_params {
+                count_query_builder = count_query_builder.bind(param);
+            }
+            (
+                crate::company_scope::fetch_one_scalar_scoped(&self.pool, count_query_builder)
+                    .await? as u64,
+                "exact",
+            )
+        };
+
+        // The page: limit+1 rows so has_more is known without a count. The
+        // extra row is truncated away before returning.
+        let fetch = limit + 1;
+        let data_query = if cursor_walk {
+            format!(
+                "SELECT * FROM {}{}{} LIMIT {}",
+                self.table_name, where_clause, order_clause, fetch
+            )
+        } else {
+            format!(
+                "SELECT * FROM {}{}{} LIMIT {} OFFSET {}",
+                self.table_name,
+                where_clause,
+                order_clause,
+                fetch,
+                pagination.offset()
+            )
+        };
+
+        let mut pagination_info = PaginationInfo::new(pagination.page, pagination.per_page, total);
+        pagination_info.count_mode = count_mode.to_string();
+
+        // One fetch path for both modes: untyped rows, decoded per-entity
+        // through FromRow exactly as query_as would (decimals keep their
+        // scale), with the boundary values read for the cursors off the same
+        // rows — no second query, no JSON round-trip.
+        let mut rows_query = sqlx::query(&data_query);
+        for param in &filter_params {
+            rows_query = rows_query.bind(param);
+        }
+        let rows: Vec<PgRow> =
+            crate::company_scope::fetch_all_rows_scoped(&self.pool, rows_query).await?;
+        let has_more = rows.len() as i64 > limit;
+        let mut page: Vec<PgRow> = rows.into_iter().take(limit as usize).collect();
+        if backwards {
+            page.reverse();
+        }
+        let data: anyhow::Result<Vec<T>> = page
+            .iter()
+            .map(|row| T::from_row(row).map_err(|e| anyhow::anyhow!("decode row: {e}")))
+            .collect();
+        let data = data?;
+
+        // Cursors from the boundary rows' own values, whenever the order is
+        // deterministic. A NULL in a sort column cannot key a position, so
+        // that side's cursor is omitted.
+        let deterministic = !boundary_sorts.is_empty();
+        let next_cursor = if (has_more || backwards) && deterministic {
+            page.last().and_then(|r| {
+                let casts = if boundary_casts.is_empty() {
+                    // Page mode never resolved casts; the encode does not
+                    // need them, only the walk does.
+                    &boundary_casts
+                } else {
+                    &boundary_casts
+                };
+                self.row_cursor(r, &boundary_sorts, casts)
+            })
+        } else {
+            None
+        };
+        let prev_cursor = if !page.is_empty() && deterministic {
+            page.first().and_then(|r| self.row_cursor(r, &boundary_sorts, &boundary_casts))
+        } else {
+            None
+        };
+
+        pagination_info.has_more = Some(has_more);
+        pagination_info.next_cursor = next_cursor;
+        pagination_info.prev_cursor = prev_cursor;
 
         Ok(PaginatedResult {
             data,
-            pagination: PaginationInfo::new(pagination.page, pagination.per_page, total),
+            pagination: pagination_info,
         })
+    }
+
+    /// The planner's row estimate for a filtered read, from EXPLAIN. The
+    /// exact figure stays the separate count endpoint; this exists because
+    /// counting a hot filtered set is a scan of all of it.
+    async fn estimate_filtered_rows(
+        &self,
+        where_clause: &str,
+        filter_params: &[String],
+    ) -> anyhow::Result<u64> {
+        let explain = format!("EXPLAIN (FORMAT JSON) SELECT 1 FROM {}{}", self.table_name, where_clause);
+        let mut builder = sqlx::query_scalar::<_, serde_json::Value>(&explain);
+        for param in filter_params {
+            builder = builder.bind(param);
+        }
+        let plan: serde_json::Value =
+            crate::company_scope::fetch_one_scalar_scoped(&self.pool, builder).await?;
+        let rows = plan
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|top| top.get("Plan"))
+            .and_then(|p| p.get("Plan Rows"))
+            .and_then(|r| r.as_i64())
+            .unwrap_or(0);
+        Ok(rows.max(0) as u64)
+    }
+
+    /// The SQL cast suffix for each sort column, from the table's real
+    /// columns (never a cached hint list — the aggregate lesson). The
+    /// placeholder is cast to the column's type so the bind compares
+    /// against the column without coercing the column itself.
+    async fn sort_column_casts(
+        &self,
+        sorts: &[(String, FilterSortDirection)],
+    ) -> anyhow::Result<Vec<Option<String>>> {
+        let (schema, table) = match self.table_name.rsplit_once('.') {
+            Some((s, t)) => (s.to_string(), t.to_string()),
+            None => ("public".to_string(), self.table_name.clone()),
+        };
+        let mut casts: Vec<Option<String>> = Vec::with_capacity(sorts.len());
+        for (field, _) in sorts {
+            let row: Option<(String, String)> = sqlx::query_as(
+                "SELECT data_type, coalesce(udt_name, '') FROM information_schema.columns \
+                  WHERE table_schema = $1 AND table_name = $2 AND column_name = $3",
+            )
+            .bind(&schema)
+            .bind(&table)
+            .bind(field)
+            .fetch_optional(&self.pool)
+            .await?;
+            let cast = row.map(|(data_type, udt)| cast_suffix(&data_type, &udt)).flatten();
+            casts.push(cast);
+        }
+        Ok(casts)
+    }
+
+    /// One boundary row's cursor: its values for the sort columns (typed
+    /// exactly as sqlx decodes them, so a decimal keeps its scale) plus its
+    /// id. NULL in any sort column yields None: a null has no position.
+    fn row_cursor(
+        &self,
+        row: &PgRow,
+        sorts: &[(String, FilterSortDirection)],
+        casts: &[Option<String>],
+    ) -> Option<String> {
+        let id: uuid::Uuid = row.try_get("id").ok()?;
+        let mut values: Vec<serde_json::Value> = Vec::with_capacity(sorts.len());
+        for (i, (field, _)) in sorts.iter().enumerate() {
+            let field = field.as_str();
+            let data_type = casts.get(i).and_then(|c| c.as_deref()).unwrap_or("");
+            let text: Option<String> = match data_type {
+                "numeric" => row
+                    .try_get::<Option<sqlx::types::Decimal>, _>(field)
+                    .ok()?
+                    .map(|d| d.to_string()),
+                "uuid" => row
+                    .try_get::<Option<uuid::Uuid>, _>(field)
+                    .ok()?
+                    .map(|u| u.to_string()),
+                "timestamptz" => row
+                    .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>(field)
+                    .ok()?
+                    .map(|t| t.to_rfc3339()),
+                "integer" | "smallint" => row
+                    .try_get::<Option<i32>, _>(field)
+                    .ok()?
+                    .map(|n| n.to_string()),
+                "bigint" => row
+                    .try_get::<Option<i64>, _>(field)
+                    .ok()?
+                    .map(|n| n.to_string()),
+                "boolean" => row
+                    .try_get::<Option<bool>, _>(field)
+                    .ok()?
+                    .map(|b| b.to_string()),
+                "date" => row
+                    .try_get::<Option<chrono::NaiveDate>, _>(field)
+                    .ok()?
+                    .map(|d| d.to_string()),
+                _ => row
+                    .try_get::<Option<String>, _>(field)
+                    .ok()?
+                    .filter(|s| !s.is_empty() || data_type.is_empty()),
+            };
+            values.push(serde_json::Value::String(text?));
+        }
+        crate::filter::cursor::encode_cursor(sorts, &values, &id.to_string()).ok()
+    }
+}
+
+/// The placeholder cast for a column type, or None when a bare text bind
+/// compares correctly.
+fn cast_suffix(data_type: &str, udt_name: &str) -> Option<String> {
+    match data_type {
+        "uuid" => Some("uuid".into()),
+        "numeric" => Some("numeric".into()),
+        "integer" => Some("integer".into()),
+        "smallint" => Some("smallint".into()),
+        "bigint" => Some("bigint".into()),
+        "boolean" => Some("boolean".into()),
+        "date" => Some("date".into()),
+        "timestamp with time zone" => Some("timestamptz".into()),
+        "timestamp without time zone" => Some("timestamp".into()),
+        // An enum: bind text, cast to the enum's own name so the comparison
+        // runs in the enum's ordering.
+        "USER-DEFINED" if !udt_name.is_empty() => Some(udt_name.to_string()),
+        _ => None,
     }
 }
 

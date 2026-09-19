@@ -39,12 +39,14 @@ mod validation;
 mod condition;
 mod query;
 mod parser;
+pub mod cursor;
 
 pub use types::{FilterOperator, FilterValue, FilterLogical, SortDirection, SortSpec};
 pub use validation::{FilterableEntity, is_valid_field, sanitize_field_name};
 pub use condition::FilterCondition;
 pub use query::QueryFilter;
 pub use parser::parse_filters;
+pub use cursor::{CursorPayload, CursorError, encode_cursor, decode_cursor};
 
 #[cfg(test)]
 mod tests;

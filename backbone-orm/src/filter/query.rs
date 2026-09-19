@@ -13,6 +13,17 @@ pub struct QueryFilter {
     pub limit: Option<u32>,
     pub offset: Option<u32>,
     pub page: Option<u32>,
+    /// Keyset paging: the opaque cursor from a previous page's
+    /// `next_cursor` (forward walk). Takes precedence over page/offset.
+    pub cursor_after: Option<String>,
+    /// Keyset paging: the opaque cursor from a previous page's
+    /// `prev_cursor` (backward walk — the query inverts and the page is
+    /// reversed so it still reads forward).
+    pub cursor_before: Option<String>,
+    /// Replace the exact COUNT (a full scan of the filtered set) with the
+    /// planner's row estimate. Screens that need the exact figure use the
+    /// separate count endpoint.
+    pub estimate_total: bool,
     /// Base conditions that are always applied (e.g., soft delete exclusion)
     /// These are raw SQL conditions that will be ANDed with other conditions
     pub base_conditions: Vec<String>,

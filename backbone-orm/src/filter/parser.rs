@@ -212,16 +212,26 @@ pub fn parse_filters(
                             }
                         }
                     } else {
-                        #[allow(clippy::collapsible_else_if)]
-                        if let Ok(sanitized) = sanitize_field_name(value) {
+                        // One field, and it may carry the same `-` descending
+                        // prefix the comma form does. Sanitizing the value
+                        // WITH the prefix rejected it, so a single-field
+                        // descending sort was silently dropped — the request
+                        // answered unsorted and nothing said so.
+                        let direction = if value.starts_with('-') {
+                            SortDirection::Desc
+                        } else {
+                            SortDirection::Asc
+                        };
+                        let field = value.trim_start_matches('-');
+                        if let Ok(sanitized) = sanitize_field_name(field) {
                             let sort_field = audit_metadata_sql_expr(&sanitized)
                                 .unwrap_or_else(|| sanitized.clone());
                             if let Some(allowed) = allowed_fields {
                                 if is_valid_field(&sanitized, allowed) {
-                                    filter.add_sort(SortSpec::new(sort_field, SortDirection::Asc));
+                                    filter.add_sort(SortSpec::new(sort_field, direction));
                                 }
                             } else {
-                                filter.add_sort(SortSpec::new(sort_field, SortDirection::Asc));
+                                filter.add_sort(SortSpec::new(sort_field, direction));
                             }
                         }
                     }
@@ -260,6 +270,15 @@ pub fn parse_filters(
                     if let Ok(p) = value.parse::<u32>() {
                         filter.limit = Some(p);
                     }
+                }
+                "after" => {
+                    filter.cursor_after = Some(value.clone());
+                }
+                "before" => {
+                    filter.cursor_before = Some(value.clone());
+                }
+                "estimate" | "estimate_total" => {
+                    filter.estimate_total = matches!(value.as_str(), "1" | "true" | "yes");
                 }
                 "__base_condition" => {
                     // Raw SQL condition to be ANDed with all other conditions
