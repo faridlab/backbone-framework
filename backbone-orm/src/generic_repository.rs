@@ -389,14 +389,26 @@ where
         search_fields: &[&str],
     ) -> Result<crate::repository::AggregateResult>
     where
-        T: Send + Sync,
+        T: crate::EntityRepoMeta + Send + Sync,
     {
+        // Resolve the group column's relation HERE (the only layer that
+        // knows the entity's metadata): a group on a relation FK gets its
+        // target table passed down so the inner query can carry the label.
+        let mut spec = spec.clone();
+        if let (Some(group), Some(label)) = (&spec.group_by, &spec.label_field) {
+            let _ = label;
+            let camel = snake_to_camel(group);
+            if let Some((_, table, _)) = T::relations().iter().find(|(_, _, fk)| *fk == camel) {
+                let base_fk = camel_to_snake(&camel);
+                spec.label_relation = Some((table.to_string(), base_fk));
+            }
+        }
         let mut filters_map = filters.clone();
         if let Some(cond) = base_condition {
             filters_map.insert("__base_condition".to_string(), cond.to_string());
         }
         self.inner
-            .aggregate_with_filters(spec, &filters_map, column_types, search_fields)
+            .aggregate_with_filters(&spec, &filters_map, column_types, search_fields)
             .await
     }
 }
@@ -1226,4 +1238,18 @@ where
     }
     tx.commit().await?;
     Ok(out)
+}
+
+/// camelCase → snake_case (`projectId` → `project_id`), the SQL vocabulary.
+fn camel_to_snake(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    for ch in s.chars() {
+        if ch.is_uppercase() {
+            out.push('_');
+            out.extend(ch.to_lowercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }

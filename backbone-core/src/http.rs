@@ -155,8 +155,8 @@ pub trait HistoryProvider: Send + Sync {
 /// They name columns and reductions, so they are grammar rather than
 /// predicates — left in the filter map they would be read as filters on
 /// columns called `sum` or `group_by`.
-const AGGREGATE_QUERY_KEYS: [&str; 6] =
-    ["group_by", "sum", "avg", "min", "max", "group_limit"];
+const AGGREGATE_QUERY_KEYS: [&str; 7] =
+    ["group_by", "sum", "avg", "min", "max", "group_limit", "group_label"];
 
 /// Read an aggregate request off the query string.
 ///
@@ -192,6 +192,12 @@ fn aggregate_spec(params: &ListQueryParams) -> backbone_orm::repository::Aggrega
             .get("group_limit")
             .and_then(|l| l.trim().parse::<usize>().ok())
             .unwrap_or(0),
+        label_field: params
+            .filters
+            .get("group_label")
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty()),
+        label_relation: None,
     }
 }
 
@@ -1776,6 +1782,12 @@ where
                         Some(k) => serde_json::Value::String(k.clone()),
                         None => serde_json::Value::Null,
                     });
+                    if g.label.is_some() {
+                        out.insert(
+                            "label".into(),
+                            serde_json::Value::String(g.label.clone().unwrap()),
+                        );
+                    }
                     out.insert("count".into(), serde_json::json!(g.count));
                     for (compound, value) in &g.values {
                         let Some((func, field)) = compound.split_once(':') else { continue };

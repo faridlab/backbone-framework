@@ -7,6 +7,7 @@ use serde_json::Value;
 use chrono::NaiveDateTime;
 use std::collections::{HashMap, HashSet};
 
+use crate::qualify_relation_table;
 use crate::filter::{parse_filters as parse_query_filter};
 use crate::filter::SortDirection as FilterSortDirection;
 use sqlx::Row as _;
@@ -895,6 +896,14 @@ pub struct AggregateSpec {
     pub reductions: Vec<(AggregateFn, String)>,
     /// Most groups to return before reporting the answer as truncated.
     pub group_limit: usize,
+    /// Carry a label per group: the column on the group column's RELATED
+    /// table (resolved through the entity's relation metadata) to show
+    /// instead of a bare uuid key. `None` = keys stay as they are.
+    pub label_field: Option<String>,
+    /// The resolved relation behind the group column — `(target table, the
+    /// BASE table's FK column, snake)`, filled by the generic layer from
+    /// the entity's `relations()` metadata. Callers never set this.
+    pub label_relation: Option<(String, String)>,
 }
 
 /// The default ceiling on distinct groups.
@@ -911,6 +920,9 @@ pub const DEFAULT_GROUP_LIMIT: usize = 200;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AggregateGroup {
     pub key: Option<String>,
+    /// The group's display label (the related row's label column), when the
+    /// caller asked for one and the group column is a relation FK.
+    pub label: Option<String>,
     pub count: u64,
     /// Reduction results keyed `"sum:amount"`, carried as strings.
     ///
@@ -1054,17 +1066,45 @@ impl<T: for<'a> FromRow<'a, PgRow> + Send + Unpin> PostgresRepository<T> {
         let group_limit = if spec.group_limit == 0 { DEFAULT_GROUP_LIMIT } else { spec.group_limit };
         let reductions = if selects.is_empty() { String::new() } else { format!(", {}", selects.join(", ")) };
 
+        // The group's label: when the caller names one (group_label) and the
+        // group column is a relation FK of THIS entity, LEFT JOIN the
+        // related table and carry its label column beside the key — the
+        // aggregate's equivalent of `?include=`, which has no row to
+        // hydrate otherwise.
+        let mut label_select = String::new();
+        let mut label_join = String::new();
+        if let (Some(field), Some(label_field), Some((rel_table, base_fk))) = (
+            &spec.group_by,
+            &spec.label_field,
+            &spec.label_relation,
+        ) {
+            let _ = field;
+            let qualified = qualify_relation_table(&self.table_name, rel_table);
+            let rel_columns = catalog_columns(&self.pool, &qualified).await?;
+            let (label_col, _) = resolve_column(label_field, &rel_columns).map_err(|_| {
+                AggregateFieldError(format!(
+                    "cannot label groups by `{label_field}`: the related table `{qualified}` has no such column"
+                ))
+            })?;
+            label_select = format!(", (label_rel.{label_col})::text AS __group_label");
+            label_join = format!(
+                " LEFT JOIN {qualified} AS label_rel ON label_rel.id IS NOT DISTINCT FROM {base_fk}"
+            );
+        }
+
         let sql = match &spec.group_by {
             Some(field) => {
                 let (column, _) = resolve_column(field, &columns)?;
                 format!(
-                    "SELECT GROUPING({column}) AS __is_total, ({column})::text AS __group_key, \
+                    "SELECT GROUPING({column}) AS __is_total, ({column})::text AS __group_key{label_select}, \
                      COUNT(*) AS __count{reductions} \
-                     FROM {table}{where_clause} \
+                     FROM {table}{label_join}{where_clause} \
                      GROUP BY GROUPING SETS (({column}), ()) \
                      ORDER BY __is_total DESC, __count DESC \
                      LIMIT {limit}",
                     column = column,
+                    label_select = label_select,
+                    label_join = label_join,
                     reductions = reductions,
                     table = self.table_name,
                     where_clause = where_clause,
@@ -1096,6 +1136,7 @@ impl<T: for<'a> FromRow<'a, PgRow> + Send + Unpin> PostgresRepository<T> {
             }
             AggregateGroup {
                 key: row.try_get::<Option<String>, _>("__group_key").ok().flatten(),
+                label: row.try_get::<Option<String>, _>("__group_label").ok().flatten(),
                 count: row.try_get::<i64, _>("__count").unwrap_or(0).max(0) as u64,
                 values,
             }
@@ -1121,6 +1162,7 @@ impl<T: for<'a> FromRow<'a, PgRow> + Send + Unpin> PostgresRepository<T> {
         // answer of zero, not a missing one.
         let total = total.unwrap_or_else(|| AggregateGroup {
             key: None,
+            label: None,
             count: 0,
             values: value_keys.iter().map(|k| (k.clone(), None)).collect(),
         });
