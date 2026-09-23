@@ -37,6 +37,19 @@ impl FilterCondition {
     }
 
     /// Build SQL WHERE clause for this condition (without logical prefix)
+    /// Cast each IN-list placeholder when a column type hint is present:
+    /// the wire binds text, and typed columns refuse text comparisons.
+    fn cast_placeholders(placeholders: Vec<String>, column_type: &Option<String>) -> String {
+        match column_type {
+            Some(t) => placeholders
+                .iter()
+                .map(|p| format!("{p}::{t}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            None => placeholders.join(", "),
+        }
+    }
+
     pub(crate) fn build_sql_without_prefix(&self, param_idx: &mut usize) -> String {
         match &self.operator {
             FilterOperator::IsNull => {
@@ -60,7 +73,8 @@ impl FilterCondition {
                         p
                     })],
                 };
-                format!("{} {} ({})", self.field, self.operator.as_sql(), placeholders.join(", "))
+                let list = Self::cast_placeholders(placeholders, &self.column_type);
+                format!("{} {} ({})", self.field, self.operator.as_sql(), list)
             }
             FilterOperator::NotIn => {
                 let placeholders: Vec<String> = match &self.value {
@@ -77,7 +91,8 @@ impl FilterCondition {
                         p
                     })],
                 };
-                format!("{} {} ({})", self.field, self.operator.as_sql(), placeholders.join(", "))
+                let list = Self::cast_placeholders(placeholders, &self.column_type);
+                format!("{} {} ({})", self.field, self.operator.as_sql(), list)
             }
             FilterOperator::Between => {
                 let result = format!("{} BETWEEN ${} AND ${}", self.field, *param_idx, *param_idx + 1);
@@ -182,5 +197,40 @@ impl FilterCondition {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod in_cast_tests {
+    use super::*;
+    use crate::filter::types::{FilterLogical, FilterValue};
+
+    fn cond(op: FilterOperator, ct: Option<&str>) -> FilterCondition {
+        let mut c = FilterCondition::new(
+            "employee_id".into(),
+            op,
+            FilterValue::from_string("x".into(), false),
+        )
+        .with_logical(FilterLogical::And);
+        if let Some(t) = ct {
+            c = c.with_column_type(t.into());
+        }
+        c
+    }
+
+    #[test]
+    fn in_placeholders_carry_the_column_cast() {
+        let c = cond(FilterOperator::In, Some("uuid"));
+        let mut idx = 1;
+        let sql = c.build_sql_without_prefix(&mut idx);
+        assert!(sql.contains("IN ($1::uuid)"), "{sql}");
+    }
+
+    #[test]
+    fn in_placeholders_bare_without_a_hint() {
+        let c = cond(FilterOperator::In, None);
+        let mut idx = 1;
+        let sql = c.build_sql_without_prefix(&mut idx);
+        assert!(sql.contains("IN ($1)") && !sql.contains("::"), "{sql}");
     }
 }
