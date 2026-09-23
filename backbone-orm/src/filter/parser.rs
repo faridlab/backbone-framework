@@ -160,10 +160,15 @@ pub fn parse_filters(
                             let condition_field = audit_metadata_sql_expr(&sanitized_field)
                                 .unwrap_or_else(|| sanitized_field.clone());
 
+                            // In/NotIn carry a comma-separated list on the
+                            // wire: split into the multi-value bind so each
+                            // element takes its own cast placeholder.
+                            let is_list =
+                                matches!(op, FilterOperator::In | FilterOperator::NotIn);
                             let condition = FilterCondition::new(
                                 condition_field,
                                 op.clone(),
-                                FilterValue::from_string(filter_value, false)
+                                FilterValue::from_string(filter_value, is_list)
                             );
 
                             // Add column type for casting. Audit-metadata fields need
