@@ -1,6 +1,7 @@
 //! Field validation and sanitization for filter queries
 
 use std::collections::HashSet;
+use super::parser::to_snake_case;
 use anyhow::Result;
 
 /// Trait for entities to declare which fields are allowed in filter queries.
@@ -79,5 +80,29 @@ pub fn sanitize_field_name(field: &str) -> Result<String> {
         return Err(anyhow::anyhow!("Potentially dangerous field name: '{}'", field));
     }
 
-    Ok(field.to_string())
+    // The wire speaks camelCase (the same convention the responses carry)
+    // while columns are snake_case: fold the field name here, once, for
+    // every consumer (bracket filters, plain equality, orderby). The fold
+    // is idempotent for already-snake names, and PostgreSQL column names
+    // are lowercase by construction so nothing legitimate is lost.
+    Ok(to_snake_case(field))
+}
+
+#[cfg(test)]
+mod casing_tests {
+    use super::sanitize_field_name;
+
+    #[test]
+    fn camel_case_fields_fold_to_snake_columns() {
+        assert_eq!(sanitize_field_name("employeeId").unwrap(), "employee_id");
+        assert_eq!(sanitize_field_name("date").unwrap(), "date");
+        assert_eq!(sanitize_field_name("employee_id").unwrap(), "employee_id");
+        assert_eq!(sanitize_field_name("billableCost").unwrap(), "billable_cost");
+    }
+
+    #[test]
+    fn dangerous_names_still_refused() {
+        assert!(sanitize_field_name("drop table").is_err());
+        assert!(sanitize_field_name("").is_err());
+    }
 }
