@@ -221,6 +221,20 @@ where
             .map_err(ServiceError::Repository)
     }
 
+    /// `list`, carrying the pagination info (cursor positions included) so
+    /// the HTTP layer can surface keyset paging on every generic route.
+    pub async fn list_with_info(
+        &self,
+        page: u32,
+        limit: u32,
+        filters: HashMap<String, String>,
+    ) -> ServiceResult<(Vec<E>, backbone_orm::repository::PaginationInfo)> {
+        self.repository
+            .list_filtered_with_info(page, limit, filters)
+            .await
+            .map_err(ServiceError::Repository)
+    }
+
     /// Group and reduce the rows `list` would return, under the same filters.
     pub async fn aggregate(
         &self,

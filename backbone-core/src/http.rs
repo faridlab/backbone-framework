@@ -520,12 +520,38 @@ pub struct PaginationResponse {
     pub page: u32,
     pub limit: u32,
     pub total_pages: u32,
+    /// Keyset paging: pass back as `after=` to fetch the page that follows.
+    /// Present only when the repository walked a deterministic order and
+    /// more rows follow.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    /// Keyset paging: pass back as `before=` to fetch the page that precedes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prev_cursor: Option<String>,
+    /// Whether another page follows (known without a count on a cursor walk).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_more: Option<bool>,
 }
 
 impl PaginationResponse {
     pub fn new(total: u64, page: u32, limit: u32) -> Self {
         let total_pages = if limit == 0 { 0 } else { ((total as f64) / (limit as f64)).ceil() as u32 };
-        Self { total, page, limit, total_pages }
+        Self { total, page, limit, total_pages, next_cursor: None, prev_cursor: None, has_more: None }
+    }
+
+    /// From the repository's pagination info — the cursor fields ride along
+    /// when the repository produced them (a cursor walk or a filtered list
+    /// with a deterministic order).
+    pub fn from_info(info: &backbone_orm::repository::PaginationInfo) -> Self {
+        Self {
+            total: info.total,
+            page: info.page,
+            limit: info.per_page,
+            total_pages: info.total_pages,
+            next_cursor: info.next_cursor.clone(),
+            prev_cursor: info.prev_cursor.clone(),
+            has_more: info.has_more,
+        }
     }
 }
 
@@ -550,6 +576,17 @@ pub struct PaginatedApiResponse<T> {
 }
 
 impl<T> PaginatedApiResponse<T> {
+    /// A successful response carrying the repository's pagination info —
+    /// the cursor fields surface only when the repository produced them.
+    pub fn ok_with_info(data: Vec<T>, info: &backbone_orm::repository::PaginationInfo) -> Self {
+        Self {
+            success: true,
+            data,
+            meta: PaginationResponse::from_info(info),
+            error: None,
+        }
+    }
+
     /// Create a successful paginated response
     pub fn ok(data: Vec<T>, total: u64, page: u32, limit: u32) -> Self {
         Self {
@@ -758,6 +795,22 @@ where
 
     /// 1. List entities with pagination and filters
     async fn list(&self, page: u32, limit: u32, filters: HashMap<String, String>) -> Result<(Vec<Entity>, u64), Self::Error>;
+
+    /// `list`, carrying the pagination info (cursor positions included) so
+    /// the HTTP layer can surface keyset paging. Default: the tuple form —
+    /// generated services override this with the repository's cursors.
+    async fn list_with_info(
+        &self,
+        page: u32,
+        limit: u32,
+        filters: HashMap<String, String>,
+    ) -> Result<(Vec<Entity>, backbone_orm::repository::PaginationInfo), Self::Error> {
+        let (rows, total) = self.list(page, limit, filters).await?;
+        Ok((
+            rows,
+            backbone_orm::repository::PaginationInfo::new(page, limit, total),
+        ))
+    }
 
     /// 2. Create a new entity
     async fn create(&self, dto: CreateDto) -> Result<Entity, Self::Error>;
@@ -1243,8 +1296,12 @@ where
 
         let filters = repository_filters(&params);
 
-        match handler.service.list(params.page, params.limit, filters).await {
-            Ok((entities, total)) => {
+        match handler
+            .service
+            .list_with_info(params.page, params.limit, filters)
+            .await
+        {
+            Ok((entities, info)) => {
                 // Security ceiling first, then relation expansion (batched across all
                 // rows), then sparse projection.
                 let mut rows: Vec<serde_json::Value> = entities
@@ -1261,7 +1318,7 @@ where
                 expand_includes::<S, E, C, U>(&*handler.service, &mut rows, &includes).await;
                 let items: Vec<serde_json::Value> =
                     rows.into_iter().map(|r| project_sparse(r, &fields)).collect();
-                let response = PaginatedApiResponse::ok(items, total, params.page, params.limit);
+                let response = PaginatedApiResponse::ok_with_info(items, &info);
                 (StatusCode::OK, Json(response))
             }
             Err(e) => {

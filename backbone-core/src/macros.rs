@@ -194,6 +194,24 @@ macro_rules! impl_crud_repository {
                     .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
             }
 
+            async fn list_filtered_with_info(
+                &self,
+                page: u32,
+                limit: u32,
+                filters: std::collections::HashMap<String, String>,
+            ) -> Result<
+                (Vec<$entity>, backbone_orm::repository::PaginationInfo),
+                backbone_core::RepositoryError,
+            > {
+                let pagination =
+                    backbone_orm::repository::PaginationParams { page, per_page: limit };
+                (&**self)
+                    .list_paginated_filtered(pagination, Some(&filters))
+                    .await
+                    .map(|r| (r.data, r.pagination))
+                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+            }
+
             fn table_name(&self) -> Option<&str> {
                 Some((&**self).table_name())
             }
@@ -420,6 +438,24 @@ macro_rules! impl_crud_repository {
                 (&**self).list_paginated_filtered(pagination, Some(&filters))
                     .await
                     .map(|r| (r.data, r.pagination.total))
+                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+            }
+
+            async fn list_filtered_with_info(
+                &self,
+                page: u32,
+                limit: u32,
+                filters: std::collections::HashMap<String, String>,
+            ) -> Result<
+                (Vec<$entity>, backbone_orm::repository::PaginationInfo),
+                backbone_core::RepositoryError,
+            > {
+                let pagination =
+                    backbone_orm::repository::PaginationParams { page, per_page: limit };
+                (&**self)
+                    .list_paginated_filtered(pagination, Some(&filters))
+                    .await
+                    .map(|r| (r.data, r.pagination))
                     .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
             }
 

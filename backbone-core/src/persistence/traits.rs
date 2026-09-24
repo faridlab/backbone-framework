@@ -204,6 +204,23 @@ where
         self.list(page, limit).await
     }
 
+    /// `list_filtered`, carrying the pagination info (cursor positions
+    /// included) so the HTTP layer can surface keyset paging. Default: the
+    /// tuple form with the cursor fields absent; the generated Postgres
+    /// repositories override this with the real keyset walk.
+    async fn list_filtered_with_info(
+        &self,
+        page: u32,
+        limit: u32,
+        filters: HashMap<String, String>,
+    ) -> Result<(Vec<E>, backbone_orm::repository::PaginationInfo), RepositoryError> {
+        let (rows, total) = self.list_filtered(page, limit, filters).await?;
+        Ok((
+            rows,
+            backbone_orm::repository::PaginationInfo::new(page, limit, total),
+        ))
+    }
+
     /// Group and reduce entities under the same filters as `list_filtered`.
     ///
     /// There is deliberately no useful default. A repository that cannot group
