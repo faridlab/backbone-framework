@@ -780,6 +780,15 @@ where
         self.list(page, limit, filters).await
     }
 
+    async fn list_with_info(
+        &self,
+        page: u32,
+        limit: u32,
+        filters: HashMap<String, String>,
+    ) -> Result<(Vec<E>, backbone_orm::repository::PaginationInfo), ServiceError> {
+        self.list_with_info(page, limit, filters).await
+    }
+
     async fn aggregate(
         &self,
         spec: &backbone_orm::repository::AggregateSpec,
