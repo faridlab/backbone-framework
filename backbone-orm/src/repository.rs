@@ -591,7 +591,13 @@ impl<T: for<'a> FromRow<'a, PgRow> + Send + Unpin> PostgresRepository<T> {
         let mut values: Vec<serde_json::Value> = Vec::with_capacity(sorts.len());
         for (i, (field, _)) in sorts.iter().enumerate() {
             let field = field.as_str();
-            let data_type = casts.get(i).and_then(|c| c.as_deref()).unwrap_or("");
+            let mut data_type = casts.get(i).and_then(|c| c.as_deref()).unwrap_or("");
+            // The ORM appends the id tiebreaker itself and page mode never
+            // resolves casts — without this, the uuid id decodes as text,
+            // the read fails, and the whole cursor silently vanishes.
+            if field == "id" && data_type.is_empty() {
+                data_type = "uuid";
+            }
             let text: Option<String> = match data_type {
                 "numeric" => row
                     .try_get::<Option<sqlx::types::Decimal>, _>(field)
