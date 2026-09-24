@@ -119,6 +119,38 @@ pub fn parse_filters(
 
                 let operator_str = &key[bracket_pos + 1..key.len() - 1];
 
+                // THE SORT BRACKET GRAMMAR: `orderby[column]=direction`. The
+                // bracket grammar is `field[operator]`, so the key splits as
+                // field="orderby", operator=column — the column rides the
+                // OPERATOR slot. Recognize the sort prefix HERE, before the
+                // operator match would look for an operator named after the
+                // column and silently drop the sort (the wire's sorts have
+                // been empty this whole time).
+                if field.eq_ignore_ascii_case("orderby") || field.eq_ignore_ascii_case("sort") {
+                    let sort_field = match sanitize_field_name(operator_str) {
+                        Ok(f) => f,
+                        Err(_) => continue,
+                    };
+                    if let Some(allowed) = allowed_fields {
+                        if !is_valid_field(&sort_field, allowed) {
+                            continue;
+                        }
+                    }
+                    // Direction: `desc`/`asc`, or a `-` prefix as the plain
+                    // form allows; anything else is ascending.
+                    let v = value.trim();
+                    let (f, dir) = if let Some(stripped) = v.strip_prefix('-') {
+                        (stripped, crate::filter::types::SortDirection::Desc)
+                    } else if v.eq_ignore_ascii_case("desc") {
+                        (sort_field.as_str(), crate::filter::types::SortDirection::Desc)
+                    } else {
+                        (sort_field.as_str(), crate::filter::types::SortDirection::Asc)
+                    };
+                    let _ = f;
+                    filter.add_sort(SortSpec::new(sort_field, dir));
+                    continue;
+                }
+
                 // Handle special operators
                 match operator_str.to_ascii_lowercase().as_str() {
                     "orderby" => {
@@ -222,12 +254,27 @@ pub fn parse_filters(
                         // WITH the prefix rejected it, so a single-field
                         // descending sort was silently dropped — the request
                         // answered unsorted and nothing said so.
-                        let direction = if value.starts_with('-') {
-                            SortDirection::Desc
-                        } else {
-                            SortDirection::Asc
+                        // The value may carry a `:dir` suffix (the wire
+                        // also speaks `orderby=field:desc`); split it off so
+                        // the colon does not fail the field sanitizer and
+                        // silently drop the sort.
+                        let (bare, suffix_dir) = match value.split_once(':') {
+                            Some((f, d)) => (
+                                f,
+                                if d.trim().eq_ignore_ascii_case("desc") {
+                                    Some(SortDirection::Desc)
+                                } else {
+                                    Some(SortDirection::Asc)
+                                },
+                            ),
+                            None => (value.as_str(), None),
                         };
-                        let field = value.trim_start_matches('-');
+                        let direction = match (bare.starts_with('-'), suffix_dir) {
+                            (true, _) => SortDirection::Desc,
+                            (false, Some(d)) => d,
+                            (false, None) => SortDirection::Asc,
+                        };
+                        let field = bare.trim_start_matches('-');
                         if let Ok(sanitized) = sanitize_field_name(field) {
                             let sort_field = audit_metadata_sql_expr(&sanitized)
                                 .unwrap_or_else(|| sanitized.clone());
@@ -350,4 +397,28 @@ pub fn parse_filters(
     }
 
     Ok(filter)
+}
+
+#[cfg(test)]
+mod orderby_wire_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn orderby_bracket_key_populates_sorts() {
+        let mut params = HashMap::new();
+        params.insert("orderby[employeeNumber]".to_string(), "desc".to_string());
+        let f = parse_filters(&params, &HashMap::new(), None).unwrap();
+        assert_eq!(f.sorts.len(), 1, "sorts: {:?}", f.sorts);
+        assert_eq!(f.sorts[0].field, "employee_number");
+        assert!(matches!(f.sorts[0].direction, crate::filter::types::SortDirection::Desc));
+    }
+
+    #[test]
+    fn orderby_plain_key_populates_sorts() {
+        let mut params = HashMap::new();
+        params.insert("orderby".to_string(), "employeeNumber:desc".to_string());
+        let f = parse_filters(&params, &HashMap::new(), None).unwrap();
+        assert!(!f.sorts.is_empty(), "sorts: {:?}", f.sorts);
+    }
 }
