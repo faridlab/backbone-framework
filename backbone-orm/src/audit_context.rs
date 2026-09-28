@@ -107,3 +107,108 @@ impl RequestAuditContext {
         Ok(())
     }
 }
+
+// ─── Ambient request attribution ─────────────────────────────────────────────
+
+tokio::task_local! {
+    /// The request's audit attribution, published by the audited twin of the org
+    /// request scope ([`crate::org_scope::with_org_request_scope_and_audit`]).
+    /// Write services that open their OWN transactions — whose connections the
+    /// request-dedicated binding never touches — read it through
+    /// [`current_request_audit`] and relay it with [`relay_ambient_audit_on`],
+    /// the same discipline the org fence relay follows.
+    static REQUEST_AUDIT: RequestAuditContext;
+}
+
+/// Publish `audit` for the duration of `f` — the ambient-attribution half of
+/// the audited scope wrapper (crate-internal: callers reach it through the
+/// wrapper, never directly).
+pub(crate) async fn with_request_audit<F>(audit: RequestAuditContext, f: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    REQUEST_AUDIT.scope(audit, f).await
+}
+
+/// The ambient request's audit attribution, when this task runs inside the
+/// audited org request scope; `None` outside one (standalone deployments,
+/// jobs, relays — the honest no-attribution posture).
+pub fn current_request_audit() -> Option<RequestAuditContext> {
+    REQUEST_AUDIT.try_with(|audit| audit.clone()).ok()
+}
+
+/// Re-bind the ambient request's audit attribution onto a connection the
+/// caller opened itself — the audit twin of the fence relay
+/// ([`bind_org_scope_on`](crate::org_scope::bind_org_scope_on)): a hand-written
+/// write service's fresh pool transaction carries none of the request
+/// connection's variables, so the audit triggers on it would read an empty
+/// actor and stamp `'system'`. Transaction-local (`local = true`): the
+/// attribution dies with the transaction, never leaking onto the next checkout
+/// of the pooled connection. With no ambient context this is a no-op.
+///
+/// # Errors
+/// Returns the sqlx error if any `set_config` fails.
+pub async fn relay_ambient_audit_on(conn: &mut PgConnection) -> Result<(), sqlx::Error> {
+    if let Some(audit) = current_request_audit() {
+        audit.bind_on(conn, true).await?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn the_audit_context_travels_the_task_local() {
+        // Outside the audited wrapper there is no ambient attribution.
+        assert!(current_request_audit().is_none());
+        let audit = RequestAuditContext::new("user-1");
+        let seen = with_request_audit(audit.clone(), async { current_request_audit() }).await;
+        assert_eq!(seen, Some(audit));
+        // And the scope closes behind it.
+        assert!(current_request_audit().is_none());
+    }
+
+    #[tokio::test]
+    async fn relay_binds_the_actor_onto_a_transaction_local_channel() {
+        // A live-database check of the relay's actual effect: with a pool
+        // reachable it proves the transaction-local bind; without one it
+        // proves the no-ambient no-op path (the helper leaves the connection
+        // untouched, so the variables read as empty).
+        let url = std::env::var("DATABASE_URL").unwrap_or_default();
+        if url.is_empty() {
+            eprintln!("SKIP| audit relay: DATABASE_URL unset");
+            return;
+        }
+        let pool = match sqlx::PgPool::connect(&url).await {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("SKIP| audit relay: {e}");
+                return;
+            }
+        };
+        let audit = RequestAuditContext {
+            actor: "relay-probe".to_string(),
+            correlation_id: "corr-1".to_string(),
+            ..RequestAuditContext::default()
+        };
+        with_request_audit(audit, async {
+            let mut tx = pool.begin().await.expect("begin");
+            relay_ambient_audit_on(&mut tx).await.expect("relay");
+            let actor: String = sqlx::query_scalar("SELECT current_setting('app.actor', true)")
+                .fetch_one(&mut *tx)
+                .await
+                .expect("read actor");
+            let correlation: String =
+                sqlx::query_scalar("SELECT current_setting('app.correlation_id', true)")
+                    .fetch_one(&mut *tx)
+                    .await
+                    .expect("read correlation");
+            assert_eq!(actor, "relay-probe");
+            assert_eq!(correlation, "corr-1");
+            tx.rollback().await.expect("rollback");
+        })
+        .await;
+    }
+}

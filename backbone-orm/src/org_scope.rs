@@ -337,12 +337,24 @@ where
     let holder = Arc::new(Mutex::new(conn));
     let scope_arc = Arc::new(scope);
     let pool_identity = pool.connect_options();
+    // The audit attribution rides as a task-local TOO (not only as variables on
+    // the dedicated connection): write services below open their own pool
+    // transactions, whose connections the session-level binding never touches,
+    // and they relay it onto those transactions with
+    // `relay_ambient_audit_on` — the same discipline as the fence relay.
+    let audit_owned = audit.cloned();
     let result = ORG_SCOPE_POOL
         .scope(
             pool_identity,
             ORG_SCOPE.scope(scope_arc.clone(), async {
                 crate::company_scope::with_company_scope_internal(scope_arc.legacy_company_id, async {
-                    crate::company_scope::with_request_conn_internal(holder.clone(), f).await
+                    let inner = crate::company_scope::with_request_conn_internal(holder.clone(), f);
+                    match audit_owned {
+                        Some(audit) => {
+                            crate::audit_context::with_request_audit(audit, inner).await
+                        }
+                        None => inner.await,
+                    }
                 })
                 .await
             }),
