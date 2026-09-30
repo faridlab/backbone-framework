@@ -3,6 +3,7 @@ name = "backbone-messaging"
 version = "2.0.0"
 edition = "2021"
 description = "Event-driven messaging infrastructure for Backbone Framework"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 # Async runtime

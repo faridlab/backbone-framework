@@ -3,6 +3,7 @@ name = "backbone-outbox"
 version = "0.2.0"
 edition = "2021"
 description = "Durable transactional-outbox + inbox + relay primitives for go-live exactly-once event delivery over Postgres."
+license = "MIT OR Apache-2.0"
 
 [lib]
 path = "src/lib.rs"

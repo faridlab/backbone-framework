@@ -3,6 +3,7 @@ name = "backbone-observability"
 version = "2.0.0"
 edition = "2021"
 description = "Backbone Framework Observability - Tracing, logging, and metrics"
+license = "MIT OR Apache-2.0"
 
 [lib]
 name = "backbone_observability"

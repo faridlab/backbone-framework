@@ -3,6 +3,7 @@ name = "backbone-graphql"
 version = "0.1.0"
 edition = "2021"
 description = "GraphQL runtime support for the Backbone Framework"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 async-graphql = "7"

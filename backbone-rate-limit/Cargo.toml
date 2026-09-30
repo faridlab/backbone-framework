@@ -3,6 +3,7 @@ name = "backbone-rate-limit"
 version = "2.0.0"
 edition = "2021"
 description = "Backbone Framework Rate Limiting Module - Rate limiting middleware for Axum"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 # Core dependencies

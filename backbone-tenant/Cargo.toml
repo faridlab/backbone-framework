@@ -3,6 +3,7 @@ name = "backbone-tenant"
 version = "0.1.0"
 edition = "2021"
 description = "Per-tenant runtime registry: resolve a request to its tenant's runtime (pool + built modules), building each tenant once and caching it (ADR-0006)."
+license = "MIT OR Apache-2.0"
 
 [lib]
 path = "src/lib.rs"
