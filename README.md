@@ -33,24 +33,31 @@ A modular Rust framework for building production-grade backend services. Backbon
 
 ## Getting Started
 
-Add the crates you need to your service's `Cargo.toml`. Backbone is distributed
-as **git dependencies pinned to a release tag** — not via crates.io. Pin every
-member crate to the same tag so they're consistent at one commit:
+Add the crates you need to your service's `Cargo.toml`. Every crate is
+published to crates.io, all at the same release version:
 
 ```toml
 [dependencies]
-backbone-core = { git = "https://github.com/faridlab/backbone-framework", tag = "v2.0.0", features = ["postgres"] }
-backbone-orm  = { git = "https://github.com/faridlab/backbone-framework", tag = "v2.0.0" }
-backbone-auth = { git = "https://github.com/faridlab/backbone-framework", tag = "v2.0.0" }
+backbone-core = { version = "2.7.35", features = ["postgres"] }
+backbone-orm  = "2.7.35"
+backbone-auth = "2.7.35"
 ```
 
-> **Do not use `branch = "main"`.** It makes every `cargo update` pull HEAD,
-> which silently drags in breaking changes. Always pin `tag = "v<version>"`
-> and bump the tag deliberately when you want to adopt a new release.
+A requirement like `"2.7.35"` accepts any compatible later release, and
+`cargo update` moves your lockfile onto it. The lockfile is where the exact
+version is pinned.
 
-During local development against an unreleased change, temporarily swap to a
-`path = "../backbone-framework/backbone-<crate>"` dep — but revert to a tag
-pin before committing.
+To build against an unreleased change, point Cargo at a local checkout
+through an untracked `.cargo/config.toml` in your project, leaving
+`Cargo.toml` as it is:
+
+```toml
+[patch.crates-io]
+backbone-core = { path = "../backbone-framework/backbone-core" }
+```
+
+Releases up to 2.7.34 were distributed only as git tags
+(`{ git = "https://github.com/faridlab/backbone-framework", tag = "v<version>" }`).
 
 Each crate ships with its own `README.md` and `examples/` directory — start there for usage patterns.
 
@@ -58,9 +65,10 @@ Each crate ships with its own `README.md` and `examples/` directory — start th
 
 This workspace uses **monorepo versioning**: one version covers every member
 crate at a given commit. The authoritative version lives in
-`[workspace.metadata.release].version` in [Cargo.toml](Cargo.toml); each
-release is a git tag `v<version>` pointing at the commit where that version
-was set. See [CHANGELOG.md](CHANGELOG.md) for the release history.
+`[workspace.metadata.release].version` in [Cargo.toml](Cargo.toml), and every
+crate is published under it. Each release is also a git tag `v<version>`
+pointing at the commit where that version was set. See
+[CHANGELOG.md](CHANGELOG.md) for the release history.
 
 Semver applies to the workspace as a whole:
 
@@ -71,7 +79,13 @@ Semver applies to the workspace as a whole:
 Releases are cut by pushing a `v<version>` tag. The release workflow
 (`.github/workflows/release.yml`) verifies the tag matches the workspace
 version, builds and tests the whole workspace, and publishes a GitHub Release
-with notes from `CHANGELOG.md`.
+with notes from `CHANGELOG.md`. The crates are published to crates.io only
+after that run passes.
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT), at your option.
 
 ## Building
 

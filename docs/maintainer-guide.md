@@ -89,10 +89,12 @@ The workspace uses **monorepo versioning**
 member crate at a commit**, and it is authoritative in **one place** —
 `[workspace.metadata.release].version` in [`Cargo.toml`](../Cargo.toml).
 
-> Note: individual crates still carry their own `version` field (many read
-> `2.0.0`, frozen from the byte-for-byte extraction). These are **not** the
-> release source of truth — the `[workspace.metadata.release]` field is. Do not
-> rely on per-crate versions to reason about a release.
+From 2.7.35 every crate is published to crates.io, so each crate's own
+`version` carries the release version, and so does every dependency between
+member crates. `scripts/set-release-version.sh <version>` writes all of them
+at once; `scripts/check-release-version.sh` fails when any of them disagrees
+with the field. (Before 2.7.35 the per-crate fields were frozen at their
+extraction values and meant nothing.)
 
 Semver applies to the workspace **as a whole**:
 
@@ -102,7 +104,7 @@ Semver applies to the workspace **as a whole**:
 
 To cut a release:
 
-1. Bump `[workspace.metadata.release].version` in `Cargo.toml`.
+1. Run `scripts/set-release-version.sh <version>`.
 2. Move the `## [Unreleased]` notes into a `## [x.y.z]` section in
    [`CHANGELOG.md`](../CHANGELOG.md) (Keep-a-Changelog format).
 3. Build and test the whole workspace clean, and run
@@ -113,6 +115,10 @@ To cut a release:
    publish** a tag whose version does not match the `Cargo.toml` field or whose
    commit is not on `main`, then builds/tests and publishes a GitHub Release
    using the matching CHANGELOG section as the body.
+5. Once that release run passes, publish the crates to crates.io:
+   `cargo publish --workspace`. Cargo publishes the members in dependency
+   order. A published version is permanent (it can be yanked, never replaced),
+   so never publish a version whose release run failed.
 
 A refused tag still exists on the remote and still resolves as a git
 dependency, so a refusal is not the end of it: the tag carries no GitHub Release

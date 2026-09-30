@@ -1,6 +1,6 @@
 # ADR-0004: One version for the whole workspace
 
-- **Status:** Accepted
+- **Status:** Accepted; from 2.7.35 the clause on per-crate `version` fields is superseded (Metaphor workspace ADR-0030): every crate now carries the release version, since each is published to crates.io under it
 - **Date:** 2026-04-24
 - **Deciders:** Backbone maintainers
 

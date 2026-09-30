@@ -8,10 +8,10 @@ do not edit an accepted decision in place.
 
 | # | Decision | Status |
 |---|----------|--------|
-| [0001](adr-0001-git-tag-distribution.md) | Distribute via git tags, not crates.io | Accepted |
+| [0001](adr-0001-git-tag-distribution.md) | Distribute via git tags, not crates.io | Superseded by metaphora ADR-0030 (2.7.35) |
 | [0002](adr-0002-self-describing-crates.md) | Self-describing crates; no workspace dependency inheritance | Accepted |
 | [0003](adr-0003-protocol-agnostic-core.md) | Protocol-agnostic core with pluggable backends | Accepted |
-| [0004](adr-0004-monorepo-versioning.md) | One version for the whole workspace | Accepted |
+| [0004](adr-0004-monorepo-versioning.md) | One version for the whole workspace | Accepted (per-crate clause superseded by metaphora ADR-0030) |
 
 New ADRs start from the template at
 [`.claude/skills/framework-handbook/templates/adr-NNNN.md`](../../.claude/skills/framework-handbook/templates/adr-NNNN.md).

@@ -1,6 +1,6 @@
 # ADR-0001: Distribute via git tags, not crates.io
 
-- **Status:** Accepted
+- **Status:** Superseded from 2.7.35 (Metaphor workspace ADR-0030): every crate is published to crates.io under MIT OR Apache-2.0, and dependents take it by semver version instead of by git tag
 - **Date:** 2026-04-24
 - **Deciders:** Backbone maintainers
 

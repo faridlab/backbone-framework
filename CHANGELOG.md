@@ -4,16 +4,26 @@ All notable changes to this workspace are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions adhere to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-Because this framework is distributed as git deps (not crates.io), the version
-below is the **monorepo version** — the same number applies to every member
-crate at this commit. Downstream projects pin the whole framework with
-`{ git = "...", tag = "v<version>" }`.
+The version below is the **monorepo version** — the same number applies to
+every member crate at this commit. From 2.7.35 every crate is published to
+crates.io under that version, and downstream projects depend on it by semver
+requirement (`backbone-core = "2.7"`). Releases up to 2.7.34 were distributed
+only as git tags (`{ git = "...", tag = "v<version>" }`).
 
 The release workflow reads the section matching the git tag's version and
 uses it as the GitHub Release body. If no matching section is found it falls
 back to the `## [Unreleased]` section.
 
-## [Unreleased]
+## [2.7.35] - 2026-09-30
+
+### Changed
+
+- **Licensing** — every crate is licensed `MIT OR Apache-2.0`, with `LICENSE-MIT` and
+  `LICENSE-APACHE` at the workspace root. `backbone-maintenance` moves from `MIT` to the
+  dual license.
+- **Distribution** — every crate is published to crates.io. Each crate's `version` now
+  carries the release version instead of the frozen extraction value (`2.0.0`, `0.1.0`,
+  `0.2.0`), and every dependency between member crates asks for that version.
 
 ### Fixed
 
@@ -26,8 +36,11 @@ back to the `## [Unreleased]` section.
 
 - `scripts/check-release-version.sh` — with a tag, checks the field equals it (the
   release workflow now calls this); without one, checks the field is not behind the
-  latest release tag. The test workflow runs the no-argument form on every push and
-  pull request.
+  latest release tag. Both forms also check that every crate and every dependency
+  between member crates carries the field's version. The test workflow runs the
+  no-argument form on every push and pull request.
+- `scripts/set-release-version.sh <version>` — writes the release version to the field,
+  every crate, and every member-to-member dependency in one step.
 - The release workflow refuses a tag whose commit is not on `main`, since such a
   commit never went through the test workflow.
 
