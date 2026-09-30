@@ -87,8 +87,7 @@ Backends sit behind the crate's trait (the "pluggable backends" principle):
 The workspace uses **monorepo versioning**
 ([ADR-0004](adr/adr-0004-monorepo-versioning.md)): **one version covers every
 member crate at a commit**, and it is authoritative in **one place** —
-`[workspace.metadata.release].version` in [`Cargo.toml`](../Cargo.toml)
-(currently `2.6.1`).
+`[workspace.metadata.release].version` in [`Cargo.toml`](../Cargo.toml).
 
 > Note: individual crates still carry their own `version` field (many read
 > `2.0.0`, frozen from the byte-for-byte extraction). These are **not** the
@@ -106,11 +105,21 @@ To cut a release:
 1. Bump `[workspace.metadata.release].version` in `Cargo.toml`.
 2. Move the `## [Unreleased]` notes into a `## [x.y.z]` section in
    [`CHANGELOG.md`](../CHANGELOG.md) (Keep-a-Changelog format).
-3. Build and test the whole workspace clean.
-4. Push a `v<version>` git tag. The release workflow
-   (`.github/workflows/release.yml`) **refuses to publish** a tag whose version
-   does not match the `Cargo.toml` field, then builds/tests and publishes a
-   GitHub Release using the matching CHANGELOG section as the body.
+3. Build and test the whole workspace clean, and run
+   `scripts/check-release-version.sh v<version>` — it fails when the field was
+   not bumped to the version you are about to tag.
+4. Push the release commit to `main`, then push a `v<version>` git tag on that
+   commit. The release workflow (`.github/workflows/release.yml`) **refuses to
+   publish** a tag whose version does not match the `Cargo.toml` field or whose
+   commit is not on `main`, then builds/tests and publishes a GitHub Release
+   using the matching CHANGELOG section as the body.
+
+A refused tag still exists on the remote and still resolves as a git
+dependency, so a refusal is not the end of it: the tag carries no GitHub Release
+and never ran the workspace tests. Only pin tags that have a GitHub Release.
+The test workflow runs the no-argument form of the check on every push to
+`main` and every pull request, so a field left behind the latest tag shows up
+before the next tag is cut.
 
 ## What will break things
 

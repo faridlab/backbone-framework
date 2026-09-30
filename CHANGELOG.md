@@ -13,6 +13,24 @@ The release workflow reads the section matching the git tag's version and
 uses it as the GitHub Release body. If no matching section is found it falls
 back to the `## [Unreleased]` section.
 
+## [Unreleased]
+
+### Fixed
+
+- **Release workflow** — `[workspace.metadata.release].version` had stayed at `2.7.25`
+  while tags moved on to `v2.7.34`, so the workflow refused every tag from `v2.7.26`
+  onward before its build-and-test step ran: those tags carry no GitHub Release and
+  were never tested by it. The field is back in step with the latest tag.
+
+### Added
+
+- `scripts/check-release-version.sh` — with a tag, checks the field equals it (the
+  release workflow now calls this); without one, checks the field is not behind the
+  latest release tag. The test workflow runs the no-argument form on every push and
+  pull request.
+- The release workflow refuses a tag whose commit is not on `main`, since such a
+  commit never went through the test workflow.
+
 ## [2.7.34] - 2026-09-30
 
 ### Added
