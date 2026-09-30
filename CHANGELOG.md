@@ -13,6 +13,17 @@ The release workflow reads the section matching the git tag's version and
 uses it as the GitHub Release body. If no matching section is found it falls
 back to the `## [Unreleased]` section.
 
+## [2.7.34] - 2026-09-30
+
+### Added
+
+- **backbone-orm** — `org_scope::fetch_all_rows_scoped` and `org_scope::fetch_one_row_scoped`:
+  the tenant-agnostic set/single-row read twins of `execute_scoped`. They ride the
+  request-dedicated connection when one is bound (carrying whatever fence variables the
+  composing service's scope set) and fall back to a plain pool fetch otherwise, inventing no
+  scope. Reads that must ride the request connection but owe no company predicate reach for
+  these instead of the company-scoped helpers.
+
 ## [2.7.23] - 2026-09-15
 
 ### Added

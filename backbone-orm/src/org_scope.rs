@@ -483,6 +483,37 @@ pub async fn fetch_optional_row_scoped<'q>(
     query.fetch_optional(pool).await
 }
 
+/// Tenant-agnostic `fetch_all` for an untyped row query — the set-returning sibling of
+/// [`fetch_optional_row_scoped`], same connection discipline: request-dedicated connection
+/// when bound, plain pool otherwise, no scope invented. Reads that must ride the request
+/// connection (a bare-pool read under a decorated deployment lands on a fresh connection
+/// with no fence variables and returns nothing) but owe no company predicate reach for
+/// this, not the company-scoped helpers.
+pub async fn fetch_all_rows_scoped<'q>(
+    pool: &PgPool,
+    query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
+) -> Result<Vec<sqlx::postgres::PgRow>, sqlx::Error> {
+    if let Some(conn) = crate::company_scope::current_request_conn() {
+        let mut g = conn.lock().await;
+        return query.fetch_all(&mut **g).await;
+    }
+    query.fetch_all(pool).await
+}
+
+/// Tenant-agnostic `fetch_one` for an untyped row query — the single-row sibling of
+/// [`fetch_optional_row_scoped`], same connection discipline: request-dedicated connection
+/// when bound, plain pool otherwise, no scope invented.
+pub async fn fetch_one_row_scoped<'q>(
+    pool: &PgPool,
+    query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
+) -> Result<sqlx::postgres::PgRow, sqlx::Error> {
+    if let Some(conn) = crate::company_scope::current_request_conn() {
+        let mut g = conn.lock().await;
+        return query.fetch_one(&mut **g).await;
+    }
+    query.fetch_one(pool).await
+}
+
 #[cfg(test)]
 mod tests {
     //! Gated on `BACKBONE_ORM_RLS_DSN` (a superuser DSN). Self-contained: builds a minimal org
@@ -492,6 +523,7 @@ mod tests {
     use crate::audit_context::RequestAuditContext;
     use sqlx::postgres::PgPoolOptions;
     use sqlx::PgPool;
+    use sqlx::Row;
     use uuid::Uuid;
 
     fn dsn() -> Option<String> {
@@ -609,20 +641,53 @@ mod tests {
         // pool fetch) is the interesting path: it must route onto the request connection the
         // scope bound, which carries the fence variables.
         let pool = app_pool(&dsn, &role).await;
-        let codes: Vec<String> = with_org_request_scope(&pool, scope, async {
-            crate::company_scope::fetch_all_scoped(
-                &pool,
-                sqlx::query_as::<_, (String,)>("SELECT code FROM org_scope_test.t ORDER BY code"),
-            )
+        let (codes, twin_codes): (Vec<String>, Vec<String>) =
+            with_org_request_scope(&pool, scope, async {
+                let codes: Vec<String> = crate::company_scope::fetch_all_scoped(
+                    &pool,
+                    sqlx::query_as::<_, (String,)>("SELECT code FROM org_scope_test.t ORDER BY code"),
+                )
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|r| r.0)
+                .collect();
+                // The tenant-agnostic fetch-all twin rides the same request
+                // connection and therefore the same fence — the honest helper
+                // for reads that owe no company predicate.
+                let twin_codes: Vec<String> = super::fetch_all_rows_scoped(
+                    &pool,
+                    sqlx::query("SELECT code FROM org_scope_test.t ORDER BY code"),
+                )
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|r| r.get::<String, &str>("code"))
+                .collect();
+                (codes, twin_codes)
+            })
+            .await
+            .unwrap();
+        assert_eq!(codes, ["BR-WH"], "branch session sees only its subtree (+ shared root rows), not the company or sister-company rows");
+        assert_eq!(
+            twin_codes, codes,
+            "the org-scope fetch-all twin fences identically to the scoped helper"
+        );
+
+        // A bare pool read (no request connection, no fence variables on the
+        // freshly acquired connection) sees nothing under the decorated fence —
+        // the failure mode that makes riding the request connection mandatory.
+        let bare: Vec<String> = sqlx::query("SELECT code FROM org_scope_test.t")
+            .fetch_all(&pool)
             .await
             .unwrap()
             .into_iter()
-            .map(|r| r.0)
-            .collect()
-        })
-        .await
-        .unwrap();
-        assert_eq!(codes, ["BR-WH"], "branch session sees only its subtree (+ shared root rows), not the company or sister-company rows");
+            .map(|r| r.get::<String, usize>(0))
+            .collect();
+        assert!(
+            bare.is_empty(),
+            "a bare pool read must not see fenced rows"
+        );
 
         // After the scope, the pooled connection is clean (fail-closed for the next acquire).
         let mut after = pool.acquire().await.unwrap();
