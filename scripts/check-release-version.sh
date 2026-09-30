@@ -14,8 +14,34 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-field="$(cargo metadata --format-version 1 --no-deps \
+metadata="$(cargo metadata --format-version 1 --no-deps)"
+field="$(printf '%s' "$metadata" \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["metadata"]["release"]["version"])')"
+
+# Every crate is published under the release version (metaphora ADR-0030), and
+# a dependency between member crates must ask for that same version, or the
+# published crates would point at a sibling release that was never cut.
+# scripts/set-release-version.sh writes all three at once.
+printf '%s' "$metadata" | python3 -c '
+import json, sys
+field = sys.argv[1]
+meta = json.load(sys.stdin)
+names = {p["name"] for p in meta["packages"]}
+bad = []
+for p in meta["packages"]:
+    name, version = p["name"], p["version"]
+    if version != field:
+        bad.append(name + " is version " + version)
+    for d in p["dependencies"]:
+        if d["name"] in names and d.get("path") and d["req"] != "^" + field:
+            bad.append(name + " asks for " + d["name"] + " " + d["req"])
+if bad:
+    print("Crates disagree with [workspace.metadata.release].version = " + repr(field) + ":", file=sys.stderr)
+    for b in bad:
+        print("  " + b, file=sys.stderr)
+    print("Run scripts/set-release-version.sh " + field + " to align them.", file=sys.stderr)
+    sys.exit(1)
+' "$field"
 
 if [ "$#" -ge 1 ]; then
   tag_version="${1#v}"

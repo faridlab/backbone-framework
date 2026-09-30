@@ -1,9 +1,10 @@
 [package]
 name = "backbone-maintenance"
-version = "2.0.0"
+version = "2.7.35"
 edition = "2021"
 description = "Backbone Framework Maintenance Mode — toggleable 503 gate with admin endpoint, RFC 7231 Retry-After, and allow-path bypass"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/faridlab/backbone-framework"
 
 [lib]
 name = "backbone_maintenance"

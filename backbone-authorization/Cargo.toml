@@ -1,9 +1,10 @@
 [package]
 name = "backbone-authorization"
-version = "2.0.0"
+version = "2.7.35"
 edition = "2021"
 description = "Backbone Framework Authorization - Centralized RBAC authorization service"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/faridlab/backbone-framework"
 
 [lib]
 name = "backbone_authorization"

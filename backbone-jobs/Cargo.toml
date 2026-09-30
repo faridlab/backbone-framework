@@ -1,9 +1,10 @@
 [package]
 name = "backbone-jobs"
-version = "0.1.0"
+version = "2.7.35"
 edition = "2021"
 description = "Job scheduling and cron management for the Backbone Framework"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/faridlab/backbone-framework"
 
 [dependencies]
 # Core async runtime
@@ -37,7 +38,7 @@ tracing-futures = "0.2"
 cron = "0.12"
 
 # Backbone dependencies
-backbone-queue = { path = "../backbone-queue" }
+backbone-queue = { path = "../backbone-queue", version = "2.7.35" }
 
 # Utility
 futures = "0.3"

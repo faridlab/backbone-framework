@@ -1,9 +1,10 @@
 [package]
 name = "backbone-queue"
-version = "2.0.0"
+version = "2.7.35"
 edition = "2021"
 description = "Backbone Framework Queue Module - Redis, SQS, and RabbitMQ support"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/faridlab/backbone-framework"
 autoexamples = false
 
 [[example]]

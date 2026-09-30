@@ -1,9 +1,10 @@
 [package]
 name = "backbone-tenant"
-version = "0.1.0"
+version = "2.7.35"
 edition = "2021"
 description = "Per-tenant runtime registry: resolve a request to its tenant's runtime (pool + built modules), building each tenant once and caching it (ADR-0006)."
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/faridlab/backbone-framework"
 
 [lib]
 path = "src/lib.rs"
@@ -42,5 +43,5 @@ uuid = { version = "1.0", features = ["v4"] }
 jsonwebtoken = "9.0"
 # The live router test wires the production stack end-to-end: this crate's router hands the
 # tenant pool to backbone-auth's org guard, which scopes it via backbone-orm.
-backbone-auth = { path = "../backbone-auth", features = ["axum"] }
-backbone-orm = { path = "../backbone-orm" }
+backbone-auth = { path = "../backbone-auth", version = "2.7.35", features = ["axum"] }
+backbone-orm = { path = "../backbone-orm", version = "2.7.35" }

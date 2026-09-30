@@ -1,9 +1,10 @@
 [package]
 name = "backbone-outbox"
-version = "0.2.0"
+version = "2.7.35"
 edition = "2021"
 description = "Durable transactional-outbox + inbox + relay primitives for go-live exactly-once event delivery over Postgres."
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/faridlab/backbone-framework"
 
 [lib]
 path = "src/lib.rs"

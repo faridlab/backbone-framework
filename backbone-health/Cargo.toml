@@ -1,9 +1,10 @@
 [package]
 name = "backbone-health"
-version = "2.0.0"
+version = "2.7.35"
 edition = "2021"
 description = "Backbone Framework Health Check Module - Production monitoring and health endpoints"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/faridlab/backbone-framework"
 
 [dependencies]
 # Core dependencies
