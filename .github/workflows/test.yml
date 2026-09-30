@@ -14,6 +14,19 @@ on:
   pull_request:
 
 jobs:
+  release-version:
+    name: Release version is not behind the latest tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Check the release version
+        run: scripts/check-release-version.sh
+
   rls-fence:
     name: RLS fence (backbone-orm live tests)
     runs-on: ubuntu-latest
