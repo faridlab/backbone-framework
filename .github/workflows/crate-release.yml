@@ -83,9 +83,9 @@ jobs:
             1) path="1/$lower" ;; 2) path="2/$lower" ;; 3) path="3/${lower:0:1}/$lower" ;;
             *) path="${lower:0:2}/${lower:2:2}/$lower" ;;
           esac
-          status=$(curl -sS -o index.json -w '%{http_code}' -A "backbone-crate-release" "https://index.crates.io/$path")
+          status=$(curl -sS -o "$RUNNER_TEMP/index.json" -w '%{http_code}' -A "backbone-crate-release" "https://index.crates.io/$path")
           case "$status" in
-            200) published=$(jq -s --arg v "$VERSION" 'map(select(.vers == $v)) | length' index.json) ;;
+            200) published=$(jq -s --arg v "$VERSION" 'map(select(.vers == $v)) | length' "$RUNNER_TEMP/index.json") ;;
             404) published=0 ;;
             *) echo "::error::crates.io index answered HTTP $status for $NAME"; exit 1 ;;
           esac
@@ -116,10 +116,10 @@ jobs:
       - name: Audit the package contents
         run: |
           set -euo pipefail
-          cargo package --list $LOCKED --allow-dirty > package.list
+          cargo package --list $LOCKED --allow-dirty > "$RUNNER_TEMP/package.list"
           python3 - <<'PY'
           import os, re, sys
-          files = [l.strip() for l in open("package.list") if l.strip()]
+          files = [l.strip() for l in open(os.path.join(os.environ["RUNNER_TEMP"], "package.list")) if l.strip()]
           problems = []
           for d in ("migrations", "schema"):
               if os.path.isdir(d) and not any(f.startswith(d + "/") for f in files):
@@ -145,7 +145,18 @@ jobs:
           PY
 
       - name: Dry-run the publish
-        run: cargo publish --dry-run $LOCKED
+        run: |
+          set -euo pipefail
+          # A lock the build generated in a repository that does not commit one is not
+          # part of the release.
+          [ -n "$LOCKED" ] || rm -f Cargo.lock
+          dirty=$(git status --porcelain)
+          if [ -n "$dirty" ]; then
+            echo "::error::the build left the working tree changed; a release is cut from the committed tree only"
+            echo "$dirty"
+            exit 1
+          fi
+          cargo publish --dry-run $LOCKED
 
       - name: Publish
         if: steps.plan.outputs.release == 'true'
