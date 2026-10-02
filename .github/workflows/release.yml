@@ -1,25 +1,90 @@
 name: Release
 
-# Monorepo tag-driven release.
+# Version-driven release to crates.io (metaphora ADR-0030: only CI publishes).
 #
-# Distribution model: this workspace is consumed as git deps, not crates.io.
-# A single `v<version>` tag snapshots the entire workspace at one commit;
-# downstream projects pin with `{ git = "...", tag = "v<version>" }`.
-#
-# The tag's version MUST equal `[workspace.metadata.release].version` in the
-# root Cargo.toml — the workflow refuses to release if they disagree.
+# `[workspace.metadata.release].version` in Cargo.toml is the one release version
+# (ADR-0004), and every member crate carries it (scripts/set-release-version.sh writes
+# them together). Releasing is: bump it, merge to main. On every push to main the plan
+# job checks which of the member crates are not yet on crates.io at that version; if any,
+# the release job builds and tests the whole workspace against Postgres, publishes the
+# missing crates in dependency order, and only then pushes the `v<version>` tag and the
+# GitHub Release, so a tag always names a published release. A run that stopped partway
+# resumes with the crates still missing. A tag whose version is not fully published fails
+# loudly. Needs the CARGO_REGISTRY_TOKEN repository secret.
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: write
 
+concurrency:
+  group: framework-release
+  cancel-in-progress: false
+
 jobs:
-  release:
+  plan:
+    name: Plan the release
     runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.plan.outputs.release }}
+      version: ${{ steps.plan.outputs.version }}
+      published: ${{ steps.plan.outputs.published }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Every crate carries the release version
+        run: scripts/check-release-version.sh
+
+      - name: Decide whether this push releases
+        id: plan
+        run: |
+          set -euo pipefail
+          meta=$(cargo metadata --format-version 1 --no-deps)
+          version=$(printf '%s' "$meta" | jq -r '.metadata.release.version')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          published=""; missing=""
+          for name in $(printf '%s' "$meta" | jq -r '.packages[] | select(.publish != []) | .name' | sort); do
+            lower=$(printf '%s' "$name" | tr 'A-Z' 'a-z')
+            case ${#lower} in
+              1) path="1/$lower" ;; 2) path="2/$lower" ;; 3) path="3/${lower:0:1}/$lower" ;;
+              *) path="${lower:0:2}/${lower:2:2}/$lower" ;;
+            esac
+            code=$(curl -sS -o "$RUNNER_TEMP/index.json" -w '%{http_code}' -A "backbone-framework-release" "https://index.crates.io/$path")
+            case "$code" in
+              200) n=$(jq -s --arg v "$version" 'map(select(.vers == $v)) | length' "$RUNNER_TEMP/index.json") ;;
+              404) n=0 ;;
+              *) echo "::error::crates.io index answered HTTP $code for $name"; exit 1 ;;
+            esac
+            if [ "$n" != 0 ]; then published="$published $name"; else missing="$missing $name"; fi
+          done
+          echo "published=${published# }" >> "$GITHUB_OUTPUT"
+          tagged=false
+          git rev-parse -q --verify "refs/tags/v$version" >/dev/null && tagged=true
+          if [ -z "$missing" ]; then
+            echo "Every crate is on crates.io at $version; nothing to release."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          elif [ "$tagged" = true ]; then
+            echo "::error::tag v$version exists but these crates are not on crates.io at $version:$missing — bump the release version rather than reuse a tag"
+            exit 1
+          else
+            echo "To publish at $version:$missing"
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  release:
+    name: Test, publish and tag
+    needs: plan
+    if: needs.plan.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
 
     # `cargo test --workspace --all-features` reaches the live-Postgres suites: the outbox
     # mechanics/relay/migration harnesses (DATABASE_URL, ungated — they expect a database), and
@@ -65,31 +130,36 @@ jobs:
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@v2
 
-      - name: Verify tag matches workspace version
-        id: verify
-        run: |
-          scripts/check-release-version.sh "$GITHUB_REF_NAME"
-          echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-
-      # A tag pushed from a commit that never reached main skips the test
-      # workflow, which runs on main and on pull requests only. Releasing only
-      # what main carries keeps every release behind that workflow too.
-      - name: Verify the tagged commit is on main
-        run: |
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
-            echo "Tag '$GITHUB_REF_NAME' points at $GITHUB_SHA, which is not on main." >&2
-            echo "Push the commit to main first, then tag it." >&2
-            exit 1
-          fi
-
       - name: Build and test the entire workspace
         run: |
           cargo build --workspace --all-features
           cargo test  --workspace --all-features
 
-      - name: Extract release notes from CHANGELOG.md
+      - name: Publish the crates still missing, in dependency order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          PUBLISHED: ${{ needs.plan.outputs.published }}
         run: |
-          version="${{ steps.verify.outputs.version }}"
+          set -euo pipefail
+          [ -n "$CARGO_REGISTRY_TOKEN" ] || { echo "::error::the repository secret CARGO_REGISTRY_TOKEN is not set"; exit 1; }
+          exclude=()
+          for name in $PUBLISHED; do exclude+=(--exclude "$name"); done
+          cargo publish --workspace "${exclude[@]}"
+
+      - name: Tag the release
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v$VERSION" -m "v$VERSION" "$GITHUB_SHA"
+          git push origin "v$VERSION"
+
+      - name: Extract release notes from CHANGELOG.md
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
           # Copy the body under `## [<header>]` up to (but not including) the
           # next `## [` header. Prefer the exact version section; if missing,
           # fall back to `## [Unreleased]`.
@@ -102,14 +172,16 @@ jobs:
           }
           : > release_notes.md
           if [ -f CHANGELOG.md ]; then
-            extract "$version"    > release_notes.md
+            extract "$VERSION"   > release_notes.md
             [ -s release_notes.md ] || extract "Unreleased" > release_notes.md
           fi
-          [ -s release_notes.md ] || echo "Release $GITHUB_REF_NAME" > release_notes.md
+          [ -s release_notes.md ] || echo "Release v$VERSION" > release_notes.md
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ needs.plan.outputs.version }}
+          name: v${{ needs.plan.outputs.version }}
           body_path: release_notes.md
           draft: false
-          prerelease: ${{ contains(steps.verify.outputs.version, '-') }}
+          prerelease: ${{ contains(needs.plan.outputs.version, '-') }}

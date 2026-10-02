@@ -27,6 +27,21 @@ jobs:
       - name: Check the release version
         run: scripts/check-release-version.sh
 
+  package:
+    name: Every crate packages and dry-run publishes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The whole workspace, in dependency order, against its own unpublished members:
+      # the same packaging the release job publishes, caught before the merge.
+      - name: Dry-run the workspace publish
+        run: cargo publish --workspace --dry-run
+
   rls-fence:
     name: RLS fence (backbone-orm live tests)
     runs-on: ubuntu-latest

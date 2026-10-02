@@ -28,11 +28,11 @@ members = [
 # during extraction. Lift-and-shift discipline: the source files inside each
 # member directory are byte-for-byte unchanged from monorepo-backbone.
 
-# Distribution model: this workspace is consumed via git deps, not crates.io.
-# Downstream projects pin the whole framework at a point in time with:
-#   backbone-core = { git = "...", tag = "v<version>" }
-# The release tag and the version below move together. The release workflow
-# (.github/workflows/release.yml) refuses to publish a `v*` tag whose version
-# doesn't match this field.
+# Distribution model (metaphora ADR-0030): every member crate is published to
+# crates.io at this one release version, and consumers depend on it by semver
+# requirement (`backbone-core = "2.7"`). To release, run
+# scripts/set-release-version.sh <version> and merge to main: the release
+# workflow (.github/workflows/release.yml) tests the workspace, publishes the
+# crates not yet on crates.io at this version, and then tags v<version>.
 [workspace.metadata.release]
 version = "2.7.35"
