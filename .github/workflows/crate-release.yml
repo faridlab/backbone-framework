@@ -1,0 +1,168 @@
+name: Crate release
+
+# Reusable release gate for a backbone library crate (ADR-0030, Decision 7: only CI
+# publishes). A module repository calls it from its own workflow:
+#
+#   on: { push: { branches: [main] }, pull_request: {} }
+#   permissions: { contents: write }
+#   jobs:
+#     crate:
+#       uses: faridlab/backbone-framework/.github/workflows/crate-release.yml@main
+#       secrets: inherit
+#
+# Every run builds the crate, runs its library tests, audits what the package would
+# contain and dry-runs the publish. A push to the default branch whose `version` is
+# not yet on crates.io then publishes it and pushes the `v<version>` tag — the tag only
+# after the publish succeeded, so a tag always names a published release. Releasing is
+# therefore: bump `version`, merge. The token is the repository secret
+# CARGO_REGISTRY_TOKEN and is used by the publish step alone.
+
+on:
+  workflow_call:
+    secrets:
+      CARGO_REGISTRY_TOKEN:
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Gate and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    concurrency:
+      group: crate-release-${{ github.repository }}-${{ github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Read the package
+        id: pkg
+        run: |
+          set -euo pipefail
+          meta=$(cargo metadata --format-version 1 --no-deps)
+          root=$(printf '%s' "$meta" | jq -r '.resolve.root // empty')
+          if [ -n "$root" ]; then
+            pkg=$(printf '%s' "$meta" | jq -c --arg id "$root" '.packages[] | select(.id == $id)')
+          else
+            [ "$(printf '%s' "$meta" | jq '.packages | length')" = 1 ] \
+              || { echo "::error::expected one package in this repository"; exit 1; }
+            pkg=$(printf '%s' "$meta" | jq -c '.packages[0]')
+          fi
+          name=$(printf '%s' "$pkg" | jq -r .name)
+          version=$(printf '%s' "$pkg" | jq -r .version)
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          # Build against the committed lock when the repository keeps one.
+          if git ls-files --error-unmatch Cargo.lock >/dev/null 2>&1; then
+            echo "LOCKED=--locked" >> "$GITHUB_ENV"
+          else
+            echo "LOCKED=" >> "$GITHUB_ENV"
+          fi
+          echo "package $name $version"
+
+      - name: Decide whether this run releases
+        id: plan
+        env:
+          NAME: ${{ steps.pkg.outputs.name }}
+          VERSION: ${{ steps.pkg.outputs.version }}
+        run: |
+          set -euo pipefail
+          lower=$(printf '%s' "$NAME" | tr 'A-Z' 'a-z')
+          case ${#lower} in
+            1) path="1/$lower" ;; 2) path="2/$lower" ;; 3) path="3/${lower:0:1}/$lower" ;;
+            *) path="${lower:0:2}/${lower:2:2}/$lower" ;;
+          esac
+          status=$(curl -sS -o index.json -w '%{http_code}' -A "backbone-crate-release" "https://index.crates.io/$path")
+          case "$status" in
+            200) published=$(jq -s --arg v "$VERSION" 'map(select(.vers == $v)) | length' index.json) ;;
+            404) published=0 ;;
+            *) echo "::error::crates.io index answered HTTP $status for $NAME"; exit 1 ;;
+          esac
+          tagged=0
+          git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null && tagged=1
+          default_push=false
+          [ "${{ github.event_name }}" = push ] && [ "${{ github.ref }}" = "refs/heads/${{ github.event.repository.default_branch }}" ] && default_push=true
+          if [ "$published" != 0 ]; then
+            echo "$NAME $VERSION is already on crates.io; this run only gates."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          elif [ "$tagged" = 1 ]; then
+            echo "::error::tag v$VERSION exists but $NAME $VERSION is not on crates.io; bump the version rather than reuse a tag"
+            exit 1
+          elif [ "$default_push" = true ]; then
+            echo "$NAME $VERSION is new; this run publishes it."
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "$NAME $VERSION is new; it publishes when this lands on the default branch."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build
+        run: cargo build --lib $LOCKED
+
+      - name: Library tests
+        run: cargo test --lib $LOCKED
+
+      - name: Audit the package contents
+        run: |
+          set -euo pipefail
+          cargo package --list $LOCKED --allow-dirty > package.list
+          python3 - <<'PY'
+          import os, re, sys
+          files = [l.strip() for l in open("package.list") if l.strip()]
+          problems = []
+          for d in ("migrations", "schema"):
+              if os.path.isdir(d) and not any(f.startswith(d + "/") for f in files):
+                  problems.append(f"{d}/ exists in the repository but is missing from the package")
+          hidden = [f for f in files if re.search(r"(^|/)\.(claude|github|env)", f) or re.search(r"\.(pem|key|p12)$", f)]
+          if hidden:
+              problems.append("unwanted files in the package: " + ", ".join(hidden[:10]))
+          secret = re.compile(r"(AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----|ghp_[A-Za-z0-9]{30,}|sk_live_[A-Za-z0-9]{10,}|postgres(ql)?://[^:@/ ]+:[^@/ ]{6,}@[a-z0-9.-]+\.[a-z]{2,})")
+          generated = ("Cargo.toml.orig", ".cargo_vcs_info.json", "Cargo.lock")
+          leaks = []
+          for f in files:
+              if f in generated or not os.path.isfile(f):
+                  continue
+              text = open(f, errors="ignore").read()
+              if secret.search(text) and "cfg(test)" not in text:
+                  leaks.append(f)
+          if leaks:
+              problems.append("secret-like content in: " + ", ".join(leaks[:10]))
+          for p in problems:
+              print(f"::error::{p}")
+          print(f"{len(files)} files packaged; {len(problems)} problem(s)")
+          sys.exit(1 if problems else 0)
+          PY
+
+      - name: Dry-run the publish
+        run: cargo publish --dry-run $LOCKED
+
+      - name: Publish
+        if: steps.plan.outputs.release == 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          [ -n "$CARGO_REGISTRY_TOKEN" ] || { echo "::error::the repository secret CARGO_REGISTRY_TOKEN is not set"; exit 1; }
+          cargo publish $LOCKED
+
+      - name: Tag the release
+        if: steps.plan.outputs.release == 'true'
+        env:
+          VERSION: ${{ steps.pkg.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v$VERSION" -m "v$VERSION" "$GITHUB_SHA"
+          git push origin "v$VERSION"
