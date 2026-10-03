@@ -1,6 +1,6 @@
 [package]
 name = "backbone-rate-limit"
-version = "2.7.35"
+version = "2.7.36"
 edition = "2021"
 description = "Backbone Framework Rate Limiting Module - Rate limiting middleware for Axum"
 license = "MIT OR Apache-2.0"

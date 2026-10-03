@@ -1,6 +1,6 @@
 [package]
 name = "backbone-orm"
-version = "2.7.35"
+version = "2.7.36"
 edition = "2021"
 description = "Backbone Framework ORM - Database layer with PostgreSQL support"
 license = "MIT OR Apache-2.0"

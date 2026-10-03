@@ -1,6 +1,6 @@
 [package]
 name = "backbone-observability"
-version = "2.7.35"
+version = "2.7.36"
 edition = "2021"
 description = "Backbone Framework Observability - Tracing, logging, and metrics"
 license = "MIT OR Apache-2.0"
