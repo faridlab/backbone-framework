@@ -24,6 +24,28 @@ impl FilterCondition {
         }
     }
 
+    /// True when this condition binds a value it compares with `=`, `<`, `IN`, `BETWEEN` and the
+    /// like, yet carries no cast for it. Such a value is bound as text, and PostgreSQL has no
+    /// implicit comparison between text and a boolean, number, uuid, date or timestamp column, so
+    /// the caller must find the column's type before the query can run. Pattern operators (`LIKE`,
+    /// `contain`, …) and null checks are text matches or bind nothing, so they never need one.
+    pub fn needs_value_cast(&self) -> bool {
+        self.column_type.is_none()
+            && matches!(
+                self.operator,
+                FilterOperator::Equal
+                    | FilterOperator::NotEqual
+                    | FilterOperator::GreaterThan
+                    | FilterOperator::GreaterThanOrEqual
+                    | FilterOperator::LessThan
+                    | FilterOperator::LessThanOrEqual
+                    | FilterOperator::In
+                    | FilterOperator::NotIn
+                    | FilterOperator::Between
+                    | FilterOperator::NotBetween
+            )
+    }
+
     /// Set the logical operator
     pub fn with_logical(mut self, logical: FilterLogical) -> Self {
         self.logical = logical;
@@ -94,13 +116,15 @@ impl FilterCondition {
                 let list = Self::cast_placeholders(placeholders, &self.column_type);
                 format!("{} {} ({})", self.field, self.operator.as_sql(), list)
             }
-            FilterOperator::Between => {
-                let result = format!("{} BETWEEN ${} AND ${}", self.field, *param_idx, *param_idx + 1);
-                *param_idx += 2;
-                result
-            }
-            FilterOperator::NotBetween => {
-                let result = format!("{} NOT BETWEEN ${} AND ${}", self.field, *param_idx, *param_idx + 1);
+            FilterOperator::Between | FilterOperator::NotBetween => {
+                let cast = self.column_type.as_ref().map(|t| format!("::{t}")).unwrap_or_default();
+                let result = format!(
+                    "{} {} ${}{cast} AND ${}{cast}",
+                    self.field,
+                    self.operator.as_sql(),
+                    *param_idx,
+                    *param_idx + 1
+                );
                 *param_idx += 2;
                 result
             }
@@ -224,6 +248,28 @@ mod in_cast_tests {
         let mut idx = 1;
         let sql = c.build_sql_without_prefix(&mut idx);
         assert!(sql.contains("IN ($1::uuid)"), "{sql}");
+    }
+
+    #[test]
+    fn between_bounds_carry_the_column_cast() {
+        let c = cond(FilterOperator::Between, Some("timestamptz"));
+        let mut idx = 3;
+        let sql = c.build_sql_without_prefix(&mut idx);
+        assert_eq!(sql, "employee_id BETWEEN $3::timestamptz AND $4::timestamptz");
+        assert_eq!(idx, 5);
+        let c = cond(FilterOperator::NotBetween, None);
+        let mut idx = 1;
+        assert_eq!(c.build_sql_without_prefix(&mut idx), "employee_id NOT BETWEEN $1 AND $2");
+    }
+
+    #[test]
+    fn only_uncast_comparisons_ask_for_a_cast() {
+        assert!(cond(FilterOperator::Equal, None).needs_value_cast());
+        assert!(cond(FilterOperator::In, None).needs_value_cast());
+        assert!(cond(FilterOperator::Between, None).needs_value_cast());
+        assert!(!cond(FilterOperator::Equal, Some("uuid")).needs_value_cast());
+        assert!(!cond(FilterOperator::Contains, None).needs_value_cast());
+        assert!(!cond(FilterOperator::IsNull, None).needs_value_cast());
     }
 
     #[test]

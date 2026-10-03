@@ -512,3 +512,27 @@ fn test_audit_metadata_does_not_affect_other_fields() {
     assert!(!where_clause.contains("metadata"));
     assert!(where_clause.contains("name"));
 }
+
+#[test]
+fn between_on_the_wire_binds_both_bounds_with_the_hinted_cast() {
+    let mut params = HashMap::new();
+    params.insert("scheduled_at[between]".to_string(), "2026-10-01,2026-10-03".to_string());
+    let mut hints = HashMap::new();
+    hints.insert("scheduled_at".to_string(), "timestamptz".to_string());
+    let filter = parse_filters(&params, &hints, None).unwrap();
+    let (where_clause, binds) = filter.build_where_clause();
+    assert_eq!(where_clause, " WHERE scheduled_at BETWEEN $1::timestamptz AND $2::timestamptz");
+    assert_eq!(binds, vec!["2026-10-01".to_string(), "2026-10-03".to_string()]);
+}
+
+#[test]
+fn an_or_condition_takes_the_hinted_cast_and_enum_normalization() {
+    let mut params = HashMap::new();
+    params.insert("status[or]".to_string(), "InReview".to_string());
+    let mut hints = HashMap::new();
+    hints.insert("status".to_string(), "approval_status".to_string());
+    let filter = parse_filters(&params, &hints, None).unwrap();
+    let (where_clause, binds) = filter.build_where_clause();
+    assert_eq!(where_clause, " WHERE status = $1::approval_status");
+    assert_eq!(binds, vec!["in_review".to_string()]);
+}

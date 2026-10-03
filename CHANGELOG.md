@@ -14,6 +14,22 @@ The release workflow reads the section matching the git tag's version and
 uses it as the GitHub Release body. If no matching section is found it falls
 back to the `## [Unreleased]` section.
 
+## [2.7.36] - 2026-10-03
+
+### Fixed
+
+- **backbone-orm** — a generic list, count or aggregate filter now compares a typed column as
+  its own type even when the entity's generated `column_types()` carries no hint for it. Filter
+  values are bound as text, and PostgreSQL refuses `boolean = text`, `uuid = text`,
+  `timestamptz >= text` and the like; the cast came only from the generated hints, which never
+  covered booleans or numbers, covered only uuids named `id`/`*_id`, and covered temporal columns
+  only in modules generated after the generator learned them. When a comparison is left without a
+  cast, the repository now reads the table's column types from `pg_catalog` (one lookup, on the
+  request's connection) and fills the gaps; a generated hint still decides its own column.
+- **backbone-orm** — `field[between]=low,high` and `field[notbetween]=…` bind both bounds (they
+  bound none and failed on every call) and cast them like any other comparison; `field[or]=…`
+  takes the column's cast and enum normalization like `eq`.
+
 ## [2.7.35] - 2026-09-30
 
 ### Changed

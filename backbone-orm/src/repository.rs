@@ -256,7 +256,7 @@ impl<T: for<'a> FromRow<'a, PgRow> + Send + Unpin> PostgresRepository<T> {
         T: Send + Sync,
     {
         // Parse filters from HashMap (no field allow-list by default for backward compatibility)
-        let mut query_filter = parse_query_filter(filters, column_types, None)?;
+        let mut query_filter = self.parse_typed_filters(filters, column_types, None).await?;
 
         // Set up search fields if provided
         if !search_fields.is_empty() {
@@ -309,7 +309,8 @@ impl<T: for<'a> FromRow<'a, PgRow> + Send + Unpin> PostgresRepository<T> {
         T: Send + Sync,
     {
         // Parse filters with optional field whitelist
-        let mut query_filter = parse_query_filter(filters, column_types, allowed_fields)?;
+        let mut query_filter =
+            self.parse_typed_filters(filters, column_types, allowed_fields).await?;
 
         // Set up search fields if provided
         if !search_fields.is_empty() {
@@ -317,6 +318,35 @@ impl<T: for<'a> FromRow<'a, PgRow> + Send + Unpin> PostgresRepository<T> {
         }
 
         self.execute_list(pagination, query_filter).await
+    }
+
+    /// Parse the wire filters with a cast for every typed column they compare.
+    ///
+    /// Filter values arrive as text and are bound as text; PostgreSQL has no implicit comparison
+    /// between text and a boolean, number, uuid, date, time or timestamp column, so each such
+    /// comparison needs a cast on its placeholder. The entity's generated `column_types()` hints
+    /// supply it where they exist, and stay the answer for the columns they name. They were never
+    /// a complete list — no booleans or numbers, only uuids named `id`/`*_id`, and temporal
+    /// columns only in modules generated after the generator learned them — so whenever a
+    /// comparison is left without a cast, the table's real column types are read from the
+    /// catalog and fill the gaps. The catalog cannot drift from the table the query runs
+    /// against, which is the same reason the aggregate and sort paths read it.
+    ///
+    /// A filter on text columns only, or with hints for every compared column, costs nothing
+    /// extra beyond the parse; otherwise one catalog lookup on the request's own connection.
+    async fn parse_typed_filters(
+        &self,
+        filters: &HashMap<String, String>,
+        column_types: &HashMap<String, String>,
+        allowed_fields: Option<&HashSet<String>>,
+    ) -> anyhow::Result<crate::QueryFilter> {
+        let query_filter = parse_query_filter(filters, column_types, allowed_fields)?;
+        if !query_filter.has_uncast_value_conditions() {
+            return Ok(query_filter);
+        }
+        let catalog = catalog_filter_casts(&self.pool, &self.table_name).await?;
+        let merged = merge_filter_casts(column_types, catalog);
+        parse_query_filter(filters, &merged, allowed_fields)
     }
 
     /// The shared list execution: filters, order, paging, and the total.
@@ -656,6 +686,68 @@ fn cast_suffix(data_type: &str, udt_name: &str) -> Option<String> {
         "USER-DEFINED" if !udt_name.is_empty() => Some(udt_name.to_string()),
         _ => None,
     }
+}
+
+/// The cast a filter placeholder needs to compare against a column, from the column's catalog
+/// type: `format_type(atttypid, NULL)` and `pg_type.typtype`. None when a bare text bind already
+/// compares correctly (text-like columns) or when no single-value cast fits (arrays, json,
+/// composite and domain types keep today's text bind).
+fn filter_cast_for(type_name: &str, typtype: &str) -> Option<String> {
+    match typtype {
+        // An enum: cast to the enum itself so the comparison runs in the enum's ordering. The
+        // name comes from `format_type`, schema-qualified when the type is not on the search path.
+        "e" => Some(type_name.to_string()),
+        "b" => match type_name {
+            "uuid" | "boolean" | "smallint" | "integer" | "bigint" | "numeric" | "real"
+            | "double precision" | "date" | "interval" | "inet" | "cidr" | "macaddr" => {
+                Some(type_name.to_string())
+            }
+            "time without time zone" => Some("time".into()),
+            "time with time zone" => Some("timetz".into()),
+            "timestamp with time zone" => Some("timestamptz".into()),
+            "timestamp without time zone" => Some("timestamp".into()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Every column of `qualified_table` whose filter placeholder needs a cast, with that cast.
+///
+/// Read from `pg_catalog` rather than `information_schema`: it is a direct lookup on the
+/// relation, it says whether a user-defined type is an enum (a domain or composite must not be
+/// treated as one), and `to_regclass` resolves the name exactly as the query will. Runs through
+/// the company-scoped helper so it uses the request's own connection when one is held.
+async fn catalog_filter_casts(
+    pool: &PgPool,
+    qualified_table: &str,
+) -> anyhow::Result<HashMap<String, String>> {
+    let q = sqlx::query_as::<Postgres, (String, String, String)>(
+        "SELECT a.attname::text, format_type(a.atttypid, NULL), t.typtype::text
+           FROM pg_catalog.pg_attribute a
+           JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
+          WHERE a.attrelid = to_regclass($1) AND a.attnum > 0 AND NOT a.attisdropped",
+    )
+    .bind(qualified_table.to_string());
+    let rows = crate::company_scope::fetch_all_scoped(pool, q).await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(column, type_name, typtype)| {
+            filter_cast_for(&type_name, &typtype).map(|cast| (column, cast))
+        })
+        .collect())
+}
+
+/// The generated hints, with the catalog's casts filling every column they do not name. A hint
+/// keeps deciding its own column, so nothing that compares correctly today changes.
+fn merge_filter_casts(
+    hints: &HashMap<String, String>,
+    mut catalog: HashMap<String, String>,
+) -> HashMap<String, String> {
+    for (column, cast) in hints {
+        catalog.insert(column.clone(), cast.clone());
+    }
+    catalog
 }
 
 /// Turn "column ... does not exist" into a sentence that names the cause.
@@ -1036,7 +1128,7 @@ impl<T: for<'a> FromRow<'a, PgRow> + Send + Unpin> PostgresRepository<T> {
         column_types: &HashMap<String, String>,
         search_fields: &[&str],
     ) -> anyhow::Result<AggregateResult> {
-        let mut query_filter = parse_query_filter(filters, column_types, None)?;
+        let mut query_filter = self.parse_typed_filters(filters, column_types, None).await?;
         if !search_fields.is_empty() {
             query_filter.search_fields = search_fields.iter().map(|s| s.to_string()).collect();
         }
@@ -1245,5 +1337,85 @@ mod aggregate_field_tests {
         for t in ["text", "uuid", "timestamptz", "boolean", "jsonb", "USER-DEFINED"] {
             assert!(!is_numeric_pg_type(t), "{t} must not accept a SUM");
         }
+    }
+}
+
+#[cfg(test)]
+mod filter_cast_tests {
+    use super::*;
+
+    #[test]
+    fn typed_base_columns_get_their_own_cast() {
+        for (t, want) in [
+            ("boolean", "boolean"),
+            ("integer", "integer"),
+            ("bigint", "bigint"),
+            ("smallint", "smallint"),
+            ("numeric", "numeric"),
+            ("double precision", "double precision"),
+            ("uuid", "uuid"),
+            ("date", "date"),
+            ("time without time zone", "time"),
+            ("timestamp with time zone", "timestamptz"),
+            ("timestamp without time zone", "timestamp"),
+        ] {
+            assert_eq!(filter_cast_for(t, "b").as_deref(), Some(want), "{t}");
+        }
+    }
+
+    #[test]
+    fn text_like_and_composite_columns_keep_the_text_bind() {
+        for t in ["text", "character varying", "character", "jsonb", "json", "bytea", "text[]", "uuid[]"] {
+            assert_eq!(filter_cast_for(t, "b"), None, "{t}");
+        }
+        // A domain or composite is not an enum, even though both are user-defined.
+        assert_eq!(filter_cast_for("approvals.money_amount", "d"), None);
+        assert_eq!(filter_cast_for("approvals.address", "c"), None);
+    }
+
+    #[test]
+    fn an_enum_casts_to_its_catalog_name() {
+        assert_eq!(filter_cast_for("approval_status", "e").as_deref(), Some("approval_status"));
+        assert_eq!(
+            filter_cast_for("recruitment.stage_kind", "e").as_deref(),
+            Some("recruitment.stage_kind")
+        );
+    }
+
+    #[test]
+    fn a_generated_hint_wins_over_the_catalog_for_its_column() {
+        let hints: HashMap<String, String> =
+            [("id", "uuid"), ("status", "approval_status")].iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let catalog: HashMap<String, String> = [
+            ("id", "uuid"),
+            ("status", "approvals.approval_status"),
+            ("folded", "boolean"),
+            ("requested_by", "uuid"),
+        ]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        let merged = merge_filter_casts(&hints, catalog);
+        assert_eq!(merged["status"], "approval_status");
+        assert_eq!(merged["folded"], "boolean");
+        assert_eq!(merged["requested_by"], "uuid");
+        assert_eq!(merged.len(), 4);
+    }
+
+    #[test]
+    fn only_a_filter_with_an_uncast_comparison_reads_the_catalog() {
+        let hints: HashMap<String, String> =
+            [("id", "uuid")].iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let parse = |pairs: &[(&str, &str)]| {
+            let f: HashMap<String, String> =
+                pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+            parse_query_filter(&f, &hints, None).unwrap().has_uncast_value_conditions()
+        };
+        assert!(!parse(&[("id[in]", "a,b"), ("name[contain]", "x"), ("limit", "5")]));
+        assert!(!parse(&[("deleted_by[isnull]", "1")]));
+        assert!(parse(&[("folded[eq]", "false")]));
+        assert!(parse(&[("folded", "false")]));
+        assert!(parse(&[("scheduled_at[between]", "2026-10-01,2026-10-03")]));
+        assert!(parse(&[("sequence[or]", "3")]));
     }
 }

@@ -164,12 +164,23 @@ pub fn parse_filters(
                         continue;
                     }
                     "or" | "orwhere" => {
-                        // Store OR conditions to process later
+                        // Store OR conditions to process later. They compare like `eq`, so
+                        // they take the same enum normalization and the same cast.
+                        let or_value = match column_types.get(&sanitized_field) {
+                            Some(col_type) if is_custom_enum_type(col_type) => {
+                                normalize_enum_value(value.clone())
+                            }
+                            _ => value.clone(),
+                        };
                         let condition = FilterCondition::new(
                             sanitized_field.clone(),
                             FilterOperator::Equal,
-                            FilterValue::from_string(value.clone(), false)
+                            FilterValue::from_string(or_value, false)
                         ).with_logical(FilterLogical::Or);
+                        let condition = match column_types.get(&sanitized_field) {
+                            Some(col_type) => condition.with_column_type(col_type.clone()),
+                            None => condition,
+                        };
                         or_conditions.push(condition);
                         continue;
                     }
@@ -193,10 +204,18 @@ pub fn parse_filters(
                                 .unwrap_or_else(|| sanitized_field.clone());
 
                             // In/NotIn carry a comma-separated list on the
-                            // wire: split into the multi-value bind so each
-                            // element takes its own cast placeholder.
-                            let is_list =
-                                matches!(op, FilterOperator::In | FilterOperator::NotIn);
+                            // wire, and Between/NotBetween a `low,high` pair:
+                            // split into the multi-value bind so each element
+                            // takes its own cast placeholder. Between used to
+                            // stay a single value, which bound no parameter
+                            // for its two placeholders and failed every time.
+                            let is_list = matches!(
+                                op,
+                                FilterOperator::In
+                                    | FilterOperator::NotIn
+                                    | FilterOperator::Between
+                                    | FilterOperator::NotBetween
+                            );
                             let condition = FilterCondition::new(
                                 condition_field,
                                 op.clone(),

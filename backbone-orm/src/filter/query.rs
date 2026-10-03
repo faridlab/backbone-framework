@@ -137,6 +137,13 @@ impl QueryFilter {
         }
     }
 
+    /// True when some condition compares a value that carries no cast — see
+    /// [`FilterCondition::needs_value_cast`]. The repository answers it by reading the table's
+    /// column types from the catalog before it builds the query.
+    pub fn has_uncast_value_conditions(&self) -> bool {
+        self.conditions.iter().any(FilterCondition::needs_value_cast)
+    }
+
     /// Check if has any conditions
     pub fn has_conditions(&self) -> bool {
         !self.conditions.is_empty() || self.search.is_some()
