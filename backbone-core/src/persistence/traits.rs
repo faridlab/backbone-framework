@@ -121,6 +121,20 @@ pub trait PersistentEntity: Clone + Send + Sync + Debug + Serialize + Deserializ
     fn generate_id() -> String {
         uuid::Uuid::new_v4().to_string()
     }
+
+    /// Fields that a generic write (PUT, PATCH and their bulk forms) may not
+    /// change, by their serialized name.
+    ///
+    /// The generic service refuses a write that would give one of these a new
+    /// value, and still accepts a write that carries the stored value
+    /// unchanged, so a form that sends the whole record keeps working. Code
+    /// that owns the field — a verb, a write service — changes it through its
+    /// own path. `id` and `metadata` are refused for every entity regardless
+    /// of this list. The schema generator fills it from the fields the schema
+    /// declares as not freely writable; the default protects nothing more.
+    fn write_protected_fields() -> &'static [&'static str] {
+        &[]
+    }
 }
 
 /// Trait for entities that support partial updates via field map

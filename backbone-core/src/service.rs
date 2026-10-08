@@ -113,6 +113,31 @@ pub trait ServiceLifecycle<E: PersistentEntity>: Send + Sync {
         let _ = id;
         Ok(())
     }
+
+    /// Called before a soft-deleted entity is restored, singly or in a batch.
+    async fn before_restore(&self, entity: &E) -> ServiceResult<()> {
+        let _ = entity;
+        Ok(())
+    }
+
+    /// Called before a soft-deleted entity is removed for good, singly or in
+    /// a batch.
+    async fn before_hard_delete(&self, entity: &E) -> ServiceResult<()> {
+        let _ = entity;
+        Ok(())
+    }
+
+    /// Called once before the whole trash is restored. The rows are not
+    /// loaded for this; refuse here to keep the bulk path closed.
+    async fn before_restore_all(&self) -> ServiceResult<()> {
+        Ok(())
+    }
+
+    /// Called once before the whole trash is removed for good. The rows are
+    /// not loaded for this; refuse here to keep the bulk path closed.
+    async fn before_empty_trash(&self) -> ServiceResult<()> {
+        Ok(())
+    }
 }
 
 /// No-op lifecycle — the default used by generated type aliases.
@@ -283,6 +308,7 @@ where
             return Ok(None);
         };
         let mut updated = before.clone().apply_update(dto)?;
+        refuse_protected_changes::<E>(&as_object(&before)?, &as_object(&updated)?)?;
         self.lifecycle.before_update(&mut updated).await?;
         let saved = self
             .repository
@@ -329,6 +355,10 @@ where
     }
 
     pub async fn restore(&self, id: &str) -> ServiceResult<Option<E>> {
+        let Some(trashed) = self.get_deleted_by_id(id).await? else {
+            return Ok(None);
+        };
+        self.lifecycle.before_restore(&trashed).await?;
         let restored = self
             .repository
             .restore(id)
@@ -347,6 +377,10 @@ where
     }
 
     pub async fn hard_delete(&self, id: &str) -> ServiceResult<bool> {
+        let Some(entity) = self.get_deleted_by_id(id).await? else {
+            return Ok(false);
+        };
+        self.lifecycle.before_hard_delete(&entity).await?;
         let deleted = self
             .repository
             .hard_delete(id)
@@ -379,6 +413,7 @@ where
     }
 
     pub async fn empty_trash(&self) -> ServiceResult<u64> {
+        self.lifecycle.before_empty_trash().await?;
         self.repository
             .empty_trash()
             .await
@@ -442,7 +477,8 @@ where
 
     /// Apply a partial update from a JSON map of field values.
     ///
-    /// Fields not present in the map are left unchanged.
+    /// Fields not present in the map are left unchanged. A key the entity does
+    /// not have, or a new value for a protected field, refuses the whole write.
     pub async fn partial_update(
         &self,
         id: &str,
@@ -456,19 +492,10 @@ where
             .find_by_id(id)
             .await
             .map_err(ServiceError::Repository)?;
-        let Some(entity) = existing else {
+        let Some(before) = existing else {
             return Ok(None);
         };
-        // Merge the patch fields into the entity via JSON round-trip
-        let mut map = serde_json::to_value(&entity)
-            .map_err(|e| ServiceError::Internal(e.to_string()))?;
-        if let serde_json::Value::Object(ref mut obj) = map {
-            for (key, value) in fields {
-                obj.insert(key, value);
-            }
-        }
-        let mut patched: E = serde_json::from_value(map)
-            .map_err(|e| ServiceError::Internal(e.to_string()))?;
+        let mut patched = merge_patch(&before, fields)?;
         self.lifecycle.before_update(&mut patched).await?;
         let saved = self
             .repository
@@ -476,6 +503,13 @@ where
             .await
             .map_err(ServiceError::Repository)?;
         self.lifecycle.after_update(&saved).await?;
+
+        let meta = EventMetadata::new(saved.entity_id(), std::any::type_name::<E>());
+        let _ = self
+            .event_publisher
+            .publish(CrudEvent::Updated { before, after: saved.clone(), metadata: meta })
+            .await;
+
         Ok(Some(saved))
     }
 
@@ -541,6 +575,13 @@ where
     pub async fn bulk_restore(&self, ids: Vec<String>) -> ServiceResult<Vec<E>> {
         check_batch_size(ids.len())?;
         let ids = dedup_ids(ids);
+        // Ask the lifecycle about every row it can see; an id that is not in
+        // the trash is left to the repository's atomic check below.
+        for id in &ids {
+            if let Some(trashed) = self.get_deleted_by_id(id).await? {
+                self.lifecycle.before_restore(&trashed).await?;
+            }
+        }
         let restored = self
             .repository
             .bulk_restore(&ids)
@@ -559,6 +600,7 @@ where
     /// Restore every soft-deleted entity (atomic). Returns the number restored.
     /// Emits a `Restored` event per entity, mirroring [`bulk_restore`](Self::bulk_restore).
     pub async fn restore_all(&self) -> ServiceResult<u64> {
+        self.lifecycle.before_restore_all().await?;
         let restored = self
             .repository
             .restore_all()
@@ -578,10 +620,16 @@ where
     pub async fn bulk_permanent_delete(&self, ids: Vec<String>) -> ServiceResult<u64> {
         check_batch_size(ids.len())?;
         let ids = dedup_ids(ids);
-        // No pre-validation loop: `bulk_hard_delete` deletes only rows that are
-        // actually in trash and rolls the whole batch back unless every id
-        // matched, so the repository's atomic check is the single source of truth
-        // (and avoids a per-id round-trip plus a TOCTOU window).
+        // The lifecycle is asked about every row it can see. Whether every id
+        // is in the trash stays with `bulk_hard_delete`, which deletes only
+        // trashed rows and rolls the whole batch back unless every id matched,
+        // so a row that moves between this loop and the write cannot slip
+        // through.
+        for id in &ids {
+            if let Some(trashed) = self.get_deleted_by_id(id).await? {
+                self.lifecycle.before_hard_delete(&trashed).await?;
+            }
+        }
         let affected = self
             .repository
             .bulk_hard_delete(&ids)
@@ -620,6 +668,7 @@ where
                 return Err(ServiceError::Validation(format!("id '{id}' not found")));
             };
             let mut updated = before.clone().apply_update(dto)?;
+            refuse_protected_changes::<E>(&as_object(&before)?, &as_object(&updated)?)?;
             self.lifecycle.before_update(&mut updated).await?;
             befores.push(before);
             prepared.push(updated);
@@ -677,15 +726,7 @@ where
             else {
                 return Err(ServiceError::Validation(format!("id '{id}' not found")));
             };
-            let mut map = serde_json::to_value(&before)
-                .map_err(|e| ServiceError::Internal(e.to_string()))?;
-            if let serde_json::Value::Object(ref mut obj) = map {
-                for (key, value) in fields {
-                    obj.insert(key, value);
-                }
-            }
-            let mut patched: E = serde_json::from_value(map)
-                .map_err(|e| ServiceError::Internal(e.to_string()))?;
+            let mut patched = merge_patch(&before, fields)?;
             self.lifecycle.before_update(&mut patched).await?;
             befores.push(before);
             prepared.push(patched);
@@ -698,6 +739,75 @@ where
         self.publish_bulk_updates(befores, &saved).await?;
         Ok(saved)
     }
+}
+
+// ─── Generic write protection ────────────────────────────────────────────────
+
+/// Serialized fields no generic write may change on any entity: the row's
+/// identity, and the audit block that records who created, changed and
+/// deleted it. Entities add their own through
+/// [`PersistentEntity::write_protected_fields`].
+pub const ALWAYS_WRITE_PROTECTED: &[&str] = &["id", "metadata"];
+
+fn as_object(entity: &impl serde::Serialize) -> ServiceResult<serde_json::Map<String, serde_json::Value>> {
+    match serde_json::to_value(entity).map_err(|e| ServiceError::Internal(e.to_string()))? {
+        serde_json::Value::Object(map) => Ok(map),
+        _ => Err(ServiceError::Internal("an entity must serialize to a JSON object".into())),
+    }
+}
+
+/// Refuse a generic write that gives a protected field a new value. Carrying
+/// the stored value unchanged is allowed, so a form that sends the whole
+/// record is not refused for fields it did not touch.
+fn refuse_protected_changes<E: PersistentEntity>(
+    before: &serde_json::Map<String, serde_json::Value>,
+    after: &serde_json::Map<String, serde_json::Value>,
+) -> ServiceResult<()> {
+    for key in ALWAYS_WRITE_PROTECTED.iter().chain(E::write_protected_fields()) {
+        if before.get(*key) != after.get(*key) {
+            return Err(ServiceError::Validation(format!(
+                "field_not_writable: `{key}` cannot be changed by a generic write; \
+                 it changes only through the operation that owns it"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Merge a partial update onto an entity.
+///
+/// The merge goes through the entity's JSON form, so a key the entity has no
+/// field for would otherwise be dropped without a word and the edit lost. It
+/// is refused instead: a key given a value that does not survive the round
+/// trip is not a field of this record. A key set to `null` is exempt, since
+/// an empty optional field may be left out of the JSON form entirely.
+fn merge_patch<E: PersistentEntity>(
+    before: &E,
+    fields: HashMap<String, serde_json::Value>,
+) -> ServiceResult<E> {
+    let before_obj = as_object(before)?;
+    let mut merged = before_obj.clone();
+    let mut given = Vec::new();
+    for (key, value) in fields {
+        if !value.is_null() {
+            given.push(key.clone());
+        }
+        merged.insert(key, value);
+    }
+    let patched: E = serde_json::from_value(serde_json::Value::Object(merged))
+        .map_err(|e| ServiceError::Validation(e.to_string()))?;
+    let after_obj = as_object(&patched)?;
+
+    let mut unknown: Vec<String> = given.into_iter().filter(|k| !after_obj.contains_key(k)).collect();
+    if !unknown.is_empty() {
+        unknown.sort();
+        return Err(ServiceError::Validation(format!(
+            "unknown_field: {} is not a field of this record",
+            unknown.iter().map(|k| format!("`{k}`")).collect::<Vec<_>>().join(", ")
+        )));
+    }
+    refuse_protected_changes::<E>(&before_obj, &after_obj)?;
+    Ok(patched)
 }
 
 /// Maximum number of ids / items a single batch operation may contain. Enforced
@@ -927,12 +1037,18 @@ mod tests {
         id: String,
         name: String,
         #[serde(skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+        secret_hash: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
         deleted_at: Option<DateTime<Utc>>,
         created_at: DateTime<Utc>,
         updated_at: DateTime<Utc>,
     }
 
     impl crate::persistence::traits::PersistentEntity for Widget {
+        fn write_protected_fields() -> &'static [&'static str] {
+            &["secret_hash"]
+        }
         fn entity_id(&self) -> String {
             self.id.clone()
         }
@@ -972,6 +1088,8 @@ mod tests {
             Ok(Widget {
                 id: uuid::Uuid::new_v4().to_string(),
                 name: dto.name,
+                note: None,
+                secret_hash: "h0".into(),
                 deleted_at: None,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
@@ -1286,5 +1404,222 @@ mod tests {
         let ids: Vec<String> = (0..MAX_BATCH_SIZE + 1).map(|n| format!("id-{n}")).collect();
         // Enforced at the service layer, independent of any HTTP handler.
         assert!(service.bulk_soft_delete(ids).await.is_err());
+    }
+
+    // ── Generic writes may not change protected or unknown fields ─────────
+
+    /// A full update that carries the protected field, the way a form that
+    /// replaces the whole record would.
+    struct RekeyWidgetDto {
+        name: String,
+        secret_hash: String,
+    }
+
+    impl ApplyUpdateDto<RekeyWidgetDto> for Widget {
+        fn apply_update(mut self, dto: RekeyWidgetDto) -> ServiceResult<Self> {
+            self.name = dto.name;
+            self.secret_hash = dto.secret_hash;
+            Ok(self)
+        }
+    }
+
+    type RekeyService = GenericCrudService<Widget, CreateWidgetDto, RekeyWidgetDto, InMemoryWidgetRepo>;
+
+    fn patch(pairs: &[(&str, serde_json::Value)]) -> HashMap<String, serde_json::Value> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect()
+    }
+
+    fn validation_message(res: ServiceResult<impl std::fmt::Debug>) -> String {
+        match res {
+            Err(ServiceError::Validation(m)) => m,
+            other => panic!("expected a validation error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn patch_rejects_a_field_the_entity_does_not_have() {
+        let service = svc();
+        let w = service.create(CreateWidgetDto { name: "a".into() }).await.unwrap();
+
+        let msg = validation_message(service.partial_update(&w.id, patch(&[("nmae", serde_json::json!("b"))])).await);
+        assert!(msg.contains("unknown_field") && msg.contains("nmae"), "{msg}");
+        assert_eq!(service.get_by_id(&w.id).await.unwrap().unwrap().name, "a");
+    }
+
+    #[tokio::test]
+    async fn patch_rejects_changing_the_id() {
+        let service = svc();
+        let w = service.create(CreateWidgetDto { name: "a".into() }).await.unwrap();
+
+        let msg = validation_message(service.partial_update(&w.id, patch(&[("id", serde_json::json!("other"))])).await);
+        assert!(msg.contains("field_not_writable") && msg.contains("id"), "{msg}");
+        assert!(service.get_by_id(&w.id).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn patch_rejects_changing_a_field_the_entity_protects() {
+        let service = svc();
+        let w = service.create(CreateWidgetDto { name: "a".into() }).await.unwrap();
+
+        let msg = validation_message(
+            service.partial_update(&w.id, patch(&[("secret_hash", serde_json::json!("h1"))])).await,
+        );
+        assert!(msg.contains("field_not_writable") && msg.contains("secret_hash"), "{msg}");
+        assert_eq!(service.get_by_id(&w.id).await.unwrap().unwrap().secret_hash, "h0");
+    }
+
+    #[tokio::test]
+    async fn patch_accepts_a_protected_field_echoed_unchanged() {
+        let service = svc();
+        let w = service.create(CreateWidgetDto { name: "a".into() }).await.unwrap();
+
+        let saved = service
+            .partial_update(&w.id, patch(&[("name", serde_json::json!("b")), ("secret_hash", serde_json::json!("h0"))]))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.name, "b");
+    }
+
+    #[tokio::test]
+    async fn patch_sets_and_clears_an_optional_field_that_is_not_serialized_when_empty() {
+        let service = svc();
+        let w = service.create(CreateWidgetDto { name: "a".into() }).await.unwrap();
+
+        let set = service.partial_update(&w.id, patch(&[("note", serde_json::json!("hi"))])).await.unwrap().unwrap();
+        assert_eq!(set.note.as_deref(), Some("hi"));
+        let cleared = service.partial_update(&w.id, patch(&[("note", serde_json::Value::Null)])).await.unwrap().unwrap();
+        assert_eq!(cleared.note, None);
+    }
+
+    #[tokio::test]
+    async fn put_rejects_changing_a_field_the_entity_protects() {
+        let service: RekeyService = GenericCrudService::with_repository(Arc::new(InMemoryWidgetRepo::new()));
+        let w = service.create(CreateWidgetDto { name: "a".into() }).await.unwrap();
+
+        let msg = validation_message(
+            service.update(&w.id, RekeyWidgetDto { name: "b".into(), secret_hash: "h1".into() }).await,
+        );
+        assert!(msg.contains("field_not_writable") && msg.contains("secret_hash"), "{msg}");
+
+        // The same form echoing the stored value is an ordinary edit.
+        let saved = service
+            .update(&w.id, RekeyWidgetDto { name: "b".into(), secret_hash: "h0".into() })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.name, "b");
+    }
+
+    #[tokio::test]
+    async fn bulk_update_rejects_a_protected_change_before_writing_any_row() {
+        let service: RekeyService = GenericCrudService::with_repository(Arc::new(InMemoryWidgetRepo::new()));
+        let a = service.create(CreateWidgetDto { name: "a".into() }).await.unwrap();
+        let b = service.create(CreateWidgetDto { name: "b".into() }).await.unwrap();
+
+        let res = service
+            .bulk_update(vec![
+                (a.id.clone(), RekeyWidgetDto { name: "a2".into(), secret_hash: "h0".into() }),
+                (b.id.clone(), RekeyWidgetDto { name: "b2".into(), secret_hash: "h1".into() }),
+            ])
+            .await;
+        assert!(validation_message(res).contains("field_not_writable"));
+        assert_eq!(service.get_by_id(&a.id).await.unwrap().unwrap().name, "a");
+    }
+
+    #[tokio::test]
+    async fn bulk_partial_update_rejects_a_protected_change_before_writing_any_row() {
+        let service = svc();
+        let a = service.create(CreateWidgetDto { name: "a".into() }).await.unwrap();
+        let b = service.create(CreateWidgetDto { name: "b".into() }).await.unwrap();
+
+        let res = service
+            .bulk_partial_update(vec![
+                (a.id.clone(), patch(&[("name", serde_json::json!("a2"))])),
+                (b.id.clone(), patch(&[("secret_hash", serde_json::json!("h1"))])),
+            ])
+            .await;
+        assert!(validation_message(res).contains("field_not_writable"));
+        assert_eq!(service.get_by_id(&a.id).await.unwrap().unwrap().name, "a");
+    }
+
+    #[tokio::test]
+    async fn bulk_partial_update_rejects_an_unknown_field() {
+        let service = svc();
+        let a = service.create(CreateWidgetDto { name: "a".into() }).await.unwrap();
+
+        let res = service.bulk_partial_update(vec![(a.id.clone(), patch(&[("colour", serde_json::json!("red"))]))]).await;
+        assert!(validation_message(res).contains("unknown_field"));
+    }
+
+    // ── Events and trash lifecycle ────────────────────────────────────────
+
+    #[derive(Default)]
+    struct RecordingPublisher {
+        kinds: tokio::sync::Mutex<Vec<&'static str>>,
+    }
+
+    #[async_trait]
+    impl CrudEventPublisher<Widget> for RecordingPublisher {
+        async fn publish(&self, event: CrudEvent<Widget>) -> Result<(), backbone_messaging::EventError> {
+            let kind = match event {
+                CrudEvent::Updated { .. } => "updated",
+                CrudEvent::Patched { .. } => "patched",
+                _ => "other",
+            };
+            self.kinds.lock().await.push(kind);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn patch_publishes_an_updated_event() {
+        let publisher = Arc::new(RecordingPublisher::default());
+        let service = svc().with_event_publisher(publisher.clone());
+        let w = service.create(CreateWidgetDto { name: "a".into() }).await.unwrap();
+        publisher.kinds.lock().await.clear();
+
+        service.partial_update(&w.id, patch(&[("name", serde_json::json!("b"))])).await.unwrap();
+        assert_eq!(*publisher.kinds.lock().await, vec!["updated"]);
+    }
+
+    /// A lifecycle that refuses every trash operation, so a test can tell
+    /// whether the operation consulted it.
+    struct RefuseTrash;
+
+    #[async_trait]
+    impl ServiceLifecycle<Widget> for RefuseTrash {
+        async fn before_restore(&self, _entity: &Widget) -> ServiceResult<()> {
+            Err(ServiceError::Validation("restore refused".into()))
+        }
+        async fn before_hard_delete(&self, _entity: &Widget) -> ServiceResult<()> {
+            Err(ServiceError::Validation("hard delete refused".into()))
+        }
+        async fn before_restore_all(&self) -> ServiceResult<()> {
+            Err(ServiceError::Validation("restore all refused".into()))
+        }
+        async fn before_empty_trash(&self) -> ServiceResult<()> {
+            Err(ServiceError::Validation("empty trash refused".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn every_trash_operation_consults_the_lifecycle() {
+        let repo = Arc::new(InMemoryWidgetRepo::new());
+        let service: GenericCrudService<Widget, CreateWidgetDto, UpdateWidgetDto, InMemoryWidgetRepo> =
+            GenericCrudService::with_lifecycle(repo, Arc::new(RefuseTrash));
+        let w = service.create(CreateWidgetDto { name: "a".into() }).await.unwrap();
+        service.soft_delete(&w.id).await.unwrap();
+
+        assert!(service.restore(&w.id).await.is_err(), "restore");
+        assert!(service.bulk_restore(vec![w.id.clone()]).await.is_err(), "bulk restore");
+        assert!(service.restore_all().await.is_err(), "restore all");
+        assert!(service.hard_delete(&w.id).await.is_err(), "hard delete");
+        assert!(service.bulk_permanent_delete(vec![w.id.clone()]).await.is_err(), "bulk permanent delete");
+        assert!(service.empty_trash().await.is_err(), "empty trash");
+
+        // Nothing moved: the row is still in the trash.
+        let still = service.get_deleted_by_id(&w.id).await.unwrap().unwrap();
+        assert!(still.deleted_at.is_some());
     }
 }
