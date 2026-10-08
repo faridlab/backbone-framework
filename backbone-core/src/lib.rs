@@ -78,6 +78,7 @@ pub mod error;
 
 // Generic base layer — Phase 0 composition foundation
 pub mod service;
+pub mod violation;
 pub mod usecase;
 pub mod validation;
 pub mod policy;
@@ -245,6 +246,7 @@ pub use aggregate::{AggregateRoot, EventSourcedAggregate, InvariantAggregate, Ag
 pub use error::{ModuleError, ErrorCategory, ErrorResponse, CommonError};
 
 // Generic base layer re-exports
+pub use violation::{code_from_constraint, Violation};
 pub use service::{
     GenericCrudService, ServiceError, ServiceResult,
     FromCreateDto, ApplyUpdateDto, ServiceLifecycle, NoOpLifecycle,

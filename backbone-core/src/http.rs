@@ -25,9 +25,26 @@ pub struct ApiResponse<T> {
     pub message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// One entry per broken rule, beside the `error` sentence, when the
+    /// service refused the write for named reasons. Absent otherwise, so a
+    /// body without violations is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub violations: Option<Vec<crate::violation::Violation>>,
 }
 
 impl<T> ApiResponse<T> {
+    /// A refused write: the sentence for clients that read `error`, and each
+    /// broken rule for clients that mark fields.
+    pub fn rejected(error: impl Into<String>, violations: Vec<crate::violation::Violation>) -> Self {
+        Self {
+            success: false,
+            data: None,
+            message: None,
+            error: Some(error.into()),
+            violations: (!violations.is_empty()).then_some(violations),
+        }
+    }
+
     /// Create a success response with data and an optional message
     pub fn success(data: T, message: Option<String>) -> Self {
         Self {
@@ -35,6 +52,7 @@ impl<T> ApiResponse<T> {
             data: Some(data),
             message,
             error: None,
+            violations: None,
         }
     }
 
@@ -45,6 +63,7 @@ impl<T> ApiResponse<T> {
             data: Some(data),
             message: None,
             error: None,
+            violations: None,
         }
     }
 
@@ -54,6 +73,7 @@ impl<T> ApiResponse<T> {
             data: Some(data),
             message: Some(message.into()),
             error: None,
+            violations: None,
         }
     }
 
@@ -63,6 +83,7 @@ impl<T> ApiResponse<T> {
             data: None,
             message: None,
             error: Some(error.into()),
+            violations: None,
         }
     }
 
@@ -72,6 +93,7 @@ impl<T> ApiResponse<T> {
             data: None,
             message: None,
             error: Some(format!("{} with id '{}' not found", entity, id)),
+            violations: None,
         }
     }
 }
