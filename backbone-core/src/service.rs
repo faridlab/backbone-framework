@@ -51,6 +51,12 @@ pub enum ServiceError {
     #[error("validation failed: {0}")]
     Validation(String),
 
+    /// The write broke named rules: one violation per rule, each with the
+    /// field it concerns and a stable code. Displays as the same
+    /// `validation failed: …` sentence a plain validation error does.
+    #[error("validation failed: {}", .0.iter().map(|v| v.message.as_str()).collect::<Vec<_>>().join("; "))]
+    Violations(Vec<crate::violation::Violation>),
+
     #[error("repository error: {0}")]
     Repository(#[from] RepositoryError),
 
@@ -183,6 +189,7 @@ where
     repository: Arc<R>,
     lifecycle: Arc<dyn ServiceLifecycle<E>>,
     event_publisher: Arc<dyn CrudEventPublisher<E>>,
+    guard: Arc<dyn crate::write_guard::WriteGuard<E>>,
     _phantom: PhantomData<(C, U)>,
 }
 
@@ -203,7 +210,42 @@ where
             repository,
             lifecycle,
             event_publisher,
+            guard: Arc::new(crate::write_guard::AllowAll),
             _phantom: PhantomData,
+        }
+    }
+
+    /// Check every write against `guard`: its refusals refuse the write, its
+    /// shadowed violations are logged and the write proceeds.
+    pub fn with_guard(mut self, guard: Arc<dyn crate::write_guard::WriteGuard<E>>) -> Self {
+        self.guard = guard;
+        self
+    }
+
+    /// Ask the guard about one write.
+    async fn consult(
+        &self,
+        kind: crate::write_guard::WriteKind,
+        before: Option<&E>,
+        after: Option<&E>,
+    ) -> ServiceResult<()> {
+        let ctx = crate::write_guard::WriteCtx { kind, before, after };
+        let outcome = self.guard.check(&ctx).await;
+        for v in &outcome.shadow {
+            tracing::warn!(
+                target: "backbone::write_guard",
+                entity = std::any::type_name::<E>(),
+                kind = ?kind,
+                code = %v.code,
+                path = %v.path,
+                "a rule running in shadow would refuse this write: {}",
+                v.message
+            );
+        }
+        if outcome.refuse.is_empty() {
+            Ok(())
+        } else {
+            Err(ServiceError::Violations(outcome.refuse))
         }
     }
 
@@ -274,6 +316,7 @@ where
 
     pub async fn create(&self, dto: C) -> ServiceResult<E> {
         let mut entity = E::from_create_dto(dto)?;
+        self.consult(crate::write_guard::WriteKind::Create, None, Some(&entity)).await?;
         self.lifecycle.before_create(&mut entity).await?;
         let saved = self
             .repository
@@ -309,6 +352,7 @@ where
         };
         let mut updated = before.clone().apply_update(dto)?;
         refuse_protected_changes::<E>(&as_object(&before)?, &as_object(&updated)?)?;
+        self.consult(crate::write_guard::WriteKind::Update, Some(&before), Some(&updated)).await?;
         self.lifecycle.before_update(&mut updated).await?;
         let saved = self
             .repository
@@ -335,6 +379,7 @@ where
         let Some(entity) = existing else {
             return Ok(false);
         };
+        self.consult(crate::write_guard::WriteKind::Delete, Some(&entity), None).await?;
         self.lifecycle.before_delete(&entity).await?;
         let deleted = self
             .repository
@@ -358,6 +403,7 @@ where
         let Some(trashed) = self.get_deleted_by_id(id).await? else {
             return Ok(None);
         };
+        self.consult(crate::write_guard::WriteKind::Restore, Some(&trashed), None).await?;
         self.lifecycle.before_restore(&trashed).await?;
         let restored = self
             .repository
@@ -380,6 +426,7 @@ where
         let Some(entity) = self.get_deleted_by_id(id).await? else {
             return Ok(false);
         };
+        self.consult(crate::write_guard::WriteKind::HardDelete, Some(&entity), None).await?;
         self.lifecycle.before_hard_delete(&entity).await?;
         let deleted = self
             .repository
@@ -496,6 +543,7 @@ where
             return Ok(None);
         };
         let mut patched = merge_patch(&before, fields)?;
+        self.consult(crate::write_guard::WriteKind::Update, Some(&before), Some(&patched)).await?;
         self.lifecycle.before_update(&mut patched).await?;
         let saved = self
             .repository
@@ -553,6 +601,7 @@ where
             }
         }
         for entity in &entities {
+            self.consult(crate::write_guard::WriteKind::Delete, Some(entity), None).await?;
             self.lifecycle.before_delete(entity).await?;
         }
         let affected = self
@@ -579,6 +628,7 @@ where
         // the trash is left to the repository's atomic check below.
         for id in &ids {
             if let Some(trashed) = self.get_deleted_by_id(id).await? {
+                self.consult(crate::write_guard::WriteKind::Restore, Some(&trashed), None).await?;
                 self.lifecycle.before_restore(&trashed).await?;
             }
         }
@@ -627,6 +677,7 @@ where
         // through.
         for id in &ids {
             if let Some(trashed) = self.get_deleted_by_id(id).await? {
+                self.consult(crate::write_guard::WriteKind::HardDelete, Some(&trashed), None).await?;
                 self.lifecycle.before_hard_delete(&trashed).await?;
             }
         }
@@ -669,6 +720,7 @@ where
             };
             let mut updated = before.clone().apply_update(dto)?;
             refuse_protected_changes::<E>(&as_object(&before)?, &as_object(&updated)?)?;
+            self.consult(crate::write_guard::WriteKind::Update, Some(&before), Some(&updated)).await?;
             self.lifecycle.before_update(&mut updated).await?;
             befores.push(before);
             prepared.push(updated);
@@ -727,6 +779,7 @@ where
                 return Err(ServiceError::Validation(format!("id '{id}' not found")));
             };
             let mut patched = merge_patch(&before, fields)?;
+            self.consult(crate::write_guard::WriteKind::Update, Some(&before), Some(&patched)).await?;
             self.lifecycle.before_update(&mut patched).await?;
             befores.push(before);
             prepared.push(patched);
@@ -763,15 +816,26 @@ fn refuse_protected_changes<E: PersistentEntity>(
     before: &serde_json::Map<String, serde_json::Value>,
     after: &serde_json::Map<String, serde_json::Value>,
 ) -> ServiceResult<()> {
-    for key in ALWAYS_WRITE_PROTECTED.iter().chain(E::write_protected_fields()) {
-        if before.get(*key) != after.get(*key) {
-            return Err(ServiceError::Validation(format!(
-                "field_not_writable: `{key}` cannot be changed by a generic write; \
-                 it changes only through the operation that owns it"
-            )));
-        }
+    let refused: Vec<crate::violation::Violation> = ALWAYS_WRITE_PROTECTED
+        .iter()
+        .chain(E::write_protected_fields())
+        .filter(|key| before.get(**key) != after.get(**key))
+        .map(|key| {
+            crate::violation::Violation::new(
+                *key,
+                "field_not_writable",
+                format!(
+                    "field_not_writable: `{key}` cannot be changed by a generic write; \
+                     it changes only through the operation that owns it"
+                ),
+            )
+        })
+        .collect();
+    if refused.is_empty() {
+        Ok(())
+    } else {
+        Err(ServiceError::Violations(refused))
     }
-    Ok(())
 }
 
 /// Merge a partial update onto an entity.
@@ -801,10 +865,15 @@ fn merge_patch<E: PersistentEntity>(
     let mut unknown: Vec<String> = given.into_iter().filter(|k| !after_obj.contains_key(k)).collect();
     if !unknown.is_empty() {
         unknown.sort();
-        return Err(ServiceError::Validation(format!(
-            "unknown_field: {} is not a field of this record",
-            unknown.iter().map(|k| format!("`{k}`")).collect::<Vec<_>>().join(", ")
-        )));
+        return Err(ServiceError::Violations(
+            unknown
+                .into_iter()
+                .map(|k| {
+                    let message = format!("unknown_field: `{k}` is not a field of this record");
+                    crate::violation::Violation::new(k, "unknown_field", message)
+                })
+                .collect(),
+        ));
     }
     refuse_protected_changes::<E>(&before_obj, &after_obj)?;
     Ok(patched)
@@ -872,6 +941,13 @@ where
     R: CrudRepository<E> + Send + Sync + 'static,
 {
     type Error = ServiceError;
+
+    fn violations_of(err: &ServiceError) -> Option<Vec<crate::violation::Violation>> {
+        match err {
+            ServiceError::Violations(v) => Some(v.clone()),
+            _ => None,
+        }
+    }
 
     fn entity_name() -> &'static str {
         std::any::type_name::<E>()
@@ -1019,6 +1095,7 @@ where
             repository: self.repository.clone(),
             lifecycle: self.lifecycle.clone(),
             event_publisher: self.event_publisher.clone(),
+            guard: self.guard.clone(),
             _phantom: PhantomData,
         }
     }
@@ -1429,9 +1506,12 @@ mod tests {
         pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect()
     }
 
+    /// The refusal's message, whether the service refused with named
+    /// violations or with a plain validation sentence.
     fn validation_message(res: ServiceResult<impl std::fmt::Debug>) -> String {
         match res {
             Err(ServiceError::Validation(m)) => m,
+            Err(e @ ServiceError::Violations(_)) => e.to_string(),
             other => panic!("expected a validation error, got {other:?}"),
         }
     }
@@ -1621,5 +1701,103 @@ mod tests {
         // Nothing moved: the row is still in the trash.
         let still = service.get_deleted_by_id(&w.id).await.unwrap().unwrap();
         assert!(still.deleted_at.is_some());
+    }
+
+    // ── Named violations and the write guard ──────────────────────────────
+
+    #[tokio::test]
+    async fn a_refused_field_is_a_violation_naming_its_path_and_code() {
+        let service = svc();
+        let w = service.create(CreateWidgetDto { name: "a".into() }).await.unwrap();
+
+        let err = service
+            .partial_update(&w.id, patch(&[("secret_hash", serde_json::json!("h1")), ("colour", serde_json::json!("red"))]))
+            .await
+            .unwrap_err();
+        let ServiceError::Violations(v) = &err else { panic!("expected violations, got {err:?}") };
+        let pairs: Vec<(&str, &str)> = v.iter().map(|x| (x.path.as_str(), x.code.as_str())).collect();
+        assert_eq!(pairs, vec![("colour", "unknown_field")]);
+        // The sentence clients already read is unchanged.
+        assert!(err.to_string().starts_with("validation failed: unknown_field: `colour`"), "{err}");
+
+        let err = service.partial_update(&w.id, patch(&[("secret_hash", serde_json::json!("h1"))])).await.unwrap_err();
+        let ServiceError::Violations(v) = &err else { panic!("expected violations, got {err:?}") };
+        assert_eq!((v[0].path.as_str(), v[0].code.as_str()), ("secret_hash", "field_not_writable"));
+    }
+
+    /// Refuses any write whose resulting widget is named `forbidden`, and
+    /// shadow-reports any named `watched`. Records every kind it was asked about.
+    #[derive(Default)]
+    struct NameGuard {
+        seen: std::sync::Mutex<Vec<crate::write_guard::WriteKind>>,
+    }
+
+    #[async_trait]
+    impl crate::write_guard::WriteGuard<Widget> for NameGuard {
+        async fn check(&self, ctx: &crate::write_guard::WriteCtx<'_, Widget>) -> crate::write_guard::GuardOutcome {
+            self.seen.lock().unwrap().push(ctx.kind);
+            let row = ctx.after.or(ctx.before).expect("a write concerns a row");
+            let mut out = crate::write_guard::GuardOutcome::default();
+            match row.name.as_str() {
+                "forbidden" => out.refuse.push(crate::violation::Violation::new("name", "name_forbidden", "this name is refused")),
+                "watched" => out.shadow.push(crate::violation::Violation::new("name", "name_watched", "would be refused")),
+                _ => {}
+            }
+            out
+        }
+    }
+
+    fn guarded(guard: Arc<NameGuard>) -> GenericCrudService<Widget, CreateWidgetDto, UpdateWidgetDto, InMemoryWidgetRepo> {
+        svc().with_guard(guard)
+    }
+
+    #[tokio::test]
+    async fn a_guard_refusal_stops_create_update_and_patch_with_nothing_written() {
+        let guard = Arc::new(NameGuard::default());
+        let service = guarded(guard.clone());
+
+        let err = service.create(CreateWidgetDto { name: "forbidden".into() }).await.unwrap_err();
+        assert!(matches!(&err, ServiceError::Violations(v) if v[0].code == "name_forbidden"), "{err:?}");
+        assert!(service.list(1, 20, Default::default()).await.unwrap().0.is_empty(), "nothing created");
+
+        let w = service.create(CreateWidgetDto { name: "ok".into() }).await.unwrap();
+        assert!(service.update(&w.id, UpdateWidgetDto { name: "forbidden".into() }).await.is_err());
+        assert!(service.partial_update(&w.id, patch(&[("name", serde_json::json!("forbidden"))])).await.is_err());
+        assert!(service
+            .bulk_partial_update(vec![(w.id.clone(), patch(&[("name", serde_json::json!("forbidden"))]))])
+            .await
+            .is_err());
+        assert_eq!(service.get_by_id(&w.id).await.unwrap().unwrap().name, "ok");
+    }
+
+    #[tokio::test]
+    async fn a_shadowed_rule_lets_the_write_through() {
+        let service = guarded(Arc::new(NameGuard::default()));
+        let w = service.create(CreateWidgetDto { name: "watched".into() }).await.unwrap();
+        assert_eq!(service.get_by_id(&w.id).await.unwrap().unwrap().name, "watched");
+    }
+
+    #[tokio::test]
+    async fn the_guard_is_asked_about_every_write_kind() {
+        use crate::write_guard::WriteKind::*;
+        let guard = Arc::new(NameGuard::default());
+        let service = guarded(guard.clone());
+        let w = service.create(CreateWidgetDto { name: "a".into() }).await.unwrap();
+        service.update(&w.id, UpdateWidgetDto { name: "b".into() }).await.unwrap();
+        service.partial_update(&w.id, patch(&[("name", serde_json::json!("c"))])).await.unwrap();
+        service.soft_delete(&w.id).await.unwrap();
+        service.restore(&w.id).await.unwrap();
+        service.soft_delete(&w.id).await.unwrap();
+        service.hard_delete(&w.id).await.unwrap();
+        assert_eq!(*guard.seen.lock().unwrap(), vec![Create, Update, Update, Delete, Restore, Delete, HardDelete]);
+    }
+
+    #[test]
+    fn the_generic_service_hands_its_violations_to_the_http_layer() {
+        use crate::http::CrudService;
+        type S = GenericCrudService<Widget, CreateWidgetDto, UpdateWidgetDto, InMemoryWidgetRepo>;
+        let v = vec![crate::violation::Violation::new("name", "x", "y")];
+        assert_eq!(<S as CrudService<Widget, CreateWidgetDto, UpdateWidgetDto>>::violations_of(&ServiceError::Violations(v.clone())), Some(v));
+        assert_eq!(<S as CrudService<Widget, CreateWidgetDto, UpdateWidgetDto>>::violations_of(&ServiceError::NotFound), None);
     }
 }

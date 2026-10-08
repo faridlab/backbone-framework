@@ -98,6 +98,19 @@ impl<T> ApiResponse<T> {
     }
 }
 
+/// The response to a failed write: 422 listing the broken rules when the
+/// service refused it for named reasons, `fallback` with the sentence otherwise.
+fn write_error<T>(
+    violations: Option<Vec<crate::violation::Violation>>,
+    err: &impl std::fmt::Display,
+    fallback: axum::http::StatusCode,
+) -> (axum::http::StatusCode, axum::Json<ApiResponse<T>>) {
+    match violations {
+        Some(v) => (axum::http::StatusCode::UNPROCESSABLE_ENTITY, axum::Json(ApiResponse::rejected(err.to_string(), v))),
+        None => (fallback, axum::Json(ApiResponse::error(err.to_string()))),
+    }
+}
+
 /// Generic list query parameters
 #[derive(Debug, Deserialize, Default, Clone)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -802,6 +815,13 @@ where
     /// Error type for service operations
     type Error: std::error::Error + Send + Sync;
 
+    /// The named rules a refused write broke, when the error carries them, so
+    /// the response can list them beside the sentence. `None` by default.
+    fn violations_of(err: &Self::Error) -> Option<Vec<crate::violation::Violation>> {
+        let _ = err;
+        None
+    }
+
     /// Entity name for error messages (e.g., "User", "Role")
     fn entity_name() -> &'static str;
 
@@ -1367,6 +1387,7 @@ where
                 let response: R = entity.into();
                 (StatusCode::CREATED, Json(ApiResponse::ok(response)))
             }
+            Err(e) if S::violations_of(&e).is_some() => write_error(S::violations_of(&e), &e, StatusCode::BAD_REQUEST),
             Err(e) => {
                 let error_str = e.to_string();
                 if error_str.contains("conflict") || error_str.contains("already exists") {
@@ -1429,7 +1450,7 @@ where
                 (StatusCode::NOT_FOUND, Json(ApiResponse::<R>::not_found(S::entity_name(), &id)))
             }
             Err(e) => {
-                (StatusCode::BAD_REQUEST, Json(ApiResponse::<R>::error(e.to_string())))
+                write_error(S::violations_of(&e), &e, StatusCode::BAD_REQUEST)
             }
         }
     }
@@ -1465,7 +1486,7 @@ where
                 (StatusCode::NOT_FOUND, Json(ApiResponse::<R>::not_found(S::entity_name(), &id)))
             }
             Err(e) => {
-                (StatusCode::BAD_REQUEST, Json(ApiResponse::<R>::error(e.to_string())))
+                write_error(S::violations_of(&e), &e, StatusCode::BAD_REQUEST)
             }
         }
     }
@@ -1486,7 +1507,7 @@ where
                 (StatusCode::NOT_FOUND, Json(ApiResponse::<()>::not_found(S::entity_name(), &id)))
             }
             Err(e) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(e.to_string())))
+                write_error(S::violations_of(&e), &e, StatusCode::INTERNAL_SERVER_ERROR)
             }
         }
     }
@@ -1510,7 +1531,7 @@ where
                 (StatusCode::CREATED, Json(ApiResponse::ok(response)))
             }
             Err(e) => {
-                (StatusCode::BAD_REQUEST, Json(ApiResponse::<BulkResponse<R>>::error(e.to_string())))
+                write_error(S::violations_of(&e), &e, StatusCode::BAD_REQUEST)
             }
         }
     }
@@ -1531,7 +1552,7 @@ where
                 serde_json::json!({ "soft_deleted": count }),
                 format!("Soft-deleted {count} item(s)"),
             ))),
-            Err(e) => (StatusCode::BAD_REQUEST, Json(ApiResponse::<serde_json::Value>::error(e.to_string()))),
+            Err(e) => write_error(S::violations_of(&e), &e, StatusCode::BAD_REQUEST),
         }
     }
 
@@ -1550,7 +1571,7 @@ where
                 let total = items.len();
                 (StatusCode::OK, Json(ApiResponse::ok(BulkResponse { items, total, failed: 0, errors: vec![] })))
             }
-            Err(e) => (StatusCode::BAD_REQUEST, Json(ApiResponse::<BulkResponse<R>>::error(e.to_string()))),
+            Err(e) => write_error(S::violations_of(&e), &e, StatusCode::BAD_REQUEST),
         }
     }
 
@@ -1582,7 +1603,7 @@ where
                 serde_json::json!({ "permanently_deleted": count }),
                 format!("Permanently deleted {count} item(s)"),
             ))),
-            Err(e) => (StatusCode::BAD_REQUEST, Json(ApiResponse::<serde_json::Value>::error(e.to_string()))),
+            Err(e) => write_error(S::violations_of(&e), &e, StatusCode::BAD_REQUEST),
         }
     }
 
@@ -1602,7 +1623,7 @@ where
                 let total = items.len();
                 (StatusCode::OK, Json(ApiResponse::ok(BulkResponse { items, total, failed: 0, errors: vec![] })))
             }
-            Err(e) => (StatusCode::BAD_REQUEST, Json(ApiResponse::<BulkResponse<R>>::error(e.to_string()))),
+            Err(e) => write_error(S::violations_of(&e), &e, StatusCode::BAD_REQUEST),
         }
     }
 
@@ -1633,7 +1654,7 @@ where
                 let total = items.len();
                 (StatusCode::OK, Json(ApiResponse::ok(BulkResponse { items, total, failed: 0, errors: vec![] })))
             }
-            Err(e) => (StatusCode::BAD_REQUEST, Json(ApiResponse::<BulkResponse<R>>::error(e.to_string()))),
+            Err(e) => write_error(S::violations_of(&e), &e, StatusCode::BAD_REQUEST),
         }
     }
 
@@ -1649,7 +1670,7 @@ where
                 (StatusCode::OK, Json(ApiResponse::ok(response)))
             }
             Err(e) => {
-                (StatusCode::BAD_REQUEST, Json(ApiResponse::<R>::error(e.to_string())))
+                write_error(S::violations_of(&e), &e, StatusCode::BAD_REQUEST)
             }
         }
     }
@@ -1719,7 +1740,7 @@ where
                 (StatusCode::NOT_FOUND, Json(ApiResponse::<R>::not_found(S::entity_name(), &id)))
             }
             Err(e) => {
-                (StatusCode::BAD_REQUEST, Json(ApiResponse::<R>::error(e.to_string())))
+                write_error(S::violations_of(&e), &e, StatusCode::BAD_REQUEST)
             }
         }
     }
@@ -1796,7 +1817,7 @@ where
                         ))).into_response()
                     }
                     Err(e) => {
-                        (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<R>::error(e.to_string()))).into_response()
+                        write_error::<R>(S::violations_of(&e), &e, StatusCode::INTERNAL_SERVER_ERROR).into_response()
                     }
                 }
             }
@@ -1806,7 +1827,7 @@ where
                 ))).into_response()
             }
             Err(e) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<R>::error(e.to_string()))).into_response()
+                write_error::<R>(S::violations_of(&e), &e, StatusCode::INTERNAL_SERVER_ERROR).into_response()
             }
         }
     }
@@ -2385,5 +2406,22 @@ mod tests {
         assert!(tenant.get("hppPerUnit").is_none());
         let plat = apply_field_security(v, Some(&AccessScope::Platform), PRIV, Some("providerId"));
         assert!(plat.get("hppPerUnit").is_some());
+    }
+
+    #[test]
+    fn a_write_refused_for_named_reasons_answers_422_with_its_violations() {
+        let v = vec![crate::violation::Violation::new("status", "field_not_writable", "`status` changes only through its verbs")];
+        let (status, axum::Json(body)) =
+            write_error::<()>(Some(v), &"validation failed: `status` changes only through its verbs", axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(status, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+        let json = serde_json::to_value(&body).unwrap();
+        assert_eq!(json["error"], "validation failed: `status` changes only through its verbs");
+        assert_eq!(json["violations"][0]["path"], "status");
+        assert_eq!(json["violations"][0]["code"], "field_not_writable");
+
+        // Any other failure keeps its status and body: no `violations` key at all.
+        let (status, axum::Json(body)) = write_error::<()>(None, &"boom", axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(serde_json::to_value(&body).unwrap().get("violations").is_none());
     }
 }
