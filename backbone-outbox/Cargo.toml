@@ -1,6 +1,6 @@
 [package]
 name = "backbone-outbox"
-version = "2.7.36"
+version = "3.0.0"
 edition = "2021"
 description = "Durable transactional-outbox + inbox + relay primitives for go-live exactly-once event delivery over Postgres."
 license = "MIT OR Apache-2.0"

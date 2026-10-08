@@ -1,6 +1,6 @@
 [package]
 name = "backbone-core"
-version = "2.7.36"
+version = "3.0.0"
 edition = "2021"
 description = "Backbone Framework Core - Foundation for generic CRUD system"
 license = "MIT OR Apache-2.0"
@@ -8,7 +8,7 @@ repository = "https://github.com/faridlab/backbone-framework"
 
 [dependencies]
 # Sibling crates
-backbone-orm = { path = "../backbone-orm", version = "2.7.36" }
+backbone-orm = { path = "../backbone-orm", version = "3.0.0" }
 # Core dependencies
 tokio = { version = "1.0", features = ["full"] }
 async-trait = "0.1"
@@ -28,7 +28,7 @@ regex = "1.0"
 tracing = "0.1"
 
 # Messaging — used by GenericCrudService for event publishing
-backbone-messaging = { path = "../backbone-messaging", version = "2.7.36" }
+backbone-messaging = { path = "../backbone-messaging", version = "3.0.0" }
 
 # Configuration
 serde_yaml = "0.9"

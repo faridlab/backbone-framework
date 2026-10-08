@@ -1,6 +1,6 @@
 [package]
 name = "backbone-health"
-version = "2.7.36"
+version = "3.0.0"
 edition = "2021"
 description = "Backbone Framework Health Check Module - Production monitoring and health endpoints"
 license = "MIT OR Apache-2.0"

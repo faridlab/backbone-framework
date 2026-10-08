@@ -14,6 +14,31 @@ The release workflow reads the section matching the git tag's version and
 uses it as the GitHub Release body. If no matching section is found it falls
 back to the `## [Unreleased]` section.
 
+## [3.0.0] - 2026-10-08
+
+Breaking: dependents move their requirement to `"3.0"`. A module's `From<ServiceError>` match
+needs the new arm; modules regenerated with the matching schema generator have it.
+
+### Added
+
+- **backbone-core** — `WriteGuard`: `GenericCrudService` asks its guard about every write it
+  makes (create, full and partial update, single and bulk, soft delete, restore, hard delete),
+  with the stored row before and the row the write would store, before anything is persisted.
+  A guard answers with violations that refuse the write and violations that only report it
+  (shadow, logged under `backbone::write_guard`). `with_guard` installs one; without one every
+  write is allowed (`AllowAll`), so behaviour is unchanged until a guard is installed.
+- **backbone-core** — `Violation { path, code, params, message }`, and `ApiResponse::violations`
+  beside the existing error sentence.
+- **backbone-core** — `CrudService::violations_of`: the generic HTTP handlers answer a write
+  refused for named reasons with 422 and its violations.
+
+### Changed
+
+- **backbone-core** — `ServiceError::Violations(Vec<Violation>)` is a new variant, so an exhaustive
+  match on `ServiceError` must handle it. The generic write guard's refusals (a field that is not
+  writable, a field the entity does not have) now arrive as one violation per field, codes
+  `field_not_writable` and `unknown_field`; their message text is unchanged.
+
 ## [2.7.36] - 2026-10-03
 
 ### Fixed
