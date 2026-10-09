@@ -340,7 +340,12 @@ impl Permission {
         perms
     }
 
-    /// Create permission from action and resource
+    /// Create permission from action and resource.
+    ///
+    /// The action enums carry no restore of their own, so restoring a record
+    /// asks for the permission to delete it: whoever may remove a record may
+    /// bring it back, and no unrelated permission (a password reset, a
+    /// permission grant) opens the restore path.
     pub fn from_action_resource(action: Action, resource: Resource) -> Self {
         match resource {
             Resource::User => match action {
@@ -349,7 +354,7 @@ impl Permission {
                 Action::Update => Permission::User(UserAction::Update),
                 Action::Delete => Permission::User(UserAction::Delete),
                 Action::List => Permission::User(UserAction::List),
-                Action::Restore => Permission::User(UserAction::ResetPassword),
+                Action::Restore => Permission::User(UserAction::Delete),
             },
             Resource::Role => match action {
                 Action::Create => Permission::Role(RoleAction::Create),
@@ -357,7 +362,7 @@ impl Permission {
                 Action::Update => Permission::Role(RoleAction::Update),
                 Action::Delete => Permission::Role(RoleAction::Delete),
                 Action::List => Permission::Role(RoleAction::List),
-                Action::Restore => Permission::Role(RoleAction::AssignPermission),
+                Action::Restore => Permission::Role(RoleAction::Delete),
             },
             Resource::Permission => match action {
                 Action::Create => Permission::Permission(PermissionAction::Create),
@@ -365,7 +370,7 @@ impl Permission {
                 Action::Update => Permission::Permission(PermissionAction::Update),
                 Action::Delete => Permission::Permission(PermissionAction::Delete),
                 Action::List => Permission::Permission(PermissionAction::List),
-                Action::Restore => Permission::Permission(PermissionAction::Update),
+                Action::Restore => Permission::Permission(PermissionAction::Delete),
             },
             Resource::Settings => match action {
                 Action::Create => Permission::Settings(SettingsAction::Create),
@@ -373,7 +378,7 @@ impl Permission {
                 Action::Update => Permission::Settings(SettingsAction::Update),
                 Action::Delete => Permission::Settings(SettingsAction::Delete),
                 Action::List => Permission::Settings(SettingsAction::List),
-                Action::Restore => Permission::Settings(SettingsAction::Update),
+                Action::Restore => Permission::Settings(SettingsAction::Delete),
             },
         }
     }
@@ -436,3 +441,28 @@ impl SettingsAction {
 }
 
 use std::collections::HashSet;
+
+#[cfg(test)]
+mod restore_permission_tests {
+    use super::*;
+
+    #[test]
+    fn restoring_a_record_requires_the_permission_to_delete_it() {
+        assert_eq!(
+            Permission::from_action_resource(Action::Restore, Resource::User),
+            Permission::User(UserAction::Delete)
+        );
+        assert_eq!(
+            Permission::from_action_resource(Action::Restore, Resource::Role),
+            Permission::Role(RoleAction::Delete)
+        );
+        assert_eq!(
+            Permission::from_action_resource(Action::Restore, Resource::Permission),
+            Permission::Permission(PermissionAction::Delete)
+        );
+        assert_eq!(
+            Permission::from_action_resource(Action::Restore, Resource::Settings),
+            Permission::Settings(SettingsAction::Delete)
+        );
+    }
+}
