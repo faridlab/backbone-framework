@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use crate::service::{ServiceError, ServiceResult};
+use crate::service::ServiceResult;
 
 /// gRPC request/response wrapper
 #[derive(Debug, Serialize, Deserialize)]

@@ -5,8 +5,8 @@
 use async_trait::async_trait;
 use elasticsearch::{Elasticsearch, http::transport::Transport, SearchParts};
 // use elasticsearch::params::*; // Currently unused
-use elasticsearch::{BulkParts, UpdateParts, DeleteParts, GetParts, CreateParts};
-use elasticsearch::indices::{IndicesCreateParts, IndicesGetParts, IndicesExistsParts, IndicesStatsParts, IndicesForcemergeParts, IndicesGetMappingParts, IndicesDeleteParts};
+use elasticsearch::{BulkParts, UpdateParts, DeleteParts, GetParts};
+use elasticsearch::indices::{IndicesCreateParts, IndicesGetParts, IndicesExistsParts, IndicesStatsParts, IndicesForcemergeParts, IndicesGetMappingParts};
 use crate::{
     SearchResult, SearchError, SearchService, SearchDocument, SearchQuery, SearchStats,
     SearchBackend, SearchResults, SearchHit, FilterValue, FilterOperator,

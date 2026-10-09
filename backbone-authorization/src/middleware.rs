@@ -18,6 +18,7 @@ use crate::types::*;
 /// Authorization state stored in request extensions
 #[derive(Clone, Debug)]
 pub struct AuthState {
+    /// The authenticated user, when the request carries one.
     pub user_id: Option<String>,
 }
 
@@ -28,6 +29,7 @@ pub struct AuthorizationLayer {
 }
 
 impl AuthorizationLayer {
+    /// A layer that authorizes requests through `service`.
     pub fn new(service: Arc<AuthorizationService>) -> Self {
         Self { service }
     }

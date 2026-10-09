@@ -8,18 +8,23 @@ use std::fmt;
 /// Authorization error
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum AuthorizationError {
+    /// No user matches the given identifier.
     #[error("User not found: {0}")]
     UserNotFound(String),
 
+    /// The user lacks the permission the request needs.
     #[error("Permission denied: {0}")]
     PermissionDenied(String),
 
+    /// The presented token is malformed, expired or not trusted.
     #[error("Invalid token: {0}")]
     InvalidToken(String),
 
+    /// The authorization setup itself is wrong.
     #[error("Configuration error: {0}")]
     Configuration(String),
 
+    /// Reading roles or permissions from storage failed.
     #[error("Database error: {0}")]
     Database(String),
 }
@@ -27,26 +32,38 @@ pub enum AuthorizationError {
 /// User information with roles and permissions
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthUser {
+    /// The user's identifier.
     pub user_id: String,
+    /// The user's login name.
     pub username: String,
+    /// Role names the user holds.
     pub roles: Vec<String>,
+    /// Permission names granted directly or through roles.
     pub permissions: Vec<String>,
-    pub expires_at: Option<i64>, // Unix timestamp
+    /// When the authorization expires, as a Unix timestamp in seconds.
+    pub expires_at: Option<i64>,
 }
 
 /// Action types for permissions
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Action {
+    /// Create a record.
     Create,
+    /// Read one record.
     Read,
+    /// Change a record.
     Update,
+    /// Remove a record.
     Delete,
+    /// List records.
     List,
+    /// Bring back a removed record.
     Restore,
 }
 
 impl Action {
+    /// Every action.
     pub fn all() -> Vec<Self> {
         vec![
             Self::Create,
@@ -76,13 +93,18 @@ impl fmt::Display for Action {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Resource {
+    /// User accounts.
     User,
+    /// Roles.
     Role,
+    /// Permission definitions.
     Permission,
+    /// System settings.
     Settings,
 }
 
 impl Resource {
+    /// Every resource.
     pub fn all() -> Vec<Self> {
         vec![
             Self::User,
@@ -108,13 +130,18 @@ impl fmt::Display for Resource {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
+    /// Every permission, without checks.
     SuperAdmin,
+    /// Administers the system.
     Admin,
+    /// A signed-in user.
     User,
+    /// An anonymous or unprivileged visitor.
     Guest,
 }
 
 impl Role {
+    /// The names of every standard role.
     pub fn all() -> Vec<&'static str> {
         vec![
             "super_admin",
@@ -124,6 +151,7 @@ impl Role {
         ]
     }
 
+    /// The role's name.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::SuperAdmin => "super_admin",
@@ -133,6 +161,7 @@ impl Role {
         }
     }
 
+    /// The standard role with this name, if any.
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "super_admin" => Some(Self::SuperAdmin),
@@ -147,32 +176,44 @@ impl Role {
 /// Permission check result
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PermissionCheck {
+    /// Whether the permission was granted.
     pub allowed: bool,
+    /// The permission checked.
     pub permission: Permission,
+    /// Why it was granted or refused.
     pub reason: String,
 }
 
 /// Authorization request
 #[derive(Debug, Clone)]
 pub struct AuthorizationRequest {
+    /// Who is asking.
     pub user: AuthUser,
+    /// What kind of record the action touches.
     pub resource: Resource,
+    /// What the user wants to do.
     pub action: Action,
+    /// The one record, when the action targets one.
     pub resource_id: Option<String>,
 }
 
 /// Authorization response
 #[derive(Debug, Clone)]
 pub struct AuthorizationResponse {
+    /// Whether the request is allowed.
     pub allowed: bool,
+    /// Each permission checked on the way to the answer.
     pub checks: Vec<PermissionCheck>,
 }
 
 /// Authorization configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthorizationConfig {
+    /// How long a cached permission answer stays valid, in seconds.
     pub cache_ttl_seconds: u64,
+    /// The role a user without any role is treated as.
     pub default_role: String,
+    /// Whether permission answers are cached.
     pub enable_permission_caching: bool,
 }
 
@@ -190,12 +231,19 @@ impl Default for AuthorizationConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UserAction {
+    /// Create one.
     Create,
+    /// Read one.
     Read,
+    /// Change one.
     Update,
+    /// Remove one.
     Delete,
+    /// List them.
     List,
+    /// Reset the user's password.
     ResetPassword,
+    /// Change the user's roles.
     ChangeRole,
 }
 
@@ -203,12 +251,19 @@ pub enum UserAction {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RoleAction {
+    /// Create one.
     Create,
+    /// Read one.
     Read,
+    /// Change one.
     Update,
+    /// Remove one.
     Delete,
+    /// List them.
     List,
+    /// Grant a permission to the role.
     AssignPermission,
+    /// Take a permission from the role.
     RevokePermission,
 }
 
@@ -216,10 +271,15 @@ pub enum RoleAction {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionAction {
+    /// Create one.
     Create,
+    /// Read one.
     Read,
+    /// Change one.
     Update,
+    /// Remove one.
     Delete,
+    /// List them.
     List,
 }
 
@@ -227,19 +287,28 @@ pub enum PermissionAction {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SettingsAction {
+    /// Create one.
     Create,
+    /// Read one.
     Read,
+    /// Change one.
     Update,
+    /// Remove one.
     Delete,
+    /// List them.
     List,
 }
 
 /// Permission definition
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Permission {
+    /// An action on user accounts.
     User(UserAction),
+    /// An action on roles.
     Role(RoleAction),
+    /// An action on permission definitions.
     Permission(PermissionAction),
+    /// An action on system settings.
     Settings(SettingsAction),
 }
 
@@ -311,6 +380,7 @@ impl Permission {
 }
 
 impl UserAction {
+    /// Every user action.
     pub fn all() -> Vec<Self> {
         vec![
             Self::Create,
@@ -325,6 +395,7 @@ impl UserAction {
 }
 
 impl RoleAction {
+    /// Every role action.
     pub fn all() -> Vec<Self> {
         vec![
             Self::Create,
@@ -339,6 +410,7 @@ impl RoleAction {
 }
 
 impl PermissionAction {
+    /// Every permission action.
     pub fn all() -> Vec<Self> {
         vec![
             Self::Create,
@@ -351,6 +423,7 @@ impl PermissionAction {
 }
 
 impl SettingsAction {
+    /// Every settings action.
     pub fn all() -> Vec<Self> {
         vec![
             Self::Create,

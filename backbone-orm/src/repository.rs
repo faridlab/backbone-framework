@@ -366,7 +366,7 @@ impl<T: for<'a> FromRow<'a, PgRow> + Send + Unpin> PostgresRepository<T> {
     async fn execute_list(
         &self,
         pagination: PaginationParams,
-        mut query_filter: crate::QueryFilter,
+        query_filter: crate::QueryFilter,
     ) -> anyhow::Result<PaginatedResult<T>> {
         let limit = pagination.limit() as i64;
         let backwards =
@@ -375,8 +375,6 @@ impl<T: for<'a> FromRow<'a, PgRow> + Send + Unpin> PostgresRepository<T> {
 
         let (mut where_clause, mut filter_params) = query_filter.build_where_clause();
         let order_clause;
-        // The deterministic order a cursor walks in (cursor mode only).
-        let mut boundary_sorts: Vec<(String, FilterSortDirection)> = Vec::new();
         // Cast suffixes for the sort columns, for the keyset binds.
         let mut boundary_casts: Vec<Option<String>> = Vec::new();
 
@@ -453,7 +451,8 @@ impl<T: for<'a> FromRow<'a, PgRow> + Send + Unpin> PostgresRepository<T> {
                 order_clause = format!(" ORDER BY {}", parts.join(", "));
             }
         }
-        boundary_sorts = sorts;
+        // The deterministic order a cursor walks in (cursor mode only).
+        let boundary_sorts: Vec<(String, FilterSortDirection)> = sorts;
 
         // The total: exact in page mode (today's behaviour), the planner's
         // estimate when asked, nothing on a cursor walk that did not ask.

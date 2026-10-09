@@ -41,7 +41,6 @@
 use serde::{Deserialize, Serialize};
 
 use super::types::SortDirection;
-    use serde_json::json;
 
 /// Cursor payload version. A decoded cursor carrying any other version is
 /// refused: an old cursor after a format change is a stale client, not a
@@ -260,6 +259,7 @@ fn base64url_decode(text: &str) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn sorts() -> Vec<(String, SortDirection)> {
         vec![
