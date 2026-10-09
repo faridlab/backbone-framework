@@ -14,6 +14,17 @@ The release workflow reads the section matching the git tag's version and
 uses it as the GitHub Release body. If no matching section is found it falls
 back to the `## [Unreleased]` section.
 
+## [3.0.1] - 2026-10-09
+
+### Fixed
+
+- **backbone-orm** — the list query binds its cursor order once, where it is decided; no
+  unused assignment or needless `mut` is left behind.
+- **backbone-authorization** — every public item is documented, as the crate's own
+  `missing_docs` lint asks.
+- **backbone-core**, **backbone-orm**, **backbone-search** — unused imports removed. With this
+  the workspace builds without a code warning.
+
 ## [3.0.0] - 2026-10-08
 
 Breaking: dependents move their requirement to `"3.0"`. A module's `From<ServiceError>` match

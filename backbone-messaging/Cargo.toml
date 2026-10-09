@@ -1,6 +1,6 @@
 [package]
 name = "backbone-messaging"
-version = "3.0.0"
+version = "3.0.1"
 edition = "2021"
 description = "Event-driven messaging infrastructure for Backbone Framework"
 license = "MIT OR Apache-2.0"
