@@ -35,4 +35,4 @@ members = [
 # workflow (.github/workflows/release.yml) tests the workspace, publishes the
 # crates not yet on crates.io at this version, and then tags v<version>.
 [workspace.metadata.release]
-version = "3.0.1"
+version = "3.0.2"

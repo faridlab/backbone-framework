@@ -14,6 +14,16 @@ The release workflow reads the section matching the git tag's version and
 uses it as the GitHub Release body. If no matching section is found it falls
 back to the `## [Unreleased]` section.
 
+## [3.0.2] - 2026-10-09
+
+### Fixed
+
+- **backbone-authorization** — restoring a record now requires the permission to delete it.
+  The action enums carry no restore of their own, and `Permission::from_action_resource` had
+  mapped restore onto unrelated permissions: resetting a password (users), assigning a
+  permission (roles) or updating (permissions, settings). Whoever could reset passwords could
+  restore deleted users. Own restore permissions wait for the next breaking release.
+
 ## [3.0.1] - 2026-10-09
 
 ### Fixed
