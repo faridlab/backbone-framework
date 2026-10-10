@@ -11,6 +11,7 @@
 //! - In-memory store for testing
 
 pub mod repository;
+pub mod secret_registry;
 pub mod company_scope;
 pub mod org_scope;
 pub mod audit_context;

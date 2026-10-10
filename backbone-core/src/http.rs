@@ -420,8 +420,14 @@ fn secure<E: backbone_orm::EntityRepoMeta>(
 /// A related row an `?include=` expands, as the response carries it: camelCase keys,
 /// and the related model's secrets stripped. The row is read raw (`row_to_json`), so
 /// without this a session's `?include=user` would carry the user's password hash.
-fn related_row<E: backbone_orm::EntityRepoMeta>(relation: &str, obj: serde_json::Value) -> serde_json::Value {
-    strip_secrets(camelize_keys(obj), E::relation_secret_fields(relation))
+fn related_row<E: backbone_orm::EntityRepoMeta>(
+    relation: &str,
+    table: &str,
+    obj: serde_json::Value,
+) -> serde_json::Value {
+    let row = strip_secrets(camelize_keys(obj), E::relation_secret_fields(relation));
+    // A cross-module relation names only a table: strip what that table's entity registered.
+    strip_secrets(row, &backbone_orm::secret_registry::secret_fields_of(table))
 }
 
 fn apply_field_security(
@@ -536,7 +542,7 @@ async fn expand_includes<S, E, C, U>(
         let mut by_id: HashMap<String, serde_json::Value> = HashMap::new();
         for obj in related {
             if let Some(id) = obj.get("id").and_then(|v| v.as_str()).map(str::to_string) {
-                by_id.insert(id, related_row::<E>(rel_name, obj));
+                by_id.insert(id, related_row::<E>(rel_name, table, obj));
             }
         }
         for r in rows.iter_mut() {
@@ -1182,6 +1188,11 @@ where
     where
         S: Clone,
     {
+        // Building a generic surface for this entity records its secrets under its table, so
+        // a cross-module `?include=` of the table strips them (see `secret_registry`).
+        if let Some(table) = service.table_name() {
+            backbone_orm::secret_registry::register(table, E::secret_fields());
+        }
         use axum::{
             extract::{Path, Query},
             routing::get,
@@ -1271,6 +1282,11 @@ where
     where
         S: Clone,
     {
+        // Building a generic surface for this entity records its secrets under its table, so
+        // a cross-module `?include=` of the table strips them (see `secret_registry`).
+        if let Some(table) = service.table_name() {
+            backbone_orm::secret_registry::register(table, E::secret_fields());
+        }
         use axum::{
             extract::Path,
             routing::{delete, patch, post, put},
@@ -2495,10 +2511,13 @@ mod tests {
     #[test]
     fn an_included_row_loses_the_related_models_secrets() {
         let raw = serde_json::json!({ "id": "u1", "email": "a@b.c", "password_hash": "$argon2id$..." });
-        let out = related_row::<Secretive>("user", raw.clone());
+        let out = related_row::<Secretive>("user", "users", raw.clone());
         assert!(out.get("passwordHash").is_none(), "{out}");
         assert_eq!(out["email"], "a@b.c");
-        assert!(related_row::<Secretive>("other", raw).get("passwordHash").is_some(), "only the named relation");
+        assert!(related_row::<Secretive>("other", "others", raw.clone()).get("passwordHash").is_some(), "only the named relation");
+        // A cross-module relation: the table's entity registered its secrets.
+        backbone_orm::secret_registry::register("employee_probe.staff", &["passwordHash"]);
+        assert!(related_row::<Secretive>("staff", "employee_probe.staff", raw).get("passwordHash").is_none(), "registered table");
     }
 
     #[test]
