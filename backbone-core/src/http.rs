@@ -417,6 +417,13 @@ fn secure<E: backbone_orm::EntityRepoMeta>(
     )
 }
 
+/// A response body for a hand-written or generated route outside the generic handler (a
+/// state transition, a verb) that returns an entity's response DTO: the entity's secrets
+/// stripped, and its private fields kept from every caller, as the generic write responses do.
+pub fn without_secrets<E: backbone_orm::EntityRepoMeta, R: Serialize>(response: R) -> serde_json::Value {
+    secure::<E>(to_response_value(response), None)
+}
+
 /// A related row an `?include=` expands, as the response carries it: camelCase keys,
 /// and the related model's secrets stripped. The row is read raw (`row_to_json`), so
 /// without this a session's `?include=user` would carry the user's password hash.
@@ -2506,6 +2513,13 @@ mod tests {
     fn a_write_response_keeps_secrets_and_private_fields_from_every_caller() {
         let out = secure::<Secretive>(secret_row(), None);
         assert!(out.get("tokenHash").is_none() && out.get("hppPerUnit").is_none());
+    }
+
+    #[test]
+    fn a_routed_response_dto_loses_the_entitys_secrets() {
+        let out = without_secrets::<Secretive, _>(secret_row());
+        assert!(out.get("tokenHash").is_none() && out.get("hppPerUnit").is_none());
+        assert!(out.get("name").is_some());
     }
 
     #[test]
