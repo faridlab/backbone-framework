@@ -1,6 +1,6 @@
 [package]
 name = "backbone-graphql"
-version = "3.1.0"
+version = "3.1.1"
 edition = "2021"
 description = "GraphQL runtime support for the Backbone Framework"
 license = "MIT OR Apache-2.0"

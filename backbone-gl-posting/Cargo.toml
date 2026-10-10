@@ -1,6 +1,6 @@
 [package]
 name = "backbone-gl-posting"
-version = "3.1.0"
+version = "3.1.1"
 edition = "2021"
 description = "Wire contracts shared across Backbone producers: the GL-posting envelope + sink port, and the reconciliation edge port."
 license = "MIT OR Apache-2.0"

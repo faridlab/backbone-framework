@@ -14,6 +14,18 @@ The release workflow reads the section matching the git tag's version and
 uses it as the GitHub Release body. If no matching section is found it falls
 back to the `## [Unreleased]` section.
 
+## [3.1.1] - 2026-10-11
+
+### Fixed
+
+- **backbone-orm** — a change made in a transaction a write service opens itself is recorded
+  as the person who made the request, not `'system'`. The request's audit attribution reached
+  only the request connection and the services that relayed it by hand; every fence binder now
+  relays it too — `bind_company_on`, `bind_current_company` (also when no company is in scope,
+  as under org-unit tenancy), `bind_org_scope_on`, and the statement helpers that open their own
+  transaction. Outside a request it is a no-op, so jobs and seeds still record `'system'`.
+  Changes captured before this release keep the actor they were recorded with.
+
 ## [3.1.0] - 2026-10-10
 
 ### Security
