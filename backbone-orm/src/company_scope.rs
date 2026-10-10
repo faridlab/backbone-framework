@@ -168,16 +168,18 @@ pub fn current_company() -> Option<Uuid> {
     COMPANY.try_with(|c| *c).ok().flatten()
 }
 
-/// Set `app.company_id` transaction-locally on `conn`.
+/// Set `app.company_id` transaction-locally on `conn`, with the request's audit attribution.
 ///
 /// `set_config(_, _, true)` — the `true` scopes it to the surrounding transaction, so it is
 /// discarded on commit/rollback and cannot ride a pooled connection into the next request.
+/// The actor rides along: a transaction scoped here is one a write service opened itself, and
+/// without the relay its audit triggers would record the change as `'system'`.
 async fn bind_company(conn: &mut sqlx::PgConnection, company: Uuid) -> Result<(), sqlx::Error> {
     sqlx::query("SELECT set_config('app.company_id', $1, true)")
         .bind(company.to_string())
-        .execute(conn)
+        .execute(&mut *conn)
         .await?;
-    Ok(())
+    crate::audit_context::relay_ambient_audit_on(conn).await
 }
 
 /// Bind an EXPLICIT company onto an already-open transaction/connection.
@@ -199,10 +201,12 @@ pub async fn bind_company_on(
 /// `pool.begin()`): call this immediately after `begin()` so every statement in the transaction is
 /// company-scoped. A no-op when no company is in scope (fail-closed at the DB for fenced tables).
 pub async fn bind_current_company(conn: &mut sqlx::PgConnection) -> Result<(), sqlx::Error> {
-    if let Some(company) = current_company() {
-        bind_company(conn, company).await?;
+    match current_company() {
+        Some(company) => bind_company(conn, company).await,
+        // No company in scope (org-unit tenancy, jobs): nothing to fence here, but the change
+        // still belongs to whoever made the request.
+        None => crate::audit_context::relay_ambient_audit_on(conn).await,
     }
-    Ok(())
 }
 
 // ─── Scoped execute helpers ────────────────────────────────────────────────────

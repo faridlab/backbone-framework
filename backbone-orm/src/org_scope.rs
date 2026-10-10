@@ -401,7 +401,8 @@ pub fn current_org_scope() -> Option<OrgScope> {
 /// that manage their own transaction (mirrors
 /// [`bind_company_on`](crate::company_scope::bind_company_on)). Binds all three session
 /// variables, `app.acting_unit_id` included, so an insert inside the transaction can rely on
-/// the acting-unit DEFAULT.
+/// the acting-unit DEFAULT — and relays the request's audit attribution, so the transaction's
+/// changes are recorded as the caller's, not `'system'`.
 pub async fn bind_org_scope_on(
     conn: &mut sqlx::PgConnection,
     scope: &OrgScope,
@@ -418,7 +419,8 @@ pub async fn bind_org_scope_on(
         .bind(scope.acting_unit_id.to_string())
         .execute(&mut *conn)
         .await?;
-    Ok(())
+    // The request's actor, so the transaction's audit rows name who made the change.
+    crate::audit_context::relay_ambient_audit_on(conn).await
 }
 
 /// Statement-level org fence for a write whose row belongs to one org node — the hand-written
@@ -446,6 +448,7 @@ pub async fn execute_unit_scoped<'q>(
         .bind(unit.to_string())
         .execute(&mut *tx)
         .await?;
+    crate::audit_context::relay_ambient_audit_on(&mut tx).await?;
     let res = query.execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(res)

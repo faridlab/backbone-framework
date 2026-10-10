@@ -211,4 +211,56 @@ mod tests {
         })
         .await;
     }
+
+    async fn actor_on(conn: &mut PgConnection) -> String {
+        sqlx::query_scalar("SELECT coalesce(current_setting('app.actor', true), '')")
+            .fetch_one(conn)
+            .await
+            .expect("read actor")
+    }
+
+    /// A write service that opens its own transaction scopes it with one of the fence binders and
+    /// nothing else. Each binder must carry the request's actor too, or every change that service
+    /// makes is captured as `'system'` — what an HR module's verbs recorded before this rule.
+    #[tokio::test]
+    async fn every_fence_binder_carries_the_actor_onto_a_module_transaction() {
+        let url = std::env::var("DATABASE_URL").unwrap_or_default();
+        if url.is_empty() {
+            eprintln!("SKIP| fence binders carry the actor: DATABASE_URL unset");
+            return;
+        }
+        let pool = match sqlx::PgPool::connect(&url).await {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("SKIP| fence binders carry the actor: {e}");
+                return;
+            }
+        };
+        let audit = RequestAuditContext::new("binder-probe");
+        with_request_audit(audit, async {
+            // An explicit company, the common shape in hand-written write services.
+            let mut tx = pool.begin().await.expect("begin");
+            crate::company_scope::bind_company_on(&mut tx, uuid::Uuid::nil())
+                .await
+                .expect("bind company");
+            assert_eq!(actor_on(&mut tx).await, "binder-probe");
+            tx.rollback().await.expect("rollback");
+
+            // The current company — none here, as under org-unit tenancy: still attributed.
+            let mut tx = pool.begin().await.expect("begin");
+            crate::company_scope::bind_current_company(&mut tx)
+                .await
+                .expect("bind current company");
+            assert_eq!(actor_on(&mut tx).await, "binder-probe");
+            tx.rollback().await.expect("rollback");
+
+            // An org scope.
+            let scope = crate::org_scope::OrgScope::for_company_unit(uuid::Uuid::nil());
+            let mut tx = pool.begin().await.expect("begin");
+            crate::org_scope::bind_org_scope_on(&mut tx, &scope).await.expect("bind org scope");
+            assert_eq!(actor_on(&mut tx).await, "binder-probe");
+            tx.rollback().await.expect("rollback");
+        })
+        .await;
+    }
 }
