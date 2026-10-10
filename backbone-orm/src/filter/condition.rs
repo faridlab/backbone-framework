@@ -46,6 +46,16 @@ impl FilterCondition {
             )
     }
 
+    /// Whether this condition's cast names a user-defined type without its schema (an enum such
+    /// as `task_status` from a generated hint). Such a name only resolves when the type's schema
+    /// is on the search path, which a tenant database need not have; the caller qualifies it from
+    /// the catalog before the query runs.
+    pub fn needs_type_qualification(&self) -> bool {
+        self.column_type
+            .as_deref()
+            .is_some_and(|t| !t.contains('.') && !is_builtin_type(t))
+    }
+
     /// Set the logical operator
     pub fn with_logical(mut self, logical: FilterLogical) -> Self {
         self.logical = logical;
@@ -279,4 +289,45 @@ mod in_cast_tests {
         let sql = c.build_sql_without_prefix(&mut idx);
         assert!(sql.contains("IN ($1)") && !sql.contains("::"), "{sql}");
     }
+}
+
+/// A type PostgreSQL resolves anywhere, with no schema: the casts filters use for built-in
+/// columns. Anything else named bare is a user-defined type that needs its schema.
+pub(crate) fn is_builtin_type(type_name: &str) -> bool {
+    matches!(
+        type_name.trim().to_ascii_lowercase().as_str(),
+        "uuid"
+            | "boolean"
+            | "bool"
+            | "smallint"
+            | "int2"
+            | "integer"
+            | "int"
+            | "int4"
+            | "bigint"
+            | "int8"
+            | "numeric"
+            | "decimal"
+            | "real"
+            | "float4"
+            | "double precision"
+            | "float8"
+            | "date"
+            | "interval"
+            | "inet"
+            | "cidr"
+            | "macaddr"
+            | "time"
+            | "timetz"
+            | "timestamp"
+            | "timestamptz"
+            | "text"
+            | "varchar"
+            | "character varying"
+            | "char"
+            | "character"
+            | "json"
+            | "jsonb"
+            | "bytea"
+    )
 }

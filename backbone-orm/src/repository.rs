@@ -118,6 +118,10 @@ pub struct PaginationInfo {
     pub count_mode: String,
 }
 
+/// Below this many rows (by the planner's estimate) an estimated total is counted exactly
+/// instead: the count is cheap, and a planner estimate is least reliable on small sets.
+pub const EXACT_COUNT_BELOW: u64 = 10_000;
+
 fn default_count_mode() -> String {
     "exact".to_string()
 }
@@ -341,7 +345,7 @@ impl<T: for<'a> FromRow<'a, PgRow> + Send + Unpin> PostgresRepository<T> {
         allowed_fields: Option<&HashSet<String>>,
     ) -> anyhow::Result<crate::QueryFilter> {
         let query_filter = parse_query_filter(filters, column_types, allowed_fields)?;
-        if !query_filter.has_uncast_value_conditions() {
+        if !query_filter.needs_catalog_types() {
             return Ok(query_filter);
         }
         let catalog = catalog_filter_casts(&self.pool, &self.table_name).await?;
@@ -456,24 +460,20 @@ impl<T: for<'a> FromRow<'a, PgRow> + Send + Unpin> PostgresRepository<T> {
 
         // The total: exact in page mode (today's behaviour), the planner's
         // estimate when asked, nothing on a cursor walk that did not ask.
+        // Asked for an estimate, a set the planner expects to be small is
+        // counted all the same: the count is cheap there and the estimate is
+        // at its least reliable, so "about 12" never stands in for 10.
         let (total, count_mode) = if query_filter.estimate_total {
-            (
-                self.estimate_filtered_rows(&where_clause, &filter_params).await?,
-                "estimate",
-            )
+            let estimate = self.estimate_filtered_rows(&where_clause, &filter_params).await?;
+            if estimate <= EXACT_COUNT_BELOW {
+                (self.count_filtered_rows(&where_clause, &filter_params).await?, "exact")
+            } else {
+                (estimate, "estimate")
+            }
         } else if cursor_walk {
             (0u64, "none")
         } else {
-            let count_query = format!("SELECT COUNT(*) FROM {}{}", self.table_name, where_clause);
-            let mut count_query_builder = sqlx::query_scalar::<_, i64>(&count_query);
-            for param in &filter_params {
-                count_query_builder = count_query_builder.bind(param);
-            }
-            (
-                crate::company_scope::fetch_one_scalar_scoped(&self.pool, count_query_builder)
-                    .await? as u64,
-                "exact",
-            )
+            (self.count_filtered_rows(&where_clause, &filter_params).await?, "exact")
         };
 
         // The page: limit+1 rows so has_more is known without a count. The
@@ -556,6 +556,21 @@ impl<T: for<'a> FromRow<'a, PgRow> + Send + Unpin> PostgresRepository<T> {
     /// The planner's row estimate for a filtered read, from EXPLAIN. The
     /// exact figure stays the separate count endpoint; this exists because
     /// counting a hot filtered set is a scan of all of it.
+    /// The exact number of rows the filter matches: a scan of the whole filtered set.
+    async fn count_filtered_rows(
+        &self,
+        where_clause: &str,
+        filter_params: &[String],
+    ) -> anyhow::Result<u64> {
+        let count_query = format!("SELECT COUNT(*) FROM {}{}", self.table_name, where_clause);
+        let mut count_query_builder = sqlx::query_scalar::<_, i64>(&count_query);
+        for param in filter_params {
+            count_query_builder = count_query_builder.bind(param);
+        }
+        Ok(crate::company_scope::fetch_one_scalar_scoped(&self.pool, count_query_builder).await?
+            as u64)
+    }
+
     async fn estimate_filtered_rows(
         &self,
         where_clause: &str,
@@ -592,8 +607,9 @@ impl<T: for<'a> FromRow<'a, PgRow> + Send + Unpin> PostgresRepository<T> {
         };
         let mut casts: Vec<Option<String>> = Vec::with_capacity(sorts.len());
         for (field, _) in sorts {
-            let row: Option<(String, String)> = sqlx::query_as(
-                "SELECT data_type, coalesce(udt_name, '') FROM information_schema.columns \
+            let row: Option<(String, String, String)> = sqlx::query_as(
+                "SELECT data_type, coalesce(udt_name, ''), coalesce(udt_schema, '') \
+                   FROM information_schema.columns \
                   WHERE table_schema = $1 AND table_name = $2 AND column_name = $3",
             )
             .bind(&schema)
@@ -601,7 +617,9 @@ impl<T: for<'a> FromRow<'a, PgRow> + Send + Unpin> PostgresRepository<T> {
             .bind(field)
             .fetch_optional(&self.pool)
             .await?;
-            let cast = row.map(|(data_type, udt)| cast_suffix(&data_type, &udt)).flatten();
+            let cast = row
+                .map(|(data_type, udt, udt_schema)| cast_suffix(&data_type, &udt, &udt_schema))
+                .flatten();
             casts.push(cast);
         }
         Ok(casts)
@@ -669,7 +687,7 @@ impl<T: for<'a> FromRow<'a, PgRow> + Send + Unpin> PostgresRepository<T> {
 
 /// The placeholder cast for a column type, or None when a bare text bind
 /// compares correctly.
-fn cast_suffix(data_type: &str, udt_name: &str) -> Option<String> {
+fn cast_suffix(data_type: &str, udt_name: &str, udt_schema: &str) -> Option<String> {
     match data_type {
         "uuid" => Some("uuid".into()),
         "numeric" => Some("numeric".into()),
@@ -681,8 +699,12 @@ fn cast_suffix(data_type: &str, udt_name: &str) -> Option<String> {
         "timestamp with time zone" => Some("timestamptz".into()),
         "timestamp without time zone" => Some("timestamp".into()),
         // An enum: bind text, cast to the enum's own name so the comparison
-        // runs in the enum's ordering.
-        "USER-DEFINED" if !udt_name.is_empty() => Some(udt_name.to_string()),
+        // runs in the enum's ordering — schema-qualified, so it resolves on a
+        // tenant whose search path does not hold the module's schema.
+        "USER-DEFINED" if !udt_name.is_empty() => Some(match udt_schema {
+            "" | "public" | "pg_catalog" => udt_name.to_string(),
+            schema => format!("{schema}.{udt_name}"),
+        }),
         _ => None,
     }
 }
@@ -738,13 +760,21 @@ async fn catalog_filter_casts(
 }
 
 /// The generated hints, with the catalog's casts filling every column they do not name. A hint
-/// keeps deciding its own column, so nothing that compares correctly today changes.
+/// keeps deciding its own column, so nothing that compares correctly today changes — except that
+/// a hint naming an enum without its schema (`task_status`) gives way to the catalog's qualified
+/// name for the same type (`lifecycle.task_status`), which resolves whatever the search path.
 fn merge_filter_casts(
     hints: &HashMap<String, String>,
     mut catalog: HashMap<String, String>,
 ) -> HashMap<String, String> {
     for (column, cast) in hints {
-        catalog.insert(column.clone(), cast.clone());
+        let qualified_same_type = catalog
+            .get(column)
+            .and_then(|c| c.rsplit_once('.'))
+            .is_some_and(|(_, name)| name.trim_matches('"') == cast.as_str());
+        if !qualified_same_type {
+            catalog.insert(column.clone(), cast.clone());
+        }
     }
     catalog
 }
@@ -1395,10 +1425,49 @@ mod filter_cast_tests {
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
         let merged = merge_filter_casts(&hints, catalog);
-        assert_eq!(merged["status"], "approval_status");
+        // The bare enum hint gives way to the catalog's qualified name for the same type: a
+        // tenant's search path need not hold the module's schema.
+        assert_eq!(merged["status"], "approvals.approval_status");
+        assert_eq!(merged["id"], "uuid");
         assert_eq!(merged["folded"], "boolean");
         assert_eq!(merged["requested_by"], "uuid");
         assert_eq!(merged.len(), 4);
+    }
+
+    #[test]
+    fn a_hint_for_another_type_still_decides_its_column() {
+        let hints: HashMap<String, String> =
+            [("amount", "numeric")].iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let catalog: HashMap<String, String> =
+            [("amount", "real")].iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        assert_eq!(merge_filter_casts(&hints, catalog)["amount"], "numeric");
+    }
+
+    #[test]
+    fn a_filter_on_a_bare_enum_hint_reads_the_catalog_to_qualify_it() {
+        let hints: HashMap<String, String> = [("id", "uuid"), ("status", "task_status")]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let needs = |pairs: &[(&str, &str)]| {
+            let f: HashMap<String, String> =
+                pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+            parse_query_filter(&f, &hints, None).unwrap().needs_catalog_types()
+        };
+        assert!(needs(&[("status[in]", "done,skipped")]));
+        assert!(needs(&[("status[eq]", "done")]));
+        // A uuid hint resolves anywhere; nothing to read.
+        assert!(!needs(&[("id[in]", "a,b")]));
+    }
+
+    #[test]
+    fn a_sort_on_an_enum_casts_to_its_schema_qualified_name() {
+        assert_eq!(
+            cast_suffix("USER-DEFINED", "task_status", "lifecycle").as_deref(),
+            Some("lifecycle.task_status")
+        );
+        assert_eq!(cast_suffix("USER-DEFINED", "mood", "public").as_deref(), Some("mood"));
+        assert_eq!(cast_suffix("uuid", "uuid", "pg_catalog").as_deref(), Some("uuid"));
     }
 
     #[test]

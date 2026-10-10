@@ -156,3 +156,67 @@ async fn a_generated_hint_still_decides_the_cast_for_its_column() {
 
     sqlx::raw_sql(&format!("DROP SCHEMA {schema} CASCADE")).execute(&pool).await.unwrap();
 }
+
+/// A generated hint names an enum without its schema (`stage_kind`), as the generator writes
+/// it. On a database whose search path does not hold the module's schema — a tenant's — the
+/// bare name does not resolve: `type "stage_kind" does not exist`. The filter must qualify it.
+#[tokio::test]
+async fn a_bare_enum_hint_resolves_off_the_search_path() {
+    let Some(dsn) = admin_dsn() else {
+        eprintln!("skipping: BACKBONE_ORM_RLS_DSN not set");
+        return;
+    };
+    let pool = PgPoolOptions::new().max_connections(2).connect(&dsn).await.expect("connect");
+    // A fresh schema is never on the search path.
+    let schema = format!("orm_cast_{}", &Uuid::new_v4().simple().to_string()[..8]);
+    setup(&pool, &schema).await;
+    let repo: PostgresRepository<Stage> =
+        PostgresRepository::new(pool.clone(), &format!("{schema}.stage"));
+
+    let mut hints = HashMap::new();
+    hints.insert("id".to_string(), "uuid".to_string());
+    hints.insert("kind".to_string(), "stage_kind".to_string());
+    for (filter, value, want) in [
+        ("kind[eq]", "Closed", vec!["Hired", "Offer"]),
+        ("kind[in]", "closed,open_call", vec!["Hired", "Offer", "Screening"]),
+    ] {
+        let mut filters = HashMap::new();
+        filters.insert(filter.to_string(), value.to_string());
+        let page = repo
+            .list_with_filters(PaginationParams::new(1, 50), &filters, &hints, &[])
+            .await
+            .unwrap_or_else(|e| panic!("{filter}={value} was refused: {e:#}"));
+        let mut got: Vec<String> = page.data.into_iter().map(|s| s.name).collect();
+        got.sort();
+        assert_eq!(got, want, "{filter}={value}");
+    }
+
+    sqlx::raw_sql(&format!("DROP SCHEMA {schema} CASCADE")).execute(&pool).await.unwrap();
+}
+
+/// Asked for an estimated total, a small set is counted exactly all the same: the planner's
+/// figure is at its least reliable there, and the count costs nothing.
+#[tokio::test]
+async fn an_estimate_on_a_small_set_is_an_exact_count() {
+    let Some(dsn) = admin_dsn() else {
+        eprintln!("skipping: BACKBONE_ORM_RLS_DSN not set");
+        return;
+    };
+    let pool = PgPoolOptions::new().max_connections(2).connect(&dsn).await.expect("connect");
+    let schema = format!("orm_cast_{}", &Uuid::new_v4().simple().to_string()[..8]);
+    setup(&pool, &schema).await;
+    let repo: PostgresRepository<Stage> =
+        PostgresRepository::new(pool.clone(), &format!("{schema}.stage"));
+
+    let mut filters = HashMap::new();
+    filters.insert("estimate".to_string(), "1".to_string());
+    filters.insert("folded[eq]".to_string(), "true".to_string());
+    let page = repo
+        .list_with_filters(PaginationParams::new(1, 50), &filters, &HashMap::new(), &[])
+        .await
+        .expect("an estimated list");
+    assert_eq!(page.pagination.total, 2);
+    assert_eq!(page.pagination.count_mode, "exact");
+
+    sqlx::raw_sql(&format!("DROP SCHEMA {schema} CASCADE")).execute(&pool).await.unwrap();
+}

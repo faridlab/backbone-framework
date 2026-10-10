@@ -144,6 +144,14 @@ impl QueryFilter {
         self.conditions.iter().any(FilterCondition::needs_value_cast)
     }
 
+    /// Whether the table's catalog types must be read before this filter runs: a comparison has
+    /// no cast yet, or a cast names a user-defined type without its schema.
+    pub fn needs_catalog_types(&self) -> bool {
+        self.conditions
+            .iter()
+            .any(|c| c.needs_value_cast() || c.needs_type_qualification())
+    }
+
     /// Check if has any conditions
     pub fn has_conditions(&self) -> bool {
         !self.conditions.is_empty() || self.search.is_some()
