@@ -14,6 +14,23 @@ The release workflow reads the section matching the git tag's version and
 uses it as the GitHub Release body. If no matching section is found it falls
 back to the `## [Unreleased]` section.
 
+## [3.2.0] - 2026-10-11
+
+### Security
+
+- **backbone-core** — a related row that `?include=` hydrates across modules loses its
+  table's secrets too. A cross-module `@include` names only a table, so the generator cannot
+  know the target's `@sensitive` fields; each generic route builder now records its entity's
+  secret fields under its table (`backbone_orm::secret_registry`), and the expansion strips
+  what the included table recorded.
+
+### Added
+
+- **backbone-core** — `http::without_secrets::<E, _>(response)`: the response body a route
+  outside the generic handler (a state transition, a verb) serves for an entity's response DTO,
+  with the entity's secrets stripped and its private fields kept from every caller.
+- **backbone-orm** — `secret_registry::{register, secret_fields_of}`.
+
 ## [3.1.1] - 2026-10-11
 
 ### Fixed
