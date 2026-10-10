@@ -1,6 +1,6 @@
 [package]
 name = "backbone-jobs"
-version = "3.0.3"
+version = "3.1.0"
 edition = "2021"
 description = "Job scheduling and cron management for the Backbone Framework"
 license = "MIT OR Apache-2.0"
@@ -38,7 +38,7 @@ tracing-futures = "0.2"
 cron = "0.12"
 
 # Backbone dependencies
-backbone-queue = { path = "../backbone-queue", version = "3.0.3" }
+backbone-queue = { path = "../backbone-queue", version = "3.1.0" }
 
 # Utility
 futures = "0.3"

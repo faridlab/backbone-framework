@@ -14,6 +14,29 @@ The release workflow reads the section matching the git tag's version and
 uses it as the GitHub Release body. If no matching section is found it falls
 back to the `## [Unreleased]` section.
 
+## [3.1.0] - 2026-10-10
+
+### Security
+
+- **backbone-core** — a secret field is never served by a generic route, to any caller. An
+  entity's `@sensitive` and `@hashed` fields (`EntityRepoMeta::secret_fields`) are stripped from
+  every list, get and trash response, and from every create, update, patch, bulk, upsert and
+  restore response, which previously returned the whole record. Platform callers and owners no
+  longer receive them either: they shared the `@private` rule, which serves private fields to
+  both. Write responses now also keep `@private` fields from every caller.
+- **backbone-core** — a related row that `?include=` hydrates loses the related model's secrets
+  (`EntityRepoMeta::relation_secret_fields`). The row is read raw, so a session's
+  `?include=user` carried the user's password hash.
+- **backbone-core** — a list, count or aggregate that names a secret field as a filter, sort,
+  search column or aggregate (`token_hash[startwith]=…`, `orderby=token_hash`, `min=…`) is
+  refused with 400. A substring match recovers a digest one character at a time, and `min=`
+  returns one outright.
+
+### Added
+
+- **backbone-orm** — `EntityRepoMeta::secret_fields` and `EntityRepoMeta::relation_secret_fields`,
+  both defaulting to none, which the schema generator emits from `@sensitive` and `@hashed`.
+
 ## [3.0.3] - 2026-10-10
 
 ### Fixed
