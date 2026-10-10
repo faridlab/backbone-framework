@@ -14,6 +14,24 @@ The release workflow reads the section matching the git tag's version and
 uses it as the GitHub Release body. If no matching section is found it falls
 back to the `## [Unreleased]` section.
 
+## [3.0.3] - 2026-10-10
+
+### Fixed
+
+- **backbone-orm** — a filter or sort on an enum column no longer fails on a tenant whose
+  search path lacks the module's schema. Generated `column_types()` hints name enums without
+  their schema (`task_status`), and when every compared column had a hint the catalog was never
+  read, so the bare name reached SQL: `type "task_status" does not exist`. A cast naming a
+  user-defined type without its schema now has the catalog read, and the catalog's qualified
+  name (`lifecycle.task_status`) wins over a bare hint for the same type; the cursor sort cast
+  qualifies enums the same way.
+
+### Changed
+
+- **backbone-orm** — asked for an estimated total (`estimate=1`), a set the planner expects to
+  hold under 10,000 rows (`EXACT_COUNT_BELOW`) is counted exactly: the count is cheap there and
+  the planner's figure least reliable, so a client can ask for an estimate on every list.
+
 ## [3.0.2] - 2026-10-09
 
 ### Fixed
