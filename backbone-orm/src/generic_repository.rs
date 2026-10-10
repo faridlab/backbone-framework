@@ -75,6 +75,19 @@ pub trait EntityRepoMeta {
         &[]
     }
 
+    /// Response fields (camelCase) that never leave the server (`@sensitive`): no
+    /// caller is served them, a platform caller or the row's owner included.
+    fn secret_fields() -> &'static [&'static str] {
+        &[]
+    }
+
+    /// The `@sensitive` fields (camelCase response keys) of the model a to-one
+    /// relation points at, stripped from the related row an `?include=` expands.
+    /// Keyed by the relation name of [`relations`](Self::relations). Default: none.
+    fn relation_secret_fields(_relation: &str) -> &'static [&'static str] {
+        &[]
+    }
+
     /// The response field (camelCase) holding the owner/company id (`@owner`),
     /// compared against the caller's access scope to decide private-field
     /// visibility. `None` = the entity has no owner concept.

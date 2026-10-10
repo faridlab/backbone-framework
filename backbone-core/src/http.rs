@@ -236,6 +236,44 @@ fn aggregate_spec(params: &ListQueryParams) -> backbone_orm::repository::Aggrega
     }
 }
 
+/// The secret field (`@sensitive`, `@hashed`) a list-style request names as a column,
+/// if any: as a filter (`token_hash=…`, `token_hash[startwith]=…`), a sort (`orderby`,
+/// `sort`, `sort_by`, `orderby[…]`), a search column (`searchFields`), or an aggregate's
+/// group or reduction. Each answers a question about the secret's value — a prefix match
+/// recovers a digest one character at a time, and `min=` returns one outright — so the
+/// request is refused rather than the column quietly dropped.
+fn named_secret(params: &ListQueryParams, secret_fields: &[&str]) -> Option<String> {
+    if secret_fields.is_empty() {
+        return None;
+    }
+    let secrets: Vec<String> = secret_fields.iter().map(|f| camel_to_snake_case(f)).collect();
+    const COLUMN_LISTS: [&str; 10] = [
+        "orderby", "sort", "searchfields", "search_fields", "group_by", "sum", "avg", "min", "max", "group_label",
+    ];
+    let mut names: Vec<String> = Vec::new();
+    for (key, value) in &params.filters {
+        match key.find('[') {
+            Some(open) => {
+                names.push(key[..open].to_string());
+                names.push(key[open + 1..].trim_end_matches(']').to_string());
+            }
+            None => names.push(key.clone()),
+        }
+        if COLUMN_LISTS.contains(&key.to_ascii_lowercase().as_str()) {
+            names.extend(value.split(',').map(|v| v.trim().trim_start_matches('-').to_string()));
+        }
+    }
+    names.extend(params.sort_by.iter().cloned());
+    names
+        .into_iter()
+        .find(|n| secrets.contains(&camel_to_snake_case(n.trim())))
+}
+
+/// The answer to a request that names a secret field (see [`named_secret`]).
+fn secret_named_message(field: &str) -> String {
+    format!("'{field}' is a secret field: it cannot be filtered, sorted, searched or aggregated")
+}
+
 /// Reduce a list-style query into the filters the repository should actually see.
 ///
 /// `fields`/`include`/`with` shape the response, not the row set, so they are
@@ -351,6 +389,41 @@ impl AccessScope {
 /// `Platform` → all; `Company(id)` → only when the row's `@owner` field equals `id`;
 /// absent scope → treated as non-owner (fail-closed). Runs BEFORE sparse projection
 /// so the security ceiling always beats a `?fields=` request.
+/// Strip the fields that never leave the server (`@sensitive`: password and token
+/// digests, bearer tokens, credentials), whoever asks. Unlike private fields there is
+/// no reader they are kept for: a platform caller or the row's owner does not get them
+/// either.
+fn strip_secrets(mut value: serde_json::Value, secret_fields: &[&str]) -> serde_json::Value {
+    if let serde_json::Value::Object(map) = &mut value {
+        for f in secret_fields {
+            map.remove(*f);
+        }
+    }
+    value
+}
+
+/// The shape every generic route serves one entity in: its secrets stripped for
+/// everyone, then its private fields for anyone but the owner or a platform caller.
+/// Write responses pass no scope, so they keep private fields from every caller.
+fn secure<E: backbone_orm::EntityRepoMeta>(
+    value: serde_json::Value,
+    scope: Option<&AccessScope>,
+) -> serde_json::Value {
+    apply_field_security(
+        strip_secrets(value, E::secret_fields()),
+        scope,
+        E::private_fields(),
+        E::owner_field(),
+    )
+}
+
+/// A related row an `?include=` expands, as the response carries it: camelCase keys,
+/// and the related model's secrets stripped. The row is read raw (`row_to_json`), so
+/// without this a session's `?include=user` would carry the user's password hash.
+fn related_row<E: backbone_orm::EntityRepoMeta>(relation: &str, obj: serde_json::Value) -> serde_json::Value {
+    strip_secrets(camelize_keys(obj), E::relation_secret_fields(relation))
+}
+
 fn apply_field_security(
     mut value: serde_json::Value,
     scope: Option<&AccessScope>,
@@ -463,7 +536,7 @@ async fn expand_includes<S, E, C, U>(
         let mut by_id: HashMap<String, serde_json::Value> = HashMap::new();
         for obj in related {
             if let Some(id) = obj.get("id").and_then(|v| v.as_str()).map(str::to_string) {
-                by_id.insert(id, camelize_keys(obj));
+                by_id.insert(id, related_row::<E>(rel_name, obj));
             }
         }
         for r in rows.iter_mut() {
@@ -1329,6 +1402,12 @@ where
         if let Some(err) = pagination_depth_error(params.page, params.limit) {
             return (StatusCode::BAD_REQUEST, Json(PaginatedApiResponse::<serde_json::Value>::error(err)));
         }
+        if let Some(field) = named_secret(&params, E::secret_fields()) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(PaginatedApiResponse::<serde_json::Value>::error(secret_named_message(&field))),
+            );
+        }
 
         // Sparse fieldset (`?fields=a,b,c`) is response-shaping, not a filter — read it,
         // then drop the reserved keys so they're never passed to the repository.
@@ -1349,12 +1428,7 @@ where
                 let mut rows: Vec<serde_json::Value> = entities
                     .into_iter()
                     .map(|e| {
-                        apply_field_security(
-                            to_response_value(R::from(e)),
-                            scope.as_ref(),
-                            E::private_fields(),
-                            E::owner_field(),
-                        )
+                        secure::<E>(to_response_value(R::from(e)), scope.as_ref())
                     })
                     .collect();
                 expand_includes::<S, E, C, U>(&*handler.service, &mut rows, &includes).await;
@@ -1384,16 +1458,16 @@ where
 
         match handler.service.create(dto).await {
             Ok(entity) => {
-                let response: R = entity.into();
+                let response = secure::<E>(to_response_value(R::from(entity)), None);
                 (StatusCode::CREATED, Json(ApiResponse::ok(response)))
             }
             Err(e) if S::violations_of(&e).is_some() => write_error(S::violations_of(&e), &e, StatusCode::BAD_REQUEST),
             Err(e) => {
                 let error_str = e.to_string();
                 if error_str.contains("conflict") || error_str.contains("already exists") {
-                    (StatusCode::CONFLICT, Json(ApiResponse::<R>::error(error_str)))
+                    (StatusCode::CONFLICT, Json(ApiResponse::<serde_json::Value>::error(error_str)))
                 } else {
-                    (StatusCode::BAD_REQUEST, Json(ApiResponse::<R>::error(error_str)))
+                    (StatusCode::BAD_REQUEST, Json(ApiResponse::<serde_json::Value>::error(error_str)))
                 }
             }
         }
@@ -1413,12 +1487,7 @@ where
 
         match handler.service.get_by_id(&id).await {
             Ok(Some(entity)) => {
-                let secured = apply_field_security(
-                    to_response_value(R::from(entity)),
-                    scope.as_ref(),
-                    E::private_fields(),
-                    E::owner_field(),
-                );
+                let secured = secure::<E>(to_response_value(R::from(entity)), scope.as_ref());
                 let mut rows = [secured];
                 expand_includes::<S, E, C, U>(&*handler.service, &mut rows, &includes).await;
                 let [secured] = rows;
@@ -1443,11 +1512,11 @@ where
 
         match handler.service.update(&id, dto).await {
             Ok(Some(entity)) => {
-                let response: R = entity.into();
+                let response = secure::<E>(to_response_value(R::from(entity)), None);
                 (StatusCode::OK, Json(ApiResponse::ok(response)))
             }
             Ok(None) => {
-                (StatusCode::NOT_FOUND, Json(ApiResponse::<R>::not_found(S::entity_name(), &id)))
+                (StatusCode::NOT_FOUND, Json(ApiResponse::<serde_json::Value>::not_found(S::entity_name(), &id)))
             }
             Err(e) => {
                 write_error(S::violations_of(&e), &e, StatusCode::BAD_REQUEST)
@@ -1479,11 +1548,11 @@ where
 
         match handler.service.partial_update(&id, fields).await {
             Ok(Some(entity)) => {
-                let response: R = entity.into();
+                let response = secure::<E>(to_response_value(R::from(entity)), None);
                 (StatusCode::OK, Json(ApiResponse::ok(response)))
             }
             Ok(None) => {
-                (StatusCode::NOT_FOUND, Json(ApiResponse::<R>::not_found(S::entity_name(), &id)))
+                (StatusCode::NOT_FOUND, Json(ApiResponse::<serde_json::Value>::not_found(S::entity_name(), &id)))
             }
             Err(e) => {
                 write_error(S::violations_of(&e), &e, StatusCode::BAD_REQUEST)
@@ -1520,7 +1589,10 @@ where
 
         match handler.service.bulk_create(items).await {
             Ok(entities) => {
-                let result_items: Vec<R> = entities.into_iter().map(R::from).collect();
+                let result_items: Vec<serde_json::Value> = entities
+                    .into_iter()
+                    .map(|e| secure::<E>(to_response_value(R::from(e)), None))
+                    .collect();
                 let total = result_items.len();
                 let response = BulkResponse {
                     items: result_items,
@@ -1563,11 +1635,14 @@ where
         use axum::{http::StatusCode, Json};
 
         if let Some(err) = batch_size_error(req.ids.len()) {
-            return (StatusCode::BAD_REQUEST, Json(ApiResponse::<BulkResponse<R>>::error(err)));
+            return (StatusCode::BAD_REQUEST, Json(ApiResponse::<BulkResponse<serde_json::Value>>::error(err)));
         }
         match handler.service.bulk_restore(req.ids).await {
             Ok(entities) => {
-                let items: Vec<R> = entities.into_iter().map(R::from).collect();
+                let items: Vec<serde_json::Value> = entities
+                    .into_iter()
+                    .map(|e| secure::<E>(to_response_value(R::from(e)), None))
+                    .collect();
                 let total = items.len();
                 (StatusCode::OK, Json(ApiResponse::ok(BulkResponse { items, total, failed: 0, errors: vec![] })))
             }
@@ -1614,12 +1689,15 @@ where
         use axum::{http::StatusCode, Json};
 
         if let Some(err) = batch_size_error(items.len()) {
-            return (StatusCode::BAD_REQUEST, Json(ApiResponse::<BulkResponse<R>>::error(err)));
+            return (StatusCode::BAD_REQUEST, Json(ApiResponse::<BulkResponse<serde_json::Value>>::error(err)));
         }
         let items: Vec<(String, U)> = items.into_iter().map(|it| (it.id, it.data)).collect();
         match handler.service.bulk_update(items).await {
             Ok(entities) => {
-                let items: Vec<R> = entities.into_iter().map(R::from).collect();
+                let items: Vec<serde_json::Value> = entities
+                    .into_iter()
+                    .map(|e| secure::<E>(to_response_value(R::from(e)), None))
+                    .collect();
                 let total = items.len();
                 (StatusCode::OK, Json(ApiResponse::ok(BulkResponse { items, total, failed: 0, errors: vec![] })))
             }
@@ -1635,7 +1713,7 @@ where
 
         let items = req.into_items();
         if let Some(err) = batch_size_error(items.len()) {
-            return (StatusCode::BAD_REQUEST, Json(ApiResponse::<BulkResponse<R>>::error(err)));
+            return (StatusCode::BAD_REQUEST, Json(ApiResponse::<BulkResponse<serde_json::Value>>::error(err)));
         }
         // Normalize patch keys to snake_case (mirrors partial_update_handler).
         let items: Vec<(String, HashMap<String, serde_json::Value>)> = items
@@ -1650,7 +1728,10 @@ where
             .collect();
         match handler.service.bulk_partial_update(items).await {
             Ok(entities) => {
-                let items: Vec<R> = entities.into_iter().map(R::from).collect();
+                let items: Vec<serde_json::Value> = entities
+                    .into_iter()
+                    .map(|e| secure::<E>(to_response_value(R::from(e)), None))
+                    .collect();
                 let total = items.len();
                 (StatusCode::OK, Json(ApiResponse::ok(BulkResponse { items, total, failed: 0, errors: vec![] })))
             }
@@ -1666,7 +1747,7 @@ where
 
         match handler.service.upsert(dto).await {
             Ok(entity) => {
-                let response: R = entity.into();
+                let response = secure::<E>(to_response_value(R::from(entity)), None);
                 (StatusCode::OK, Json(ApiResponse::ok(response)))
             }
             Err(e) => {
@@ -1685,6 +1766,12 @@ where
         if let Some(err) = pagination_depth_error(params.page, params.limit) {
             return (StatusCode::BAD_REQUEST, Json(PaginatedApiResponse::<serde_json::Value>::error(err)));
         }
+        if let Some(field) = named_secret(&params, E::secret_fields()) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(PaginatedApiResponse::<serde_json::Value>::error(secret_named_message(&field))),
+            );
+        }
 
         let fields = sparse_fields(&params.filters);
         let includes = include_relations(&params.filters);
@@ -1698,12 +1785,7 @@ where
                 let mut rows: Vec<serde_json::Value> = entities
                     .into_iter()
                     .map(|e| {
-                        apply_field_security(
-                            to_response_value(R::from(e)),
-                            scope.as_ref(),
-                            E::private_fields(),
-                            E::owner_field(),
-                        )
+                        secure::<E>(to_response_value(R::from(e)), scope.as_ref())
                     })
                     .collect();
                 expand_includes::<S, E, C, U>(&*handler.service, &mut rows, &includes).await;
@@ -1733,11 +1815,11 @@ where
 
         match handler.service.restore(&id).await {
             Ok(Some(entity)) => {
-                let response: R = entity.into();
+                let response = secure::<E>(to_response_value(R::from(entity)), None);
                 (StatusCode::OK, Json(ApiResponse::success_with_message(response, "Entity restored successfully")))
             }
             Ok(None) => {
-                (StatusCode::NOT_FOUND, Json(ApiResponse::<R>::not_found(S::entity_name(), &id)))
+                (StatusCode::NOT_FOUND, Json(ApiResponse::<serde_json::Value>::not_found(S::entity_name(), &id)))
             }
             Err(e) => {
                 write_error(S::violations_of(&e), &e, StatusCode::BAD_REQUEST)
@@ -1777,12 +1859,7 @@ where
 
         match handler.service.get_deleted_by_id(&id).await {
             Ok(Some(entity)) => {
-                let secured = apply_field_security(
-                    to_response_value(R::from(entity)),
-                    scope.as_ref(),
-                    E::private_fields(),
-                    E::owner_field(),
-                );
+                let secured = secure::<E>(to_response_value(R::from(entity)), scope.as_ref());
                 let value = project_sparse(secured, &fields);
                 (StatusCode::OK, Json(ApiResponse::ok(value)))
             }
@@ -1842,6 +1919,12 @@ where
         // An unfiltered request still answers the whole-table count, which is
         // what every existing caller expects; a filtered one now answers the
         // question it actually asked.
+        if let Some(field) = named_secret(&params, E::secret_fields()) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::<serde_json::Value>::error(secret_named_message(&field))),
+            );
+        }
         match handler.service.count_active_filtered(repository_filters(&params)).await {
             Ok(count) => {
                 (StatusCode::OK, Json(ApiResponse::ok(serde_json::json!({ "count": count }))))
@@ -1870,6 +1953,12 @@ where
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
 
+        if let Some(field) = named_secret(&params, E::secret_fields()) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::<serde_json::Value>::error(secret_named_message(&field))),
+            );
+        }
         let spec = aggregate_spec(&params);
         match handler.service.aggregate(&spec, aggregate_filters(&params)).await {
             Ok(result) => {
@@ -2328,6 +2417,89 @@ mod tests {
         serde_json::json!({ "id": "1", "providerId": owner_a().to_string(), "name": "n", "hppPerUnit": 5 })
     }
     const PRIV: &[&str] = &["hppPerUnit"];
+
+    /// An entity with a secret, a private field and a relation to a model with a secret.
+    struct Secretive;
+    impl backbone_orm::EntityRepoMeta for Secretive {
+        fn column_types() -> HashMap<String, String> {
+            HashMap::new()
+        }
+        fn search_fields() -> &'static [&'static str] {
+            &[]
+        }
+        fn secret_fields() -> &'static [&'static str] {
+            &["tokenHash"]
+        }
+        fn private_fields() -> &'static [&'static str] {
+            PRIV
+        }
+        fn owner_field() -> Option<&'static str> {
+            Some("providerId")
+        }
+        fn relation_secret_fields(relation: &str) -> &'static [&'static str] {
+            match relation {
+                "user" => &["passwordHash"],
+                _ => &[],
+            }
+        }
+    }
+
+    fn secret_row() -> serde_json::Value {
+        let mut r = row();
+        r["tokenHash"] = serde_json::json!("digest");
+        r
+    }
+
+    #[test]
+    fn a_secret_is_served_to_no_caller_not_even_platform_or_the_owner() {
+        for scope in [None, Some(AccessScope::Platform), Some(AccessScope::Company(owner_a()))] {
+            let out = secure::<Secretive>(secret_row(), scope.as_ref());
+            assert!(out.get("tokenHash").is_none(), "{scope:?} was served the secret");
+            assert!(out.get("name").is_some());
+        }
+        let platform = secure::<Secretive>(secret_row(), Some(&AccessScope::Platform));
+        assert!(platform.get("hppPerUnit").is_some(), "private fields keep their owner/platform rule");
+    }
+
+    #[test]
+    fn a_request_that_names_a_secret_as_a_column_is_caught_in_every_grammar() {
+        let ask = |pairs: &[(&str, &str)], sort_by: Option<&str>| {
+            let params = ListQueryParams {
+                filters: pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+                sort_by: sort_by.map(str::to_string),
+                ..Default::default()
+            };
+            named_secret(&params, <Secretive as backbone_orm::EntityRepoMeta>::secret_fields())
+        };
+        for pairs in [
+            vec![("token_hash", "abc")],
+            vec![("tokenHash[startwith]", "a")],
+            vec![("orderby", "name,-token_hash")],
+            vec![("orderby[token_hash]", "asc")],
+            vec![("searchFields", "name,tokenHash")],
+            vec![("min", "token_hash")],
+            vec![("group_by", "tokenHash")],
+        ] {
+            assert_eq!(ask(&pairs, None).as_deref().map(camel_to_snake_case), Some("token_hash".into()), "{pairs:?}");
+        }
+        assert!(ask(&[], Some("tokenHash")).is_some(), "sort_by");
+        assert!(ask(&[("name[contain]", "token_hash"), ("orderby", "name")], None).is_none(), "a value is not a column");
+    }
+
+    #[test]
+    fn a_write_response_keeps_secrets_and_private_fields_from_every_caller() {
+        let out = secure::<Secretive>(secret_row(), None);
+        assert!(out.get("tokenHash").is_none() && out.get("hppPerUnit").is_none());
+    }
+
+    #[test]
+    fn an_included_row_loses_the_related_models_secrets() {
+        let raw = serde_json::json!({ "id": "u1", "email": "a@b.c", "password_hash": "$argon2id$..." });
+        let out = related_row::<Secretive>("user", raw.clone());
+        assert!(out.get("passwordHash").is_none(), "{out}");
+        assert_eq!(out["email"], "a@b.c");
+        assert!(related_row::<Secretive>("other", raw).get("passwordHash").is_some(), "only the named relation");
+    }
 
     #[test]
     fn security_no_private_fields_is_noop() {
