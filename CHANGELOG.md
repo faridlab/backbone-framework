@@ -14,6 +14,19 @@ The release workflow reads the section matching the git tag's version and
 uses it as the GitHub Release body. If no matching section is found it falls
 back to the `## [Unreleased]` section.
 
+## [3.3.0] - 2026-10-11
+
+### Added
+
+- **backbone-core** — `POST {resource}/bulk/preview`: what a bulk PATCH would do, with nothing
+  written. It takes the bulk PATCH body and answers `willChange` (each row's patched fields
+  before and after, secrets stripped), `unchanged` (rows already holding the values) and
+  `refused` (the code and sentence the write would refuse each row with). Every row goes
+  through the same steps the write takes, and one refused row does not refuse the others.
+- **backbone-core** — `GenericCrudService::preview_bulk_partial_update` and the
+  `CrudService::preview_bulk_partial_update` trait method (default: no dry run, answered 501).
+  A preview consults the write rules quietly: a rule in shadow logs on the real write only.
+
 ## [3.2.0] - 2026-10-11
 
 ### Security
