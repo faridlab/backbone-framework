@@ -14,6 +14,18 @@ The release workflow reads the section matching the git tag's version and
 uses it as the GitHub Release body. If no matching section is found it falls
 back to the `## [Unreleased]` section.
 
+## [3.4.0] - 2026-10-11
+
+### Added
+
+- **backbone-core** — `row_rule`: the values and operators a compiled row rule computes with.
+  The schema generator compiles each row rule a module declares (a condition over one row's own
+  fields) into an `<Entity>RowRules` write guard built from these functions, evaluated against
+  the row a create or update would store. The semantics are SQL's, so the rule and its later
+  `CHECK` constraint agree: an operator over a null is null, `&&`/`||`/`!` are three-valued, and
+  a rule holds unless it is definitely false; `x == null` and `x != null` test for null itself.
+  A decimal serialized as text compares as a number; division by zero is null, never a panic.
+
 ## [3.3.0] - 2026-10-11
 
 ### Added
