@@ -229,9 +229,31 @@ where
         before: Option<&E>,
         after: Option<&E>,
     ) -> ServiceResult<()> {
+        self.consult_as(kind, before, after, true).await
+    }
+
+    /// [`consult`](Self::consult) for a dry run: the same refusals, without
+    /// logging what a shadow rule would refuse — the real write logs that, and a
+    /// preview before it would count every shadow violation twice.
+    async fn consult_quietly(
+        &self,
+        kind: crate::write_guard::WriteKind,
+        before: Option<&E>,
+        after: Option<&E>,
+    ) -> ServiceResult<()> {
+        self.consult_as(kind, before, after, false).await
+    }
+
+    async fn consult_as(
+        &self,
+        kind: crate::write_guard::WriteKind,
+        before: Option<&E>,
+        after: Option<&E>,
+        log_shadow: bool,
+    ) -> ServiceResult<()> {
         let ctx = crate::write_guard::WriteCtx { kind, before, after };
         let outcome = self.guard.check(&ctx).await;
-        for v in &outcome.shadow {
+        for v in outcome.shadow.iter().filter(|_| log_shadow) {
             tracing::warn!(
                 target: "backbone::write_guard",
                 entity = std::any::type_name::<E>(),
@@ -792,6 +814,58 @@ where
         self.publish_bulk_updates(befores, &saved).await?;
         Ok(saved)
     }
+
+    /// What [`bulk_partial_update`](Self::bulk_partial_update) would do, with
+    /// nothing written. Each row goes through the same steps the write takes —
+    /// it is found, the patch is merged and checked against the protected fields,
+    /// the write rules are consulted (quietly: a shadow rule logs on the real
+    /// write, not here) and the update hook runs — and its outcome is
+    /// kept instead of failing the batch, so one dialog can say which rows would
+    /// change and which would be refused. Only a batch that is too large or names
+    /// an id twice fails as a whole, as the write does.
+    pub async fn preview_bulk_partial_update(
+        &self,
+        items: Vec<(String, HashMap<String, serde_json::Value>)>,
+    ) -> ServiceResult<Vec<crate::http::BulkPreviewRow<E, ServiceError>>>
+    where
+        E: serde::Serialize + serde::de::DeserializeOwned,
+    {
+        check_batch_size(items.len())?;
+        if let Some(dup) = first_duplicate_id(items.iter().map(|(id, _)| id.clone())) {
+            return Err(ServiceError::Validation(format!(
+                "duplicate id '{dup}' in bulk partial update"
+            )));
+        }
+        let mut rows = Vec::with_capacity(items.len());
+        for (id, fields) in items {
+            let outcome = self.preview_one(&id, fields).await;
+            rows.push(crate::http::BulkPreviewRow { id, outcome });
+        }
+        Ok(rows)
+    }
+
+    async fn preview_one(
+        &self,
+        id: &str,
+        fields: HashMap<String, serde_json::Value>,
+    ) -> ServiceResult<(E, E)>
+    where
+        E: serde::Serialize + serde::de::DeserializeOwned,
+    {
+        let Some(before) = self
+            .repository
+            .find_by_id(id)
+            .await
+            .map_err(ServiceError::Repository)?
+        else {
+            return Err(ServiceError::Validation(format!("id '{id}' not found")));
+        };
+        let mut patched = merge_patch(&before, fields)?;
+        self.consult_quietly(crate::write_guard::WriteKind::Update, Some(&before), Some(&patched))
+            .await?;
+        self.lifecycle.before_update(&mut patched).await?;
+        Ok((before, patched))
+    }
 }
 
 // ─── Generic write protection ────────────────────────────────────────────────
@@ -1081,6 +1155,13 @@ where
         items: Vec<(String, HashMap<String, serde_json::Value>)>,
     ) -> Result<Vec<E>, ServiceError> {
         self.bulk_partial_update(items).await
+    }
+
+    async fn preview_bulk_partial_update(
+        &self,
+        items: Vec<(String, HashMap<String, serde_json::Value>)>,
+    ) -> Result<Option<Vec<crate::http::BulkPreviewRow<E, ServiceError>>>, ServiceError> {
+        self.preview_bulk_partial_update(items).await.map(Some)
     }
 }
 
@@ -1621,6 +1702,43 @@ mod tests {
             .await;
         assert!(validation_message(res).contains("field_not_writable"));
         assert_eq!(service.get_by_id(&a.id).await.unwrap().unwrap().name, "a");
+    }
+
+    #[tokio::test]
+    async fn a_bulk_preview_says_what_each_row_would_do_and_writes_nothing() {
+        let service = svc();
+        let a = service.create(CreateWidgetDto { name: "a".into() }).await.unwrap();
+        let b = service.create(CreateWidgetDto { name: "b".into() }).await.unwrap();
+
+        let rows = service
+            .preview_bulk_partial_update(vec![
+                (a.id.clone(), patch(&[("name", serde_json::json!("a2"))])),
+                (b.id.clone(), patch(&[("secret_hash", serde_json::json!("h1"))])),
+                ("missing".into(), patch(&[("name", serde_json::json!("x"))])),
+            ])
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 3);
+        let (before, after) = rows[0].outcome.as_ref().unwrap();
+        assert_eq!((before.name.as_str(), after.name.as_str()), ("a", "a2"));
+        let refused = rows[1].outcome.as_ref().err().unwrap().to_string();
+        assert!(refused.contains("field_not_writable"), "{refused}");
+        assert!(rows[2].outcome.is_err(), "a row that is not there is refused, not dropped");
+        // One refused row does not refuse the others, and nothing was written.
+        assert_eq!(service.get_by_id(&a.id).await.unwrap().unwrap().name, "a");
+    }
+
+    #[tokio::test]
+    async fn a_bulk_preview_refuses_a_batch_the_write_would_refuse_whole() {
+        let service = svc();
+        let a = service.create(CreateWidgetDto { name: "a".into() }).await.unwrap();
+        let res = service
+            .preview_bulk_partial_update(vec![
+                (a.id.clone(), patch(&[("name", serde_json::json!("a2"))])),
+                (a.id.clone(), patch(&[("name", serde_json::json!("a3"))])),
+            ])
+            .await;
+        assert!(validation_message(res.map(|r| r.len())).contains("duplicate id"));
     }
 
     #[tokio::test]

@@ -824,6 +824,102 @@ impl BulkPatchRequest {
     }
 }
 
+/// The answer of `POST {resource}/bulk/preview`: what a bulk PATCH would do.
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct BulkPreview {
+    /// Rows the patch would change, each with its patched fields before and after.
+    pub will_change: Vec<PreviewChange>,
+    /// Rows that already hold the patched values.
+    pub unchanged: Vec<String>,
+    /// Rows the write would refuse, with why.
+    pub refused: Vec<PreviewRefusal>,
+    /// Every row named, in one of the three lists.
+    pub total: usize,
+}
+
+/// A row a bulk PATCH would change.
+#[derive(Debug, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct PreviewChange {
+    /// The row's id.
+    pub id: String,
+    /// Each patched field whose value would move.
+    pub changes: Vec<FieldChange>,
+}
+
+/// One field's value before and after a previewed write.
+#[derive(Debug, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct FieldChange {
+    /// The field, as the response names it.
+    pub field: String,
+    /// Its value now.
+    #[cfg_attr(feature = "openapi", schema(value_type = Object))]
+    pub from: serde_json::Value,
+    /// Its value after the write.
+    #[cfg_attr(feature = "openapi", schema(value_type = Object))]
+    pub to: serde_json::Value,
+}
+
+/// A row a bulk PATCH would refuse.
+#[derive(Debug, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct PreviewRefusal {
+    /// The row's id.
+    pub id: String,
+    /// The first rule it breaks (`refused` when the error names none).
+    pub code: String,
+    /// The sentence the write would refuse it with.
+    pub message: String,
+}
+
+/// One dry-run row as the response shows it: `(before, after)`, or `(code, sentence)`.
+type PreviewOutcome = Result<(serde_json::Value, serde_json::Value), (String, String)>;
+
+/// Sort a bulk dry run's rows into the three lists of [`BulkPreview`]. Each row is
+/// its record before and after as the response shows it (secrets already
+/// stripped), or the `(code, sentence)` it would be refused with; `patched` names
+/// the fields each id's patch set (snake_case; read under their camelCase name
+/// first), and only those are compared, so a value the
+/// update hook moves on its own (a timestamp) is not reported as the change.
+fn preview_answer(
+    rows: Vec<(String, PreviewOutcome)>,
+    patched: &HashMap<String, Vec<String>>,
+) -> BulkPreview {
+    let mut out = BulkPreview::default();
+    for (id, outcome) in rows {
+        match outcome {
+            Ok((before, after)) => {
+                let mut keys = patched.get(&id).cloned().unwrap_or_default();
+                keys.sort();
+                let changes: Vec<FieldChange> = keys
+                    .into_iter()
+                    .filter_map(|field| {
+                        let read = |v: &serde_json::Value| {
+                            v.get(snake_to_camel(&field))
+                                .or_else(|| v.get(&field))
+                                .cloned()
+                                .unwrap_or(serde_json::Value::Null)
+                        };
+                        let (from, to) = (read(&before), read(&after));
+                        (from != to).then_some(FieldChange { field, from, to })
+                    })
+                    .collect();
+                if changes.is_empty() {
+                    out.unchanged.push(id);
+                } else {
+                    out.will_change.push(PreviewChange { id, changes });
+                }
+            }
+            Err((code, message)) => out.refused.push(PreviewRefusal { id, code, message }),
+        }
+    }
+    out.total = out.will_change.len() + out.unchanged.len() + out.refused.len();
+    out
+}
+
 /// Filtering and sorting options
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -1096,6 +1192,27 @@ where
         }
         Ok(out)
     }
+
+    /// 23. What [`bulk_partial_update`](Self::bulk_partial_update) would do, with
+    /// nothing written: each row as it is and as it would become, or why the
+    /// write would refuse it. `Ok(None)` (the default) means this service has no
+    /// dry run, and the route says so instead of guessing.
+    async fn preview_bulk_partial_update(
+        &self,
+        items: Vec<(String, HashMap<String, serde_json::Value>)>,
+    ) -> Result<Option<Vec<BulkPreviewRow<Entity, Self::Error>>>, Self::Error> {
+        let _ = items;
+        Ok(None)
+    }
+}
+
+/// One row of a bulk partial update's dry run: the record as it is and as the
+/// patch would leave it, or the error the write would refuse it with.
+pub struct BulkPreviewRow<Entity, Err> {
+    /// The id the patch named.
+    pub id: String,
+    /// `(before, after)`, or why the row would be refused.
+    pub outcome: Result<(Entity, Entity), Err>,
 }
 
 // ============================================================
@@ -1365,6 +1482,13 @@ where
                 let h = handler.clone();
                 move |body: JsonOrForm<BulkPatchRequest>| async move {
                     Self::bulk_patch_handler(h, body).await
+                }
+            }))
+            // POST /collection/bulk/preview - What the bulk partial update would do, nothing written
+            .route(&format!("{}/bulk/preview", base_path), post({
+                let h = handler.clone();
+                move |body: JsonOrForm<BulkPatchRequest>| async move {
+                    Self::bulk_patch_preview_handler(h, body).await
                 }
             }))
             // DELETE /collection/empty - Empty trash
@@ -1758,6 +1882,65 @@ where
                 let total = items.len();
                 (StatusCode::OK, Json(ApiResponse::ok(BulkResponse { items, total, failed: 0, errors: vec![] })))
             }
+            Err(e) => write_error(S::violations_of(&e), &e, StatusCode::BAD_REQUEST),
+        }
+    }
+
+    /// `POST {resource}/bulk/preview`: the bulk PATCH body, answered with what it
+    /// would do and nothing written. Each row lands in one of three lists: it
+    /// would change (each patched field before and after), it already holds the
+    /// values, or the write would refuse it (the code and sentence it would give).
+    /// The values pass the same secret and field-security strip as any response.
+    async fn bulk_patch_preview_handler(
+        handler: Arc<Self>,
+        JsonOrForm(req): JsonOrForm<BulkPatchRequest>,
+    ) -> impl axum::response::IntoResponse {
+        use axum::{http::StatusCode, Json};
+
+        let items = req.into_items();
+        if let Some(err) = batch_size_error(items.len()) {
+            return (StatusCode::BAD_REQUEST, Json(ApiResponse::<BulkPreview>::error(err)));
+        }
+        let items: Vec<(String, HashMap<String, serde_json::Value>)> = items
+            .into_iter()
+            .map(|(id, fields)| {
+                let fields = fields
+                    .into_iter()
+                    .map(|(k, v)| (camel_to_snake_case(&k), v))
+                    .collect();
+                (id, fields)
+            })
+            .collect();
+        let patched: HashMap<String, Vec<String>> = items
+            .iter()
+            .map(|(id, f)| (id.clone(), f.keys().cloned().collect()))
+            .collect();
+        match handler.service.preview_bulk_partial_update(items).await {
+            Ok(Some(rows)) => {
+                let rows = rows
+                    .into_iter()
+                    .map(|row| {
+                        let outcome = match row.outcome {
+                            Ok((before, after)) => Ok((
+                                secure::<E>(to_response_value(R::from(before)), None),
+                                secure::<E>(to_response_value(R::from(after)), None),
+                            )),
+                            Err(e) => Err((
+                                S::violations_of(&e)
+                                    .and_then(|v| v.into_iter().next().map(|v| v.code))
+                                    .unwrap_or_else(|| "refused".to_string()),
+                                e.to_string(),
+                            )),
+                        };
+                        (row.id, outcome)
+                    })
+                    .collect();
+                (StatusCode::OK, Json(ApiResponse::ok(preview_answer(rows, &patched))))
+            }
+            Ok(None) => (
+                StatusCode::NOT_IMPLEMENTED,
+                Json(ApiResponse::error("this resource has no preview of a bulk change".to_string())),
+            ),
             Err(e) => write_error(S::violations_of(&e), &e, StatusCode::BAD_REQUEST),
         }
     }
@@ -2335,6 +2518,42 @@ mod tests {
     #[test]
     fn batch_size_over_limit_is_rejected() {
         assert!(batch_size_error(MAX_BATCH_SIZE + 1).is_some());
+    }
+
+    #[test]
+    fn a_bulk_preview_sorts_rows_by_what_the_patch_would_do() {
+        use serde_json::json;
+        let mut patched: HashMap<String, Vec<String>> = ["a", "b", "c"]
+            .iter()
+            .map(|id| (id.to_string(), vec!["category".to_string()]))
+            .collect();
+        patched.insert("d".into(), vec!["category_id".into()]);
+        let out = preview_answer(
+            vec![
+                (
+                    "a".into(),
+                    Ok((
+                        json!({"category": "meal", "updated_at": "1"}),
+                        json!({"category": "travel", "updated_at": "2"}),
+                    )),
+                ),
+                ("b".into(), Ok((json!({"category": "travel"}), json!({"category": "travel"})))),
+                (
+                    "d".into(),
+                    Ok((json!({"categoryId": "x"}), json!({"categoryId": "y"}))),
+                ),
+                ("c".into(), Err(("locked".into(), "a posted claim is locked".into()))),
+            ],
+            &patched,
+        );
+        assert_eq!(out.total, 4);
+        assert_eq!(out.will_change.len(), 2);
+        assert_eq!(out.will_change[1].changes[0].field, "category_id", "a camelCase response is read");
+        let ch = &out.will_change[0].changes;
+        assert_eq!(ch.len(), 1, "only the patched field is reported, not the timestamp");
+        assert_eq!((ch[0].from.clone(), ch[0].to.clone()), (json!("meal"), json!("travel")));
+        assert_eq!(out.unchanged, vec!["b".to_string()]);
+        assert_eq!(out.refused[0].code, "locked");
     }
 
     #[test]
