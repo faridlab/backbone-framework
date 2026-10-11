@@ -41,6 +41,9 @@ pub struct WriteCtx<'a, E> {
     pub actor: Option<String>,
     /// When the write happens, the `now()` a rule compares against.
     pub at: chrono::DateTime<chrono::Utc>,
+    /// The state-machine verb this write performs (`post`, `approve`), when it runs inside
+    /// [`as_transition`]; `None` for a generic write, which must not move a state field.
+    pub transition: Option<String>,
 }
 
 impl<'a, E> WriteCtx<'a, E> {
@@ -55,8 +58,25 @@ impl<'a, E> WriteCtx<'a, E> {
                 .map(|a| a.actor)
                 .filter(|a| !a.is_empty()),
             at: chrono::Utc::now(),
+            transition: current_transition(),
         }
     }
+}
+
+tokio::task_local! {
+    static TRANSITION: String;
+}
+
+/// Run `f` as the state-machine verb `verb`: every write it makes is a transition, so a rule
+/// that keeps a state field verbs-only lets it through. A generated transition handler wraps
+/// its write in this; nothing else should.
+pub async fn as_transition<F: std::future::Future>(verb: &str, f: F) -> F::Output {
+    TRANSITION.scope(verb.to_string(), f).await
+}
+
+/// The verb the current write performs, inside [`as_transition`].
+pub fn current_transition() -> Option<String> {
+    TRANSITION.try_with(|v| v.clone()).ok()
 }
 
 /// A guard's answer.
@@ -96,5 +116,18 @@ pub struct AllowAll;
 impl<E: Sync> WriteGuard<E> for AllowAll {
     async fn check(&self, _ctx: &WriteCtx<'_, E>) -> GuardOutcome {
         GuardOutcome::allow()
+    }
+}
+
+#[cfg(test)]
+mod transition_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_write_knows_whether_a_verb_performs_it() {
+        let row = 1u8;
+        assert_eq!(WriteCtx::new(WriteKind::Update, Some(&row), Some(&row)).transition, None);
+        let inside = as_transition("post", async { WriteCtx::new(WriteKind::Update, Some(&row), Some(&row)).transition }).await;
+        assert_eq!(inside.as_deref(), Some("post"));
     }
 }

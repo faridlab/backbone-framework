@@ -14,6 +14,15 @@ The release workflow reads the section matching the git tag's version and
 uses it as the GitHub Release body. If no matching section is found it falls
 back to the `## [Unreleased]` section.
 
+## [3.7.0] - 2026-10-11
+
+### Added
+
+- **backbone-core** — `write_guard::as_transition(verb, f)` and `current_transition()`: a write
+  made inside `as_transition` is a state-machine verb, and `WriteCtx.transition` names it. A
+  generated guard reports a generic write that moves a state field (`state_field_verbs_only`) and
+  lets a verb's write through.
+
 ## [3.6.0] - 2026-10-11
 
 ### Added
