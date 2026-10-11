@@ -119,6 +119,28 @@ pub(crate) fn current_request_conn() -> Option<Arc<Mutex<PoolConnection<Postgres
     request_conn()
 }
 
+/// Count rows with one query on the request's own connection: `sql` selects a single `count(*)`
+/// and takes `binds` as `$1`, `$2`, … (text; cast them in the SQL). `None` when the task runs
+/// outside a request scope (a job, a seed), or when the query fails, which is logged. A compiled
+/// delete-guard rule counts the rows still referencing the row being deleted this way, and a
+/// roles source looks the writer's roles up, on the request's database and fence, never on a
+/// pool captured when the module was built, which can be another tenant's database.
+pub async fn count_on_request_conn(sql: &str, binds: &[&str]) -> Option<i64> {
+    let conn = request_conn()?;
+    let mut g = conn.lock().await;
+    let mut query = sqlx::query_scalar::<_, i64>(sql);
+    for b in binds {
+        query = query.bind(*b);
+    }
+    match query.fetch_one(&mut **g).await {
+        Ok(n) => Some(n),
+        Err(e) => {
+            tracing::warn!(target: "backbone_orm::company_scope", error = %e, sql, "a delete-guard count failed");
+            None
+        }
+    }
+}
+
 /// Run `f` with the request's company scope bound to the current async task.
 ///
 /// Middleware calls this once per request with the company derived from the signed token, so every

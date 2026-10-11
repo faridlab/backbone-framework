@@ -14,6 +14,19 @@ The release workflow reads the section matching the git tag's version and
 uses it as the GitHub Release body. If no matching section is found it falls
 back to the `## [Unreleased]` section.
 
+## [3.6.0] - 2026-10-11
+
+### Added
+
+- **backbone-core** — `actor_roles`: the `ActorRoles` port a composing service installs
+  (`actor_roles::install`) so a compiled `$actor.has_role(..)` rule can ask whether the writer
+  holds a role. Without one installed, a role rule reads null, holds, and a warning is logged once.
+- **backbone-core** — `row_rule::has_role` and `row_rule::referencing`: a role check, and the count
+  of rows still referencing a row being deleted, for compiled delete-guard rules.
+- **backbone-orm** — `company_scope::count_on_request_conn(sql, binds)`: one `count(*)` query on
+  the request's own connection, `None` outside a request. A rule's lookup therefore runs on the
+  request's database and fence, never on a pool captured when the module was built.
+
 ## [3.5.0] - 2026-10-11
 
 ### Added

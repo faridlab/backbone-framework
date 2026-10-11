@@ -81,6 +81,7 @@ pub mod service;
 pub mod violation;
 pub mod write_guard;
 pub mod row_rule;
+pub mod actor_roles;
 pub mod usecase;
 pub mod validation;
 pub mod policy;

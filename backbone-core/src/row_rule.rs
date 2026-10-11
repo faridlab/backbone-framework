@@ -113,6 +113,33 @@ pub fn changed(before: Option<&Value>, after: &Value, fields: &[&str]) -> bool {
     }
 }
 
+/// `$actor.has_role(role)`: null without a writer, without an installed roles source
+/// ([`crate::actor_roles`]), or when the source cannot tell; the rule then holds.
+pub async fn has_role(actor: Option<&str>, role: &str) -> Val {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let Some(actor) = actor else { return Val::Null };
+    let Some(roles) = crate::actor_roles::installed() else {
+        if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            tracing::warn!(
+                target: "backbone::write_guard",
+                "a role rule ran with no roles source installed (backbone_core::actor_roles::install); role rules check nothing"
+            );
+        }
+        return Val::Null;
+    };
+    roles.holds(actor, role).await.map(Val::Bool).unwrap_or(Val::Null)
+}
+
+/// How many rows still reference the row being deleted: `sql` counts them with the row's id as
+/// `$1`, run on the request's own connection. Null outside a request or without an id.
+pub async fn referencing(sql: &str, id: Val) -> Val {
+    let Val::Text(id) = id else { return Val::Null };
+    backbone_orm::company_scope::count_on_request_conn(sql, &[id.as_str()])
+        .await
+        .map(|n| Val::Num(n as f64))
+        .unwrap_or(Val::Null)
+}
+
 pub fn text(s: &str) -> Val {
     Val::Text(s.to_string())
 }
@@ -435,6 +462,25 @@ mod tests {
         assert!(changed(Some(&before), &after, &["progress"]));
         assert!(!changed(Some(&before), &after, &["x"]));
         assert!(changed(None, &after, &["x"]), "a create changes everything");
+    }
+
+    #[tokio::test]
+    async fn a_role_rule_asks_the_installed_source_and_holds_without_one() {
+        struct Fixed;
+        #[async_trait::async_trait]
+        impl crate::actor_roles::ActorRoles for Fixed {
+            async fn holds(&self, actor: &str, role: &str) -> Option<bool> {
+                (actor == "u1").then(|| role.eq_ignore_ascii_case("ADMIN"))
+            }
+        }
+        assert_eq!(has_role(None, "admin").await, Val::Null, "no writer");
+        crate::actor_roles::install(std::sync::Arc::new(Fixed));
+        assert_eq!(has_role(Some("u1"), "admin").await, Val::Bool(true));
+        assert_eq!(has_role(Some("u1"), "auditor").await, Val::Bool(false));
+        assert_eq!(has_role(Some("u2"), "admin").await, Val::Null, "the source cannot tell");
+        // Outside a request there is no connection to count on: the delete guard holds.
+        assert_eq!(referencing("SELECT count(*) FROM t WHERE x = $1::uuid", text("id")).await, Val::Null);
+        assert_eq!(referencing("SELECT 1", Val::Null).await, Val::Null);
     }
 
     #[test]
