@@ -251,7 +251,7 @@ where
         after: Option<&E>,
         log_shadow: bool,
     ) -> ServiceResult<()> {
-        let ctx = crate::write_guard::WriteCtx { kind, before, after };
+        let ctx = crate::write_guard::WriteCtx::new(kind, before, after);
         let outcome = self.guard.check(&ctx).await;
         for v in outcome.shadow.iter().filter(|_| log_shadow) {
             tracing::warn!(

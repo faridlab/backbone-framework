@@ -29,12 +29,34 @@ pub enum WriteKind {
 
 /// One write, as the guard sees it.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct WriteCtx<'a, E> {
     pub kind: WriteKind,
     /// The row as stored before the write; `None` on create.
     pub before: Option<&'a E>,
     /// The row the write would store; `None` on delete and hard delete.
     pub after: Option<&'a E>,
+    /// Who is writing: the request's audit attribution, when the composing
+    /// service bound one; `None` for a job, a seed or an unscoped caller.
+    pub actor: Option<String>,
+    /// When the write happens, the `now()` a rule compares against.
+    pub at: chrono::DateTime<chrono::Utc>,
+}
+
+impl<'a, E> WriteCtx<'a, E> {
+    /// The context of one write, attributed to the ambient request's actor
+    /// and timed now.
+    pub fn new(kind: WriteKind, before: Option<&'a E>, after: Option<&'a E>) -> Self {
+        Self {
+            kind,
+            before,
+            after,
+            actor: backbone_orm::audit_context::current_request_audit()
+                .map(|a| a.actor)
+                .filter(|a| !a.is_empty()),
+            at: chrono::Utc::now(),
+        }
+    }
 }
 
 /// A guard's answer.

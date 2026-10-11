@@ -16,11 +16,16 @@
 //! - A rule [`holds`] unless it is definitely false, as a `CHECK` passes on
 //!   null. `x == null` and `x != null` test for null itself and are never null.
 //! - A comparison between a number and a text parses the text, the way a
-//!   decimal column serialized as `"12.50"` compares to `0`.
+//!   decimal column serialized as `"12.50"` compares to `0`; a comparison
+//!   between a time and a text parses the text as a timestamp or a date.
+//!
+//! A rule may also read the row before the write (`$old.x`, through [`field`]
+//! on that row), the writer ([`actor`]) and the time of the write ([`at`]).
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
+use chrono::{DateTime, NaiveDate, Utc};
 use serde_json::Value;
 
 /// One value inside a rule.
@@ -31,6 +36,8 @@ pub enum Val {
     Num(f64),
     Text(String),
     List(Vec<Val>),
+    /// A point in time: the write's `now()`, or a stored timestamp or date read as one.
+    Time(DateTime<Utc>),
 }
 
 impl Val {
@@ -48,6 +55,20 @@ impl Val {
         match self {
             Val::Num(n) => Some(*n),
             Val::Text(s) => s.trim().parse().ok(),
+            _ => None,
+        }
+    }
+
+    fn time(&self) -> Option<DateTime<Utc>> {
+        match self {
+            Val::Time(t) => Some(*t),
+            Val::Text(s) => DateTime::parse_from_rfc3339(s)
+                .map(|t| t.with_timezone(&Utc))
+                .ok()
+                .or_else(|| {
+                    let d = NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()?;
+                    Some(d.and_hms_opt(0, 0, 0)?.and_utc())
+                }),
             _ => None,
         }
     }
@@ -70,6 +91,26 @@ impl Val {
 /// The row's field `name`; [`Val::Null`] when it is absent or null.
 pub fn field(row: &Value, name: &str) -> Val {
     row.get(name).map(Val::from_json).unwrap_or(Val::Null)
+}
+
+/// The writer, as `$actor.id` reads it; null for a job, a seed or an unscoped caller.
+pub fn actor(actor: Option<&str>) -> Val {
+    actor.map(|a| Val::Text(a.to_string())).unwrap_or(Val::Null)
+}
+
+/// The time of the write, as `now()` reads it.
+pub fn at(at: DateTime<Utc>) -> Val {
+    Val::Time(at)
+}
+
+/// Whether any of `fields` differs between the row before and the row after a write. A rule
+/// about the time of the write checks an update only when it changes what the rule reads, so a
+/// later edit of a row whose deadline has passed is not a break.
+pub fn changed(before: Option<&Value>, after: &Value, fields: &[&str]) -> bool {
+    match before {
+        None => true,
+        Some(b) => fields.iter().any(|f| b.get(*f) != after.get(*f)),
+    }
 }
 
 pub fn text(s: &str) -> Val {
@@ -129,6 +170,7 @@ fn order(a: &Val, b: &Val) -> Option<std::cmp::Ordering> {
         (Val::Null, _) | (_, Val::Null) => None,
         (Val::Text(x), Val::Text(y)) => Some(x.cmp(y)),
         (Val::Bool(x), Val::Bool(y)) => Some(x.cmp(y)),
+        (Val::Time(_), _) | (_, Val::Time(_)) => Some(a.time()?.cmp(&b.time()?)),
         _ => a.num()?.partial_cmp(&b.num()?),
     }
 }
@@ -372,6 +414,27 @@ mod tests {
         assert_eq!(contains(text("a/../b"), text("..")), Val::Bool(true));
         assert_eq!(matches(text("my-bucket_1"), "^[a-zA-Z0-9_-]+$"), Val::Bool(true));
         assert_eq!(matches(text("no spaces"), "^[a-zA-Z0-9_-]+$"), Val::Bool(false));
+    }
+
+    #[test]
+    fn a_stored_timestamp_or_date_compares_with_the_time_of_the_write() {
+        let at = DateTime::parse_from_rfc3339("2026-10-11T10:00:00Z").unwrap().with_timezone(&Utc);
+        let row = json!({ "expires_at": "2026-10-12T00:00:00Z", "dob": "1990-05-01", "gone": "2026-01-01T00:00:00+07:00" });
+        assert_eq!(gt(field(&row, "expires_at"), super::at(at)), Val::Bool(true));
+        assert_eq!(lt(field(&row, "dob"), super::at(at)), Val::Bool(true));
+        assert_eq!(gt(field(&row, "gone"), super::at(at)), Val::Bool(false));
+        assert_eq!(gt(field(&row, "missing"), super::at(at)), Val::Null);
+    }
+
+    #[test]
+    fn the_writer_and_the_row_before_the_write_are_readable() {
+        assert_eq!(eq(actor(Some("u1")), text("u1")), Val::Bool(true));
+        assert_eq!(eq(actor(None), text("u1")), Val::Null, "no writer: the rule holds");
+        let (before, after) = (json!({ "progress": 40, "x": 1 }), json!({ "progress": 30, "x": 1 }));
+        assert_eq!(ge(field(&after, "progress"), field(&before, "progress")), Val::Bool(false));
+        assert!(changed(Some(&before), &after, &["progress"]));
+        assert!(!changed(Some(&before), &after, &["x"]));
+        assert!(changed(None, &after, &["x"]), "a create changes everything");
     }
 
     #[test]

@@ -14,6 +14,22 @@ The release workflow reads the section matching the git tag's version and
 uses it as the GitHub Release body. If no matching section is found it falls
 back to the `## [Unreleased]` section.
 
+## [3.5.0] - 2026-10-11
+
+### Added
+
+- **backbone-core** — `WriteCtx` carries who is writing (`actor`, from the request's audit
+  attribution; `None` for a job, a seed or an unscoped caller) and when (`at`), so a compiled
+  rule can read `$actor.id` and `now()`. `WriteCtx::new(kind, before, after)` builds one.
+- **backbone-core** — `row_rule`: `actor`, `at` and `changed`, and a time value that compares
+  with a stored timestamp or date. `changed(before, after, fields)` lets a rule about the time
+  of the write check an update only when the update changes what the rule reads.
+
+### Changed
+
+- **backbone-core** — `WriteCtx` is `#[non_exhaustive]`: build it with `WriteCtx::new`. Only
+  the generic service constructs one today.
+
 ## [3.4.0] - 2026-10-11
 
 ### Added
