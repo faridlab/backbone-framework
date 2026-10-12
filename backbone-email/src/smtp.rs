@@ -13,6 +13,45 @@ use crate::{
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+
+/// Headers the message builder writes itself; a custom header of the same name would be a
+/// duplicate, so it is not added.
+const BUILDER_HEADERS: &[&str] = &[
+    "from", "to", "cc", "bcc", "reply-to", "subject", "date", "mime-version",
+    "content-type", "content-transfer-encoding", "sender",
+];
+
+/// Add a message's custom headers to the builder. A header the builder already writes is left to
+/// the builder; `Message-ID` goes through its own setter; a value carrying CR or LF (an attempt to
+/// inject headers) and a name that is not a valid header name are dropped with a warning.
+fn apply_custom_headers(
+    mut message: lettre::message::MessageBuilder,
+    headers: &HashMap<String, String>,
+) -> lettre::message::MessageBuilder {
+    use lettre::message::header::{HeaderName, HeaderValue};
+    let mut names: Vec<&String> = headers.keys().collect();
+    names.sort();
+    for name in names {
+        let value = &headers[name];
+        let lower = name.to_ascii_lowercase();
+        if BUILDER_HEADERS.contains(&lower.as_str()) {
+            continue;
+        }
+        if value.contains('\r') || value.contains('\n') {
+            tracing::warn!(header = %name, "dropping a custom header whose value carries a line break");
+            continue;
+        }
+        if lower == "message-id" {
+            message = message.message_id(Some(value.clone()));
+            continue;
+        }
+        match HeaderName::new_from_ascii(name.clone()) {
+            Ok(header_name) => message = message.raw_header(HeaderValue::new(header_name, value.clone())),
+            Err(_) => tracing::warn!(header = %name, "dropping a custom header whose name is not a valid header name"),
+        }
+    }
+    message
+}
 use chrono::{Utc, DateTime};
 
 /// SMTP configuration
@@ -275,9 +314,8 @@ impl SmtpEmailService {
         // Set subject
         message = message.subject(&email_message.subject);
 
-        // Add custom headers (lettre doesn't support arbitrary custom headers easily)
-        // This is a simplified approach - for production, consider using a more advanced email library
-        // for now, we'll skip custom headers in SMTP implementation
+        // Custom headers ride on the message: unsubscribe pairs, threading headers and the like.
+        message = apply_custom_headers(message, &email_message.headers);
 
         // Build message content
         let message = if email_message.html.is_some() && email_message.text.is_some() {
@@ -637,5 +675,39 @@ impl SmtpServiceBuilder {
 impl Default for SmtpServiceBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod header_tests {
+    use super::*;
+
+    fn rendered(headers: &[(&str, &str)]) -> String {
+        let map: HashMap<String, String> = headers.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let builder = Message::builder()
+            .from("sender@example.test".parse().unwrap())
+            .to("someone@example.test".parse().unwrap())
+            .subject("hello");
+        let message = apply_custom_headers(builder, &map).body(String::from("body")).unwrap();
+        String::from_utf8(message.formatted()).unwrap()
+    }
+
+    #[test]
+    fn custom_headers_reach_the_message() {
+        let out = rendered(&[
+            ("List-Unsubscribe", "<https://example.test/u/1>"),
+            ("List-Unsubscribe-Post", "List-Unsubscribe=One-Click"),
+            ("In-Reply-To", "<a@example.test>"),
+        ]);
+        assert!(out.contains("List-Unsubscribe: <https://example.test/u/1>"), "{out}");
+        assert!(out.contains("List-Unsubscribe-Post: List-Unsubscribe=One-Click"), "{out}");
+        assert!(out.contains("In-Reply-To: <a@example.test>"), "{out}");
+    }
+
+    #[test]
+    fn builder_headers_and_injection_attempts_are_not_added() {
+        let out = rendered(&[("To", "evil@example.test"), ("X-Note", "a\r\nBcc: evil@example.test")]);
+        assert!(!out.contains("evil@example.test"), "{out}");
+        assert_eq!(out.matches("To: ").count(), 1, "{out}");
     }
 }
