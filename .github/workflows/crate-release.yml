@@ -19,6 +19,13 @@ name: Crate release
 
 on:
   workflow_call:
+    inputs:
+      schema_plugin_version:
+        description: >
+          metaphor-schema release whose rule ratchet gates a module with a schema/ directory.
+          Raised deliberately, never "latest", so a plugin release cannot fail every module.
+        type: string
+        default: "0.24.0"
     secrets:
       CARGO_REGISTRY_TOKEN:
         required: false
@@ -112,6 +119,19 @@ jobs:
 
       - name: Library tests
         run: cargo test --lib $LOCKED
+
+      # The rule ratchet: a module's unenforced rules, register warnings, undeclared state-machine
+      # owners and untested rule ids may only go down from its committed
+      # schema/rules.baseline.yaml, so a release cannot publish with a rule that lands unenforced.
+      - name: Rule ratchet
+        if: hashFiles('schema/**') != ''
+        env:
+          PLUGIN_VERSION: ${{ inputs.schema_plugin_version }}
+        run: |
+          set -euo pipefail
+          curl -sSfL "https://github.com/faridlab/metaphor-plugin-schema/releases/download/v${PLUGIN_VERSION}/metaphor-schema-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/metaphor-schema" schema rules . --check-baseline
 
       - name: Audit the package contents
         run: |
