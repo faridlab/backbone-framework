@@ -14,6 +14,18 @@ The release workflow reads the section matching the git tag's version and
 uses it as the GitHub Release body. If no matching section is found it falls
 back to the `## [Unreleased]` section.
 
+## [3.8.0] - 2026-10-14
+
+### Changed
+
+- **backbone-core** — a write the database refuses through a constraint that stands for a rule
+  answers 422 with a violation, as a write the service refuses does, instead of 400 with the
+  database's sentence. A foreign key answers `reference_missing` on the column naming a missing
+  record, or `still_referenced` when a removed record is still pointed at; a CHECK, a generated
+  unique index (`uq_…`) and an exclusion answer the code their constraint name carries. The
+  sentence names no table or constraint. `RepositoryError` gains `Violations`, built when a
+  `sqlx` error converts, and the generic service hands them to the HTTP layer.
+
 ## [3.7.0] - 2026-10-11
 
 ### Added
