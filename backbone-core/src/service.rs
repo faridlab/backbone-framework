@@ -1018,7 +1018,7 @@ where
 
     fn violations_of(err: &ServiceError) -> Option<Vec<crate::violation::Violation>> {
         match err {
-            ServiceError::Violations(v) => Some(v.clone()),
+            ServiceError::Violations(v) | ServiceError::Repository(RepositoryError::Violations(v)) => Some(v.clone()),
             _ => None,
         }
     }
@@ -1915,7 +1915,10 @@ mod tests {
         use crate::http::CrudService;
         type S = GenericCrudService<Widget, CreateWidgetDto, UpdateWidgetDto, InMemoryWidgetRepo>;
         let v = vec![crate::violation::Violation::new("name", "x", "y")];
-        assert_eq!(<S as CrudService<Widget, CreateWidgetDto, UpdateWidgetDto>>::violations_of(&ServiceError::Violations(v.clone())), Some(v));
+        assert_eq!(<S as CrudService<Widget, CreateWidgetDto, UpdateWidgetDto>>::violations_of(&ServiceError::Violations(v.clone())), Some(v.clone()));
         assert_eq!(<S as CrudService<Widget, CreateWidgetDto, UpdateWidgetDto>>::violations_of(&ServiceError::NotFound), None);
+        // A constraint the database refused with reaches the HTTP layer as the same 422.
+        let db = ServiceError::Repository(RepositoryError::Violations(v.clone()));
+        assert_eq!(<S as CrudService<Widget, CreateWidgetDto, UpdateWidgetDto>>::violations_of(&db), Some(v));
     }
 }

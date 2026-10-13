@@ -36,6 +36,12 @@ pub enum RepositoryError {
 
     #[error("Internal error: {0}")]
     InternalError(String),
+
+    /// The database refused the write through a constraint that stands for a
+    /// rule: a foreign key, a CHECK, a generated unique index or an exclusion.
+    /// One violation, coded as the application-side check is.
+    #[error("validation failed: {}", .0.iter().map(|v| v.message.as_str()).collect::<Vec<_>>().join("; "))]
+    Violations(Vec<crate::violation::Violation>),
 }
 
 impl From<serde_json::Error> for RepositoryError {
@@ -50,6 +56,16 @@ impl From<sqlx::Error> for RepositoryError {
         match e {
             sqlx::Error::RowNotFound => RepositoryError::NotFound,
             sqlx::Error::Database(db_err) => {
+                let pg = db_err.try_downcast_ref::<sqlx::postgres::PgDatabaseError>();
+                if let Some(v) = constraint_violation(
+                    db_err.kind(),
+                    db_err.code().as_deref(),
+                    db_err.constraint(),
+                    pg.and_then(|p| p.detail()).unwrap_or(""),
+                    pg.and_then(|p| p.column()),
+                ) {
+                    return RepositoryError::Violations(vec![v]);
+                }
                 let msg = db_err.message().to_string();
                 if msg.contains("duplicate key") || msg.contains("unique constraint") {
                     RepositoryError::AlreadyExists(msg)
@@ -59,6 +75,112 @@ impl From<sqlx::Error> for RepositoryError {
             }
             _ => RepositoryError::DatabaseError(e.to_string()),
         }
+    }
+}
+
+/// The violation a database constraint error stands for, or `None` for an error
+/// that names no rule. A foreign key answers `reference_missing` on the column
+/// that names a missing record, or `still_referenced` when a removed record is
+/// still pointed at. A CHECK, a generated unique index (`uq_…`) and an exclusion
+/// answer the code their constraint name carries (see
+/// [`crate::violation::code_from_constraint`]). Another unique index keeps its
+/// `AlreadyExists` answer. The sentence names no table or constraint.
+#[cfg(feature = "postgres")]
+fn constraint_violation(
+    kind: sqlx::error::ErrorKind,
+    sqlstate: Option<&str>,
+    constraint: Option<&str>,
+    detail: &str,
+    column: Option<&str>,
+) -> Option<crate::violation::Violation> {
+    use crate::violation::{code_from_constraint, Violation};
+    use sqlx::error::ErrorKind;
+    let constraint = constraint?;
+    let path = column.map(str::to_string).or_else(|| key_column(detail)).unwrap_or_default();
+    let code = code_from_constraint(constraint);
+    let on = |path: &str| if path.is_empty() { String::new() } else { format!("`{path}` ") };
+    Some(match kind {
+        ErrorKind::ForeignKeyViolation if detail.contains("still referenced") => Violation::new(
+            "",
+            "still_referenced",
+            "This record is still referenced by another record, so it cannot be removed",
+        ),
+        ErrorKind::ForeignKeyViolation => {
+            let message = format!("{}refers to a record that does not exist", on(&path));
+            Violation::new(path, "reference_missing", message)
+        }
+        ErrorKind::CheckViolation => {
+            let message = format!("{}breaks the rule `{code}`", on(&path));
+            Violation::new(path, code, message)
+        }
+        ErrorKind::UniqueViolation if constraint.starts_with("uq_") => {
+            let message = format!("{}is already taken under the rule `{code}`", on(&path));
+            Violation::new(path, code, message)
+        }
+        _ if sqlstate == Some("23P01") => {
+            let message = format!("The record overlaps another one under the rule `{code}`");
+            Violation::new("", code, message)
+        }
+        _ => return None,
+    })
+}
+
+/// The one column a constraint error's detail names (`Key (district_id)=(…)`),
+/// or `None` for a detail naming several or none.
+#[cfg(feature = "postgres")]
+fn key_column(detail: &str) -> Option<String> {
+    let rest = detail.strip_prefix("Key (")?;
+    let cols = &rest[..rest.find(")=")?];
+    (!cols.contains(',')).then(|| cols.trim().to_string())
+}
+
+#[cfg(all(test, feature = "postgres"))]
+mod constraint_violation_tests {
+    use super::*;
+    use sqlx::error::ErrorKind;
+
+    #[test]
+    fn a_missing_reference_names_the_column_and_never_the_table() {
+        let v = constraint_violation(
+            ErrorKind::ForeignKeyViolation,
+            Some("23503"),
+            Some("fk_subdistricts_district_id"),
+            "Key (district_id)=(1484f475-14be-4abc-985b-7291543d32bc) is not present in table \"districts\".",
+            None,
+        )
+        .unwrap();
+        assert_eq!((v.path.as_str(), v.code.as_str()), ("district_id", "reference_missing"));
+        assert!(!v.message.contains("districts\"") && !v.message.contains("fk_"), "{}", v.message);
+    }
+
+    #[test]
+    fn removing_a_referenced_record_is_still_referenced() {
+        let v = constraint_violation(
+            ErrorKind::ForeignKeyViolation,
+            Some("23503"),
+            Some("fk_provinces_country_id"),
+            "Key (id)=(866f1b4e-a9f3-4626-95d1-13c183916b4b) is still referenced from table \"provinces\".",
+            None,
+        )
+        .unwrap();
+        assert_eq!((v.path.as_str(), v.code.as_str()), ("", "still_referenced"));
+    }
+
+    #[test]
+    fn a_rule_constraint_answers_its_rules_code() {
+        let check = constraint_violation(ErrorKind::CheckViolation, Some("23514"), Some("ck_countries_name__max_length"), "", Some("name")).unwrap();
+        assert_eq!((check.path.as_str(), check.code.as_str()), ("name", "max_length"));
+        let unique = constraint_violation(ErrorKind::UniqueViolation, Some("23505"), Some("uq_accounts__account_code_taken"), "Key (company_id, code)=(a, b) already exists.", None).unwrap();
+        assert_eq!((unique.path.as_str(), unique.code.as_str()), ("", "account_code_taken"));
+        let overlap = constraint_violation(ErrorKind::Other, Some("23P01"), Some("ex_tax_rates__overlapping_validity"), "", None).unwrap();
+        assert_eq!(overlap.code, "overlapping_validity");
+    }
+
+    #[test]
+    fn an_error_that_names_no_rule_keeps_its_old_answer() {
+        assert!(constraint_violation(ErrorKind::UniqueViolation, Some("23505"), Some("users_email_key"), "", None).is_none());
+        assert!(constraint_violation(ErrorKind::Other, Some("42P01"), None, "", None).is_none());
+        assert!(constraint_violation(ErrorKind::NotNullViolation, Some("23502"), Some("x"), "", None).is_none());
     }
 }
 
