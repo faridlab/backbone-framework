@@ -108,7 +108,7 @@ macro_rules! impl_crud_repository {
             ) -> Result<$entity, backbone_core::RepositoryError> {
                 (&**self).create(&entity)
                     .await
-                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+                    .map_err(backbone_core::RepositoryError::from_source)
             }
 
             async fn find_by_id(
@@ -117,7 +117,7 @@ macro_rules! impl_crud_repository {
             ) -> Result<Option<$entity>, backbone_core::RepositoryError> {
                 (&**self).find_by_id(id)
                     .await
-                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+                    .map_err(backbone_core::RepositoryError::from_source)
             }
 
             async fn find_by_id_including_deleted(
@@ -126,7 +126,7 @@ macro_rules! impl_crud_repository {
             ) -> Result<Option<$entity>, backbone_core::RepositoryError> {
                 (&**self).find_deleted_by_id(id)
                     .await
-                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+                    .map_err(backbone_core::RepositoryError::from_source)
             }
 
             async fn update(
@@ -136,7 +136,7 @@ macro_rules! impl_crud_repository {
                 let id = backbone_core::PersistentEntity::entity_id(&entity);
                 (&**self).update(&id, &entity)
                     .await
-                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+                    .map_err(backbone_core::RepositoryError::from_source)
                     .and_then(|opt| opt.ok_or(backbone_core::RepositoryError::NotFound))
             }
 
@@ -146,7 +146,7 @@ macro_rules! impl_crud_repository {
             ) -> Result<bool, backbone_core::RepositoryError> {
                 (&**self).soft_delete(id)
                     .await
-                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+                    .map_err(backbone_core::RepositoryError::from_source)
             }
 
             async fn restore(
@@ -155,7 +155,7 @@ macro_rules! impl_crud_repository {
             ) -> Result<Option<$entity>, backbone_core::RepositoryError> {
                 (&**self).restore(id)
                     .await
-                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+                    .map_err(backbone_core::RepositoryError::from_source)
             }
 
             async fn hard_delete(
@@ -164,7 +164,7 @@ macro_rules! impl_crud_repository {
             ) -> Result<bool, backbone_core::RepositoryError> {
                 (&**self).permanent_delete(id)
                     .await
-                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+                    .map_err(backbone_core::RepositoryError::from_source)
             }
 
             async fn list(
@@ -177,7 +177,7 @@ macro_rules! impl_crud_repository {
                 (&**self).list_paginated(pagination)
                     .await
                     .map(|r| (r.data, r.pagination.total))
-                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+                    .map_err(backbone_core::RepositoryError::from_source)
             }
 
             async fn list_filtered(
@@ -191,7 +191,7 @@ macro_rules! impl_crud_repository {
                 (&**self).list_paginated_filtered(pagination, Some(&filters))
                     .await
                     .map(|r| (r.data, r.pagination.total))
-                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+                    .map_err(backbone_core::RepositoryError::from_source)
             }
 
             async fn list_filtered_with_info(
@@ -209,7 +209,7 @@ macro_rules! impl_crud_repository {
                     .list_paginated_filtered(pagination, Some(&filters))
                     .await
                     .map(|r| (r.data, r.pagination))
-                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+                    .map_err(backbone_core::RepositoryError::from_source)
             }
 
             fn table_name(&self) -> Option<&str> {
@@ -223,7 +223,7 @@ macro_rules! impl_crud_repository {
             ) -> Result<backbone_orm::repository::AggregateResult, backbone_core::RepositoryError> {
                 (&**self).aggregate_filtered(spec, Some(&filters))
                     .await
-                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+                    .map_err(backbone_core::RepositoryError::from_source)
             }
 
             async fn list_deleted(
@@ -236,19 +236,19 @@ macro_rules! impl_crud_repository {
                 (&**self).list_deleted(pagination)
                     .await
                     .map(|r| (r.data, r.pagination.total))
-                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+                    .map_err(backbone_core::RepositoryError::from_source)
             }
 
             async fn count(&self) -> Result<u64, backbone_core::RepositoryError> {
                 (&**self).count_active()
                     .await
-                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+                    .map_err(backbone_core::RepositoryError::from_source)
             }
 
             async fn count_deleted(&self) -> Result<u64, backbone_core::RepositoryError> {
                 (&**self).count_deleted()
                     .await
-                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+                    .map_err(backbone_core::RepositoryError::from_source)
             }
 
             async fn bulk_create(
@@ -260,7 +260,7 @@ macro_rules! impl_crud_repository {
                     let created = (&**self)
                         .create(&entity)
                         .await
-                        .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))?;
+                        .map_err(backbone_core::RepositoryError::from_source)?;
                     results.push(created);
                 }
                 Ok(results)
@@ -269,7 +269,7 @@ macro_rules! impl_crud_repository {
             async fn empty_trash(&self) -> Result<u64, backbone_core::RepositoryError> {
                 (&**self).empty_trash()
                     .await
-                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+                    .map_err(backbone_core::RepositoryError::from_source)
             }
 
             // ── Atomic batch operations (single-transaction, all-or-nothing) ──
@@ -280,7 +280,7 @@ macro_rules! impl_crud_repository {
             ) -> Result<u64, backbone_core::RepositoryError> {
                 (&**self).bulk_soft_delete(ids)
                     .await
-                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+                    .map_err(backbone_core::RepositoryError::from_source)
             }
 
             async fn bulk_restore(
@@ -289,7 +289,7 @@ macro_rules! impl_crud_repository {
             ) -> Result<Vec<$entity>, backbone_core::RepositoryError> {
                 (&**self).bulk_restore(ids)
                     .await
-                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+                    .map_err(backbone_core::RepositoryError::from_source)
             }
 
             async fn bulk_hard_delete(
@@ -298,13 +298,13 @@ macro_rules! impl_crud_repository {
             ) -> Result<u64, backbone_core::RepositoryError> {
                 (&**self).bulk_permanent_delete(ids)
                     .await
-                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+                    .map_err(backbone_core::RepositoryError::from_source)
             }
 
             async fn restore_all(&self) -> Result<Vec<$entity>, backbone_core::RepositoryError> {
                 (&**self).restore_all()
                     .await
-                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+                    .map_err(backbone_core::RepositoryError::from_source)
             }
 
             async fn bulk_update(
@@ -313,7 +313,7 @@ macro_rules! impl_crud_repository {
             ) -> Result<Vec<$entity>, backbone_core::RepositoryError> {
                 (&**self).bulk_update(&entities)
                     .await
-                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+                    .map_err(backbone_core::RepositoryError::from_source)
             }
         }
     };
@@ -352,7 +352,7 @@ macro_rules! impl_crud_repository {
             ) -> Result<$entity, backbone_core::RepositoryError> {
                 (&**self).create(&entity)
                     .await
-                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+                    .map_err(backbone_core::RepositoryError::from_source)
             }
 
             async fn find_by_id(
@@ -361,7 +361,7 @@ macro_rules! impl_crud_repository {
             ) -> Result<Option<$entity>, backbone_core::RepositoryError> {
                 (&**self).find_by_id(id)
                     .await
-                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+                    .map_err(backbone_core::RepositoryError::from_source)
             }
 
             async fn find_by_id_including_deleted(
@@ -371,7 +371,7 @@ macro_rules! impl_crud_repository {
                 // No soft delete: "including deleted" == normal lookup
                 (&**self).find_by_id(id)
                     .await
-                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+                    .map_err(backbone_core::RepositoryError::from_source)
             }
 
             async fn update(
@@ -381,7 +381,7 @@ macro_rules! impl_crud_repository {
                 let id = backbone_core::PersistentEntity::entity_id(&entity);
                 (&**self).update(&id, &entity)
                     .await
-                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+                    .map_err(backbone_core::RepositoryError::from_source)
                     .and_then(|opt| opt.ok_or(backbone_core::RepositoryError::NotFound))
             }
 
@@ -392,7 +392,7 @@ macro_rules! impl_crud_repository {
                 // No soft delete: fall back to hard delete
                 (&**self).delete(id)
                     .await
-                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+                    .map_err(backbone_core::RepositoryError::from_source)
             }
 
             async fn restore(
@@ -402,7 +402,7 @@ macro_rules! impl_crud_repository {
                 // No soft delete: "restore" is a no-op, return the current row
                 (&**self).find_by_id(id)
                     .await
-                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+                    .map_err(backbone_core::RepositoryError::from_source)
             }
 
             async fn hard_delete(
@@ -411,7 +411,7 @@ macro_rules! impl_crud_repository {
             ) -> Result<bool, backbone_core::RepositoryError> {
                 (&**self).delete(id)
                     .await
-                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+                    .map_err(backbone_core::RepositoryError::from_source)
             }
 
             async fn list(
@@ -424,7 +424,7 @@ macro_rules! impl_crud_repository {
                 (&**self).list_paginated(pagination)
                     .await
                     .map(|r| (r.data, r.pagination.total))
-                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+                    .map_err(backbone_core::RepositoryError::from_source)
             }
 
             async fn list_filtered(
@@ -438,7 +438,7 @@ macro_rules! impl_crud_repository {
                 (&**self).list_paginated_filtered(pagination, Some(&filters))
                     .await
                     .map(|r| (r.data, r.pagination.total))
-                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+                    .map_err(backbone_core::RepositoryError::from_source)
             }
 
             async fn list_filtered_with_info(
@@ -456,7 +456,7 @@ macro_rules! impl_crud_repository {
                     .list_paginated_filtered(pagination, Some(&filters))
                     .await
                     .map(|r| (r.data, r.pagination))
-                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+                    .map_err(backbone_core::RepositoryError::from_source)
             }
 
             fn table_name(&self) -> Option<&str> {
@@ -470,7 +470,7 @@ macro_rules! impl_crud_repository {
             ) -> Result<backbone_orm::repository::AggregateResult, backbone_core::RepositoryError> {
                 (&**self).aggregate_filtered(spec, Some(&filters))
                     .await
-                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+                    .map_err(backbone_core::RepositoryError::from_source)
             }
 
             async fn list_deleted(
@@ -485,7 +485,7 @@ macro_rules! impl_crud_repository {
             async fn count(&self) -> Result<u64, backbone_core::RepositoryError> {
                 (&**self).count()
                     .await
-                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+                    .map_err(backbone_core::RepositoryError::from_source)
             }
 
             async fn count_deleted(&self) -> Result<u64, backbone_core::RepositoryError> {
@@ -501,7 +501,7 @@ macro_rules! impl_crud_repository {
                     let created = (&**self)
                         .create(&entity)
                         .await
-                        .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))?;
+                        .map_err(backbone_core::RepositoryError::from_source)?;
                     results.push(created);
                 }
                 Ok(results)
@@ -520,7 +520,7 @@ macro_rules! impl_crud_repository {
                 // No soft delete: fall back to hard delete
                 (&**self).bulk_delete(ids)
                     .await
-                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+                    .map_err(backbone_core::RepositoryError::from_source)
             }
 
             async fn bulk_restore(
@@ -537,7 +537,7 @@ macro_rules! impl_crud_repository {
             ) -> Result<u64, backbone_core::RepositoryError> {
                 (&**self).bulk_delete(ids)
                     .await
-                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+                    .map_err(backbone_core::RepositoryError::from_source)
             }
 
             async fn restore_all(&self) -> Result<Vec<$entity>, backbone_core::RepositoryError> {
@@ -551,7 +551,7 @@ macro_rules! impl_crud_repository {
             ) -> Result<Vec<$entity>, backbone_core::RepositoryError> {
                 (&**self).bulk_update(&entities)
                     .await
-                    .map_err(|e| backbone_core::RepositoryError::DatabaseError(e.to_string()))
+                    .map_err(backbone_core::RepositoryError::from_source)
             }
         }
     };

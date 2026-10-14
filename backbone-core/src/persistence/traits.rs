@@ -44,6 +44,22 @@ pub enum RepositoryError {
     Violations(Vec<crate::violation::Violation>),
 }
 
+impl RepositoryError {
+    /// The repository error for a failure an inner layer reported as any error type.
+    /// A database error inside it (however wrapped in context) converts as a `sqlx::Error`
+    /// does, so a constraint the database refused with stays a violation; anything else
+    /// keeps its sentence as a database error.
+    pub fn from_source(e: impl Into<anyhow::Error>) -> Self {
+        let e: anyhow::Error = e.into();
+        #[cfg(feature = "postgres")]
+        let e = match e.downcast::<sqlx::Error>() {
+            Ok(db) => return RepositoryError::from(db),
+            Err(e) => e,
+        };
+        RepositoryError::DatabaseError(e.to_string())
+    }
+}
+
 impl From<serde_json::Error> for RepositoryError {
     fn from(e: serde_json::Error) -> Self {
         RepositoryError::SerializationError(e.to_string())
@@ -174,6 +190,15 @@ mod constraint_violation_tests {
         assert_eq!((unique.path.as_str(), unique.code.as_str()), ("", "account_code_taken"));
         let overlap = constraint_violation(ErrorKind::Other, Some("23P01"), Some("ex_tax_rates__overlapping_validity"), "", None).unwrap();
         assert_eq!(overlap.code, "overlapping_validity");
+    }
+
+    #[test]
+    fn a_database_error_inside_any_error_converts_as_the_database_error_does() {
+        let wrapped = anyhow::Error::new(sqlx::Error::RowNotFound).context("loading the row");
+        assert!(matches!(RepositoryError::from_source(wrapped), RepositoryError::NotFound));
+        assert!(matches!(RepositoryError::from_source(sqlx::Error::RowNotFound), RepositoryError::NotFound));
+        let other = RepositoryError::from_source(anyhow::anyhow!("pool closed"));
+        assert!(matches!(other, RepositoryError::DatabaseError(ref m) if m == "pool closed"), "{other:?}");
     }
 
     #[test]
