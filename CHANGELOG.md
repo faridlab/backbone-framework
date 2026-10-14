@@ -14,6 +14,15 @@ The release workflow reads the section matching the git tag's version and
 uses it as the GitHub Release body. If no matching section is found it falls
 back to the `## [Unreleased]` section.
 
+## [3.8.1] - 2026-10-14
+
+### Fixed
+
+- **backbone-core** — a constraint refusal answers 422 through a generated repository too.
+  `impl_crud_repository!` had turned every error from the inner repository into text, so the
+  database error 3.8.0 maps never reached the mapping; it now converts through
+  `RepositoryError::from_source`, which recovers a `sqlx::Error` however it was wrapped.
+
 ## [3.8.0] - 2026-10-14
 
 ### Changed
