@@ -1,0 +1,31 @@
+# License policy for every crate in this workspace, checked in CI by
+# `cargo deny check licenses` (.github/workflows/test.yml).
+#
+# Allowed: permissive licenses, plus MPL-2.0. MPL is file-level copyleft: it
+# binds only changes to the MPL-covered files themselves, which this project
+# never makes, and places nothing on the code that links them (today:
+# colored, ascii_utils, fast_chemail). Anything else — GPL, AGPL, SSPL, BUSL,
+# RSAL, or a crate with no license — fails the check and needs a deliberate
+# decision recorded here.
+
+[graph]
+all-features = true
+
+[licenses]
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "Unicode-3.0",
+    "CC0-1.0",
+    # LLVM's permissive license, alongside MIT OR Apache-2.0 (libfuzzer-sys).
+    "NCSA",
+    # A permissive *data* license on Mozilla's CA bundle (webpki-roots).
+    "CDLA-Permissive-2.0",
+    "MPL-2.0",
+]
+confidence-threshold = 0.9

@@ -42,6 +42,17 @@ jobs:
       - name: Dry-run the workspace publish
         run: cargo publish --workspace --dry-run
 
+  licenses:
+    name: Every dependency carries an allowed license
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The policy and its reasons live in deny.toml.
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses
+
   rls-fence:
     name: RLS fence (backbone-orm live tests)
     runs-on: ubuntu-latest
