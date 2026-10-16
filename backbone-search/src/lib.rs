@@ -4,7 +4,7 @@
 //!
 //! ## Features
 //!
-//! - **Elasticsearch Backend**: Full-text search with advanced queries
+//! - **Elasticsearch Backend** (`elasticsearch` feature, off by default): Full-text search with advanced queries
 //! - **Algolia Backend**: Fast search-as-a-service integration
 //! - **Index Management**: Create, update, delete search indices
 //! - **Document Operations**: Index, update, delete documents
@@ -43,6 +43,7 @@
 //! let results = search.search("products", query).await?;
 //! ```
 
+#[cfg(feature = "elasticsearch")]
 pub mod elasticsearch;
 pub mod algolia;
 pub mod traits;
@@ -50,6 +51,7 @@ pub mod types;
 
 pub use traits::*;
 pub use types::*;
+#[cfg(feature = "elasticsearch")]
 pub use elasticsearch::*;
 pub use algolia::*;
 

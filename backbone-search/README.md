@@ -33,9 +33,13 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-backbone-search = "2.0.0"
+backbone-search = { version = "3", features = ["elasticsearch"] }
 tokio = { version = "1.0", features = ["full"] }
 ```
+
+The Elasticsearch backend sits behind the off-by-default `elasticsearch` feature: its Rust client
+is only published as an alpha, and the Elasticsearch server is not open source. For most
+applications, PostgreSQL full-text search is enough; reach for a search engine only when it is not.
 
 ### Basic Usage
 

@@ -14,6 +14,16 @@ The release workflow reads the section matching the git tag's version and
 uses it as the GitHub Release body. If no matching section is found it falls
 back to the `## [Unreleased]` section.
 
+## [Unreleased]
+
+### Changed
+
+- **backbone-search** — **breaking:** the Elasticsearch backend (`ElasticsearchSearch` and the
+  `elasticsearch` module) is behind a new `elasticsearch` feature, off by default. Its Rust client
+  is only published as an alpha, and the Elasticsearch server is not open source, so a default
+  build no longer pulls it in. Crates that use it add `features = ["elasticsearch"]`. The Algolia
+  backend, the traits, the types and the `SearchError` variants are unchanged.
+
 ## [3.9.0] - 2026-10-16
 
 ### Added

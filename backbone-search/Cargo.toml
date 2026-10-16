@@ -18,8 +18,9 @@ serde_json = "1.0"
 # Async trait
 async-trait = "0.1"
 
-# Elasticsearch support
-elasticsearch = { version = "8.15.0-alpha.1" }
+# Elasticsearch support (off by default: the only published client is an alpha,
+# and the server is not open source; enable the `elasticsearch` feature to use it)
+elasticsearch = { version = "8.15.0-alpha.1", optional = true }
 
 # Algolia support
 algoliasearch = "0.1.7"
@@ -38,6 +39,11 @@ tracing = "0.1"
 
 # URL encoding
 url = "2.5"
+
+[features]
+default = []
+# Elasticsearch backend (`ElasticsearchSearch`).
+elasticsearch = ["dep:elasticsearch"]
 
 [dev-dependencies]
 tempfile = "3.0"
