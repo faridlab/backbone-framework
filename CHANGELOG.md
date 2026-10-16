@@ -24,6 +24,9 @@ back to the `## [Unreleased]` section.
   one that scope bound: a nested `with_request_scope` makes its own connection current, and that
   connection carries `app.company_id` alone, so an insert under the reused scope read no acting
   unit and landed with no `org_unit_id` (the org-unit guard then refused it).
+- **backbone-storage** — drops the `zip` dependency, which no code used: crates.io now serves no
+  `zip` 2.x release (every one is yanked), so the requirement stopped resolving and the
+  workspace could not be packaged.
 
 ## [3.8.1] - 2026-10-14
 

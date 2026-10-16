@@ -58,7 +58,6 @@ imageproc = "0.25"
 kamadak-exif = "0.5"
 
 # Additional compression formats
-zip = "2.2"           # ZIP archive compression
 brotli = "6.0"        # Brotli compression
 lz4_flex = "0.11"    # LZ4 compression
 snap = "1.1"         # Snappy compression
