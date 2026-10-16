@@ -14,6 +14,17 @@ The release workflow reads the section matching the git tag's version and
 uses it as the GitHub Release body. If no matching section is found it falls
 back to the `## [Unreleased]` section.
 
+## [3.8.2] - 2026-10-16
+
+### Fixed
+
+- **backbone-orm** — an org scope requested inside a legacy company scope that sits inside the
+  same org scope binds a connection of its own instead of reusing the company scope's. The
+  fast path that reuses an ambient org scope now checks the current request connection is the
+  one that scope bound: a nested `with_request_scope` makes its own connection current, and that
+  connection carries `app.company_id` alone, so an insert under the reused scope read no acting
+  unit and landed with no `org_unit_id` (the org-unit guard then refused it).
+
 ## [3.8.1] - 2026-10-14
 
 ### Fixed
