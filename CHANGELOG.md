@@ -14,7 +14,7 @@ The release workflow reads the section matching the git tag's version and
 uses it as the GitHub Release body. If no matching section is found it falls
 back to the `## [Unreleased]` section.
 
-## [Unreleased]
+## [3.10.0] - 2026-10-17
 
 ### Changed
 
