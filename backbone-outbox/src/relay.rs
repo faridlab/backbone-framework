@@ -74,6 +74,10 @@ where
     .await?;
 
     let mut published = 0usize;
+    // Publish failures leave their rows for the next pass. Count them, and say so once per pass:
+    // a transport that refuses everything must be visible, without a line per record per second.
+    let mut refused = 0usize;
+    let mut first_refusal: Option<String> = None;
     for row in rows {
         let rec = row.into_record();
         let id = rec.id;
@@ -89,7 +93,10 @@ where
                 published += 1;
             }
             // Leave the row un-published; the next pass retries it.
-            Err(OutboxError::Publish(_)) => {}
+            Err(OutboxError::Publish(reason)) => {
+                refused += 1;
+                first_refusal.get_or_insert(reason);
+            }
             // The transport gave up on this record. Marking it published would report a delivery
             // that never happened and erase the only trace that work was dropped; leaving it pending
             // would re-hand the same doomed record on every pass forever. Mark it dead instead:
@@ -106,6 +113,14 @@ where
             }
             Err(e) => return Err(e),
         }
+    }
+    if refused > 0 {
+        tracing::warn!(
+            schema,
+            refused,
+            reason = first_refusal.as_deref().unwrap_or_default(),
+            "outbox relay: the transport refused records this pass; they stay pending and retry"
+        );
     }
     Ok(published)
 }
