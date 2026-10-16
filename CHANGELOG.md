@@ -14,6 +14,21 @@ The release workflow reads the section matching the git tag's version and
 uses it as the GitHub Release body. If no matching section is found it falls
 back to the `## [Unreleased]` section.
 
+## [3.9.0] - 2026-10-16
+
+### Added
+
+- **backbone-outbox** — `runner::supervise(pool, cfg, publish, shutdown)` runs the relay under
+  supervision: a drain error is logged with its schema and the relay restarts after a wait that
+  doubles from one second to a minute (reset once a run has lasted that long), until shutdown. A
+  bare `runner::run` used to end its task for good on the first hard error, with no log line,
+  while events kept staging behind it.
+
+### Changed
+
+- **backbone-outbox** — the transport refusing records is logged once per drain pass with the
+  count and the first reason; it used to be silent. Refused records still stay pending.
+
 ## [3.8.2] - 2026-10-16
 
 ### Fixed
