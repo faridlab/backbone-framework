@@ -56,6 +56,11 @@ tokio::task_local! {
     /// The resolved org scope of the current request: entitled unit ids (union of subtrees,
     /// root included) and the acting node. Unset for platform callers and non-request code.
     static ORG_SCOPE: Arc<OrgScope>;
+    /// The connection the ambient org scope bound its variables on. A nested scope of another
+    /// kind (the legacy company scope) can make a different connection the current request
+    /// connection, and that one carries none of the org variables: reuse is safe only while the
+    /// current request connection is still this one.
+    static ORG_SCOPE_CONN: Arc<Mutex<sqlx::pool::PoolConnection<sqlx::Postgres>>>;
 }
 
 /// A resolved session scope over the org tree (ADR-0028).
@@ -293,7 +298,8 @@ where
     // A call carrying audit attribution always takes the slow path — its variables are not part of
     // the scope comparison, so matching scopes say nothing about matching attribution.
     if audit.is_none()
-        && crate::company_scope::current_request_conn().is_some()
+        && crate::company_scope::current_request_conn()
+            .is_some_and(|conn| ORG_SCOPE_CONN.try_with(|own| Arc::ptr_eq(own, &conn)).unwrap_or(false))
         && ORG_SCOPE.try_with(|ambient| **ambient == scope).unwrap_or(false)
         && ORG_SCOPE_POOL
             .try_with(|ambient| std::sync::Arc::ptr_eq(ambient, &pool.connect_options()))
@@ -346,7 +352,7 @@ where
     let result = ORG_SCOPE_POOL
         .scope(
             pool_identity,
-            ORG_SCOPE.scope(scope_arc.clone(), async {
+            ORG_SCOPE_CONN.scope(holder.clone(), ORG_SCOPE.scope(scope_arc.clone(), async {
                 crate::company_scope::with_company_scope_internal(scope_arc.legacy_company_id, async {
                     let inner = crate::company_scope::with_request_conn_internal(holder.clone(), f);
                     match audit_owned {
@@ -357,7 +363,7 @@ where
                     }
                 })
                 .await
-            }),
+            })),
         )
         .await;
 
@@ -599,6 +605,39 @@ mod tests {
         .execute(admin)
         .await
         .unwrap();
+    }
+
+    /// A legacy company scope nested inside an org scope makes its own connection the request
+    /// connection, and that connection carries no org variables. A second request for the same
+    /// org scope inside it must bind a connection of its own, so a write it makes reads the acting
+    /// unit, rather than reuse the legacy one and insert with no org unit.
+    #[tokio::test]
+    async fn a_nested_company_scope_never_lends_its_connection_to_an_org_scope() {
+        let Some(dsn) = dsn() else { eprintln!("skipping: set BACKBONE_ORM_RLS_DSN"); return };
+        let pool = admin_pool(&dsn).await;
+        let unit = Uuid::new_v4();
+        let scope = super::OrgScope::for_company_unit(unit);
+        let acting = with_org_request_scope(&pool, scope.clone(), async {
+            crate::company_scope::with_request_scope(&pool, unit, async {
+                with_org_request_scope(&pool, scope.clone(), async {
+                    let row = super::fetch_optional_row_scoped(
+                        &pool,
+                        sqlx::query("SELECT current_setting('app.acting_unit_id', true) AS acting"),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+                    row.get::<Option<String>, _>("acting")
+                })
+                .await
+                .unwrap()
+            })
+            .await
+            .unwrap()
+        })
+        .await
+        .unwrap();
+        assert_eq!(acting.as_deref(), Some(unit.to_string().as_str()));
     }
 
     #[tokio::test]
