@@ -276,18 +276,13 @@ where
             return Ok(Vec::new());
         }
         let table = self.table_name();
-        if let Some(conn) = crate::company_scope::current_request_conn() {
-            let mut held = conn.lock().await;
-            let mut tx = sqlx::Connection::begin(&mut **held).await?;
-            let rows = insert_each(&mut tx, table, entities).await?;
-            tx.commit().await?;
-            return Ok(rows);
+        let unit = crate::write_tx::begin_unit(self.pool(), true).await?;
+        let rows = async {
+            let mut conn = unit.conn().await;
+            insert_each(&mut conn, table, entities).await
         }
-        let mut tx = self.pool().begin().await?;
-        crate::company_scope::bind_current_company(&mut tx).await?;
-        let rows = insert_each(&mut tx, table, entities).await?;
-        tx.commit().await?;
-        Ok(rows)
+        .await;
+        unit.finish(rows).await
     }
 
     /// Update many rows from `(before, after)` pairs inside one transaction, writing for each
@@ -304,18 +299,13 @@ where
             return Ok(Vec::new());
         }
         let table = self.table_name();
-        if let Some(conn) = crate::company_scope::current_request_conn() {
-            let mut held = conn.lock().await;
-            let mut tx = sqlx::Connection::begin(&mut **held).await?;
-            let rows = update_each_changed(&mut tx, table, guard, pairs).await?;
-            tx.commit().await?;
-            return Ok(rows);
+        let unit = crate::write_tx::begin_unit(self.pool(), true).await?;
+        let rows = async {
+            let mut conn = unit.conn().await;
+            update_each_changed(&mut conn, table, guard, pairs).await
         }
-        let mut tx = self.pool().begin().await?;
-        crate::company_scope::bind_current_company(&mut tx).await?;
-        let rows = update_each_changed(&mut tx, table, guard, pairs).await?;
-        tx.commit().await?;
-        Ok(rows)
+        .await;
+        unit.finish(rows).await
     }
 
     // ── Generic unique-field lookups ──────────────────────────────────────────
@@ -879,23 +869,26 @@ where
              ) WHERE id IN ({placeholders}) AND (metadata->>'deleted_at') IS NULL",
             self.table_name()
         );
-        let mut tx = self.pool().begin().await?;
-        crate::company_scope::bind_current_company(&mut tx).await?;
-        let mut q = sqlx::query(&query);
-        for id in ids {
-            q = q.bind(id);
+        let unit = crate::write_tx::begin_unit(self.pool(), false).await?;
+        let outcome: Result<u64> = async {
+            let mut conn = unit.conn().await;
+            let mut q = sqlx::query(&query);
+            for id in ids {
+                q = q.bind(id);
+            }
+            let affected = q.execute(&mut *conn).await?.rows_affected();
+            if affected != ids.len() as u64 {
+                // Finishing with an error rolls the unit back.
+                return Err(anyhow::anyhow!(
+                    "bulk_soft_delete: {} of {} ids were not active/deletable; rolled back",
+                    ids.len() as u64 - affected,
+                    ids.len()
+                ));
+            }
+            Ok(affected)
         }
-        let affected = q.execute(&mut *tx).await?.rows_affected();
-        if affected != ids.len() as u64 {
-            // `tx` is dropped here without commit → rolled back.
-            return Err(anyhow::anyhow!(
-                "bulk_soft_delete: {} of {} ids were not active/deletable; rolled back",
-                ids.len() as u64 - affected,
-                ids.len()
-            ));
-        }
-        tx.commit().await?;
-        Ok(affected)
+        .await;
+        unit.finish(outcome).await
     }
 
     /// Restore many soft-deleted rows atomically, returning the restored rows.
@@ -910,22 +903,25 @@ where
              RETURNING *",
             self.table_name()
         );
-        let mut tx = self.pool().begin().await?;
-        crate::company_scope::bind_current_company(&mut tx).await?;
-        let mut q = sqlx::query_as::<_, T>(&query);
-        for id in ids {
-            q = q.bind(id);
+        let unit = crate::write_tx::begin_unit(self.pool(), false).await?;
+        let outcome: Result<Vec<T>> = async {
+            let mut conn = unit.conn().await;
+            let mut q = sqlx::query_as::<_, T>(&query);
+            for id in ids {
+                q = q.bind(id);
+            }
+            let rows = q.fetch_all(&mut *conn).await?;
+            if rows.len() != ids.len() {
+                return Err(anyhow::anyhow!(
+                    "bulk_restore: {} of {} ids were not in trash; rolled back",
+                    ids.len() - rows.len(),
+                    ids.len()
+                ));
+            }
+            Ok(rows)
         }
-        let rows = q.fetch_all(&mut *tx).await?;
-        if rows.len() != ids.len() {
-            return Err(anyhow::anyhow!(
-                "bulk_restore: {} of {} ids were not in trash; rolled back",
-                ids.len() - rows.len(),
-                ids.len()
-            ));
-        }
-        tx.commit().await?;
-        Ok(rows)
+        .await;
+        unit.finish(outcome).await
     }
 
     /// Permanently delete many soft-deleted rows atomically.
@@ -938,22 +934,25 @@ where
             "DELETE FROM {} WHERE id IN ({placeholders}) AND (metadata->>'deleted_at') IS NOT NULL",
             self.table_name()
         );
-        let mut tx = self.pool().begin().await?;
-        crate::company_scope::bind_current_company(&mut tx).await?;
-        let mut q = sqlx::query(&query);
-        for id in ids {
-            q = q.bind(id);
+        let unit = crate::write_tx::begin_unit(self.pool(), false).await?;
+        let outcome: Result<u64> = async {
+            let mut conn = unit.conn().await;
+            let mut q = sqlx::query(&query);
+            for id in ids {
+                q = q.bind(id);
+            }
+            let affected = q.execute(&mut *conn).await?.rows_affected();
+            if affected != ids.len() as u64 {
+                return Err(anyhow::anyhow!(
+                    "bulk_permanent_delete: {} of {} ids were not in trash; rolled back",
+                    ids.len() as u64 - affected,
+                    ids.len()
+                ));
+            }
+            Ok(affected)
         }
-        let affected = q.execute(&mut *tx).await?.rows_affected();
-        if affected != ids.len() as u64 {
-            return Err(anyhow::anyhow!(
-                "bulk_permanent_delete: {} of {} ids were not in trash; rolled back",
-                ids.len() as u64 - affected,
-                ids.len()
-            ));
-        }
-        tx.commit().await?;
-        Ok(affected)
+        .await;
+        unit.finish(outcome).await
     }
 
     /// Restore every soft-deleted row, returning the restored rows. A single
@@ -1279,22 +1278,25 @@ where
             "DELETE FROM {} WHERE id IN ({placeholders})",
             self.table_name()
         );
-        let mut tx = self.pool().begin().await?;
-        crate::company_scope::bind_current_company(&mut tx).await?;
-        let mut q = sqlx::query(&query);
-        for id in ids {
-            q = q.bind(id);
+        let unit = crate::write_tx::begin_unit(self.pool(), false).await?;
+        let outcome: Result<u64> = async {
+            let mut conn = unit.conn().await;
+            let mut q = sqlx::query(&query);
+            for id in ids {
+                q = q.bind(id);
+            }
+            let affected = q.execute(&mut *conn).await?.rows_affected();
+            if affected != ids.len() as u64 {
+                return Err(anyhow::anyhow!(
+                    "bulk_delete: {} of {} ids not found; rolled back",
+                    ids.len() as u64 - affected,
+                    ids.len()
+                ));
+            }
+            Ok(affected)
         }
-        let affected = q.execute(&mut *tx).await?.rows_affected();
-        if affected != ids.len() as u64 {
-            return Err(anyhow::anyhow!(
-                "bulk_delete: {} of {} ids not found; rolled back",
-                ids.len() as u64 - affected,
-                ids.len()
-            ));
-        }
-        tx.commit().await?;
-        Ok(affected)
+        .await;
+        unit.finish(outcome).await
     }
 
     /// Update many rows atomically. No soft-delete guard in this mode.
@@ -1429,10 +1431,12 @@ async fn row_visible(
          WHERE t.{column} = (jsonb_populate_record(NULL::{table}, $1::jsonb)).{column})"
     );
     let probe = serde_json::json!({ column: value });
-    Ok(crate::company_scope::fetch_one_scalar_scoped(
+    // A missing table fails this statement and the caller tries another spelling. Inside a write
+    // transaction that failure would abort it, so the lookup runs as a savepoint of it.
+    Ok(crate::write_tx::within_savepoint(crate::company_scope::fetch_one_scalar_scoped(
         pool,
         sqlx::query_scalar::<_, bool>(&query).bind(probe),
-    )
+    ))
     .await?)
 }
 
@@ -1467,38 +1471,41 @@ where
     if entities.is_empty() {
         return Ok(Vec::new());
     }
-    let mut tx = pool.begin().await?;
-    crate::company_scope::bind_current_company(&mut tx).await?;
-    let mut out = Vec::with_capacity(entities.len());
-    for entity in entities {
-        let (id, json_str, column_names) = build_update_parts(entity)?;
-        let query = format!(
-            "WITH new_row AS (\
-                SELECT (jsonb_populate_record(NULL::{table}, $1::jsonb)).*\
-             ) UPDATE {table} AS t \
-             SET ({columns}) = (SELECT {columns} FROM new_row) \
-             WHERE t.id = $2::uuid{guard} \
-             RETURNING t.*",
-            table = table,
-            columns = column_names,
-            guard = active_guard,
-        );
-        let updated = sqlx::query_as::<_, T>(&query)
-            .bind(&json_str)
-            .bind(&id)
-            .fetch_optional(&mut *tx)
-            .await?;
-        match updated {
-            Some(e) => out.push(e),
-            None => {
-                return Err(anyhow::anyhow!(
-                    "bulk_update: id '{id}' not found or already deleted; rolled back"
-                ));
+    let unit = crate::write_tx::begin_unit(pool, false).await?;
+    let outcome: Result<Vec<T>> = async {
+        let mut conn = unit.conn().await;
+        let mut out = Vec::with_capacity(entities.len());
+        for entity in entities {
+            let (id, json_str, column_names) = build_update_parts(entity)?;
+            let query = format!(
+                "WITH new_row AS (\
+                    SELECT (jsonb_populate_record(NULL::{table}, $1::jsonb)).*\
+                 ) UPDATE {table} AS t \
+                 SET ({columns}) = (SELECT {columns} FROM new_row) \
+                 WHERE t.id = $2::uuid{guard} \
+                 RETURNING t.*",
+                table = table,
+                columns = column_names,
+                guard = active_guard,
+            );
+            let updated = sqlx::query_as::<_, T>(&query)
+                .bind(&json_str)
+                .bind(&id)
+                .fetch_optional(&mut *conn)
+                .await?;
+            match updated {
+                Some(e) => out.push(e),
+                None => {
+                    return Err(anyhow::anyhow!(
+                        "bulk_update: id '{id}' not found or already deleted; rolled back"
+                    ));
+                }
             }
         }
+        Ok(out)
     }
-    tx.commit().await?;
-    Ok(out)
+    .await;
+    unit.finish(outcome).await
 }
 
 /// camelCase → snake_case (`projectId` → `project_id`), the SQL vocabulary.

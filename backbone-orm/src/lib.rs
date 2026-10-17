@@ -15,6 +15,7 @@ pub mod secret_registry;
 pub mod company_scope;
 pub mod org_scope;
 pub mod audit_context;
+pub mod write_tx;
 pub mod generic_repository;
 pub mod migrations;
 pub mod query_builder;
@@ -41,6 +42,7 @@ mod qualify_relation_tests;
 // Re-export commonly used types
 pub use repository::*;
 pub use company_scope::{current_company, with_company_scope};
+pub use write_tx::{current_write_tx, in_write_tx, in_write_tx_scope, WriteTx, WriteTxConn};
 pub use org_scope::{
     current_org_scope, resolve_org_scope, with_org_request_scope, with_org_request_scope_and_audit,
     OrgScope, OrgScopeError,

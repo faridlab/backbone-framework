@@ -98,14 +98,24 @@ where
     Ok(result)
 }
 
-/// The request-dedicated connection, if [`with_request_scope`] set one for this task.
+/// The connection statements run on: the active write transaction's
+/// ([`in_write_tx`](crate::write_tx::in_write_tx)), else the request-dedicated connection
+/// [`with_request_scope`] set for this task. Under a request scope the two are the same
+/// connection; without one, a write transaction carries its own.
 fn request_conn() -> Option<Arc<Mutex<PoolConnection<Postgres>>>> {
+    crate::write_tx::current_conn().or_else(request_conn_only)
+}
+
+/// The request-dedicated connection alone, ignoring any write transaction: where a write
+/// transaction itself begins when a request scope holds a connection.
+pub(crate) fn request_conn_only() -> Option<Arc<Mutex<PoolConnection<Postgres>>>> {
     REQUEST_CONN.try_with(|c| c.clone()).ok()
 }
 
-/// The request-dedicated connection for callers outside this module (`org_scope`'s
+/// The connection statements run on, for callers outside this module (`org_scope`'s
 /// statement-level helpers route onto the same connection so request-scoped sessions and
-/// per-statement callers share one fence surface).
+/// per-statement callers share one fence surface, and so a write transaction is joined by every
+/// one of them).
 pub(crate) fn current_request_conn() -> Option<Arc<Mutex<PoolConnection<Postgres>>>> {
     request_conn()
 }
@@ -227,12 +237,18 @@ fn detach_if_last(holder: Arc<Mutex<PoolConnection<Postgres>>>, target: &'static
 /// pool captured when the module was built, which can be another tenant's database.
 pub async fn count_on_request_conn(sql: &str, binds: &[&str]) -> Option<i64> {
     let conn = request_conn()?;
-    let mut g = conn.lock().await;
-    let mut query = sqlx::query_scalar::<_, i64>(sql);
-    for b in binds {
-        query = query.bind(*b);
-    }
-    match query.fetch_one(&mut **g).await {
+    // A count that fails means "cannot tell". Inside a write transaction the failure would abort
+    // it, so the count runs as a savepoint of it and a failure is undone on its own.
+    let counted = crate::write_tx::within_savepoint(async {
+        let mut g = conn.lock().await;
+        let mut query = sqlx::query_scalar::<_, i64>(sql);
+        for b in binds {
+            query = query.bind(*b);
+        }
+        query.fetch_one(&mut **g).await
+    })
+    .await;
+    match counted {
         Ok(n) => Some(n),
         Err(e) => {
             tracing::warn!(target: "backbone_orm::company_scope", error = %e, sql, "a delete-guard count failed");
