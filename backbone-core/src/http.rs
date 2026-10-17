@@ -111,6 +111,39 @@ fn write_error<T>(
     }
 }
 
+/// The response for a failed [`ServiceError`](crate::service::ServiceError), for handlers outside
+/// the generic CRUD handler (a generated state-machine transition, a custom route) that call the
+/// service directly.
+///
+/// A refusal for named reasons — a protected field, a broken rule, a constraint the database
+/// refused — is the caller's to fix, so it answers 422 with the violations listed, exactly as the
+/// generic handler does; it must never surface as a 500. A plain validation error answers 400,
+/// a missing record 404, a duplicate or conflict 409, and only what is left is a 500.
+pub fn service_error_response<T>(
+    err: &crate::service::ServiceError,
+) -> (axum::http::StatusCode, axum::Json<ApiResponse<T>>) {
+    use crate::persistence::traits::RepositoryError;
+    use crate::service::ServiceError;
+    use axum::http::StatusCode;
+    let (violations, fallback) = match err {
+        ServiceError::Violations(v) | ServiceError::Repository(RepositoryError::Violations(v)) => {
+            (Some(v.clone()), StatusCode::UNPROCESSABLE_ENTITY)
+        }
+        ServiceError::Validation(_)
+        | ServiceError::Repository(RepositoryError::ValidationError(_)) => {
+            (None, StatusCode::BAD_REQUEST)
+        }
+        ServiceError::NotFound | ServiceError::Repository(RepositoryError::NotFound) => {
+            (None, StatusCode::NOT_FOUND)
+        }
+        ServiceError::AlreadyExists(_)
+        | ServiceError::Repository(RepositoryError::AlreadyExists(_))
+        | ServiceError::Repository(RepositoryError::Conflict(_)) => (None, StatusCode::CONFLICT),
+        _ => (None, StatusCode::INTERNAL_SERVER_ERROR),
+    };
+    write_error(violations, err, fallback)
+}
+
 /// Generic list query parameters
 #[derive(Debug, Deserialize, Default, Clone)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -277,7 +310,8 @@ fn secret_named_message(field: &str) -> String {
 /// Reduce a list-style query into the filters the repository should actually see.
 ///
 /// `fields`/`include`/`with` shape the response, not the row set, so they are
-/// dropped before they can be mistaken for column predicates; `search` and
+/// dropped before they can be mistaken for column predicates, as is every
+/// `__`-prefixed key (the framework's internal namespace); `search` and
 /// `status` arrive as typed fields and are folded back in under the names the
 /// repository expects.
 ///
@@ -289,6 +323,9 @@ fn repository_filters(params: &ListQueryParams) -> HashMap<String, String> {
     for key in RESERVED_QUERY_KEYS {
         filters.remove(key);
     }
+    // `__`-prefixed keys are the framework's internal namespace (the ORM parser ignores them
+    // too): no client key there may reach the repository, whatever the parser does with it.
+    filters.retain(|key, _| !backbone_orm::is_internal_key(key));
     if let Some(search) = params.search.clone() {
         filters.insert("search".to_string(), search);
     }
@@ -2847,5 +2884,77 @@ mod tests {
         let (status, axum::Json(body)) = write_error::<()>(None, &"boom", axum::http::StatusCode::BAD_REQUEST);
         assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
         assert!(serde_json::to_value(&body).unwrap().get("violations").is_none());
+    }
+}
+
+#[cfg(test)]
+mod internal_key_tests {
+    use super::*;
+
+    fn params_with(filters: &[(&str, &str)]) -> ListQueryParams {
+        ListQueryParams {
+            page: 1,
+            limit: 20,
+            sort_by: None,
+            sort_order: None,
+            search: None,
+            status: None,
+            filters: filters
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn internal_keys_never_reach_the_repository() {
+        let params = params_with(&[
+            ("__base_condition", "EXISTS(SELECT 1)"),
+            ("__base_condition[eq]", "1=1"),
+            ("__anything", "x"),
+            ("name", "acme"),
+        ]);
+        let filters = repository_filters(&params);
+        assert_eq!(filters.len(), 1, "{filters:?}");
+        assert_eq!(filters.get("name").map(String::as_str), Some("acme"));
+        let filters = aggregate_filters(&params);
+        assert!(filters.keys().all(|k| !k.starts_with("__")), "{filters:?}");
+    }
+}
+
+#[cfg(test)]
+mod service_error_response_tests {
+    use super::*;
+    use crate::service::ServiceError;
+
+    #[test]
+    fn a_refused_field_is_422_with_its_violation_never_500() {
+        let err = ServiceError::Violations(vec![crate::violation::Violation::new(
+            "state",
+            "field_not_writable",
+            "state cannot be changed by a generic write",
+        )]);
+        let (status, body) = service_error_response::<()>(&err);
+        assert_eq!(status, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body.0.violations.as_ref().map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn other_errors_keep_their_own_status() {
+        use axum::http::StatusCode;
+        let status = |e: ServiceError| service_error_response::<()>(&e).0;
+        assert_eq!(
+            status(ServiceError::Validation("bad".into())),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(status(ServiceError::NotFound), StatusCode::NOT_FOUND);
+        assert_eq!(
+            status(ServiceError::AlreadyExists("x".into())),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            status(ServiceError::Internal("boom".into())),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 }

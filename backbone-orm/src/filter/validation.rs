@@ -66,6 +66,12 @@ pub fn sanitize_field_name(field: &str) -> Result<String> {
         return Err(anyhow::anyhow!("Field name cannot be empty"));
     }
 
+    // The `__` prefix is the framework's internal namespace (see `parser::is_internal_key`);
+    // no column a client may name starts with it.
+    if field.starts_with("__") {
+        return Err(anyhow::anyhow!("Reserved field name: '{}'", field));
+    }
+
     // Allow only alphanumeric and underscore
     if !field.chars().all(|c| c.is_alphanumeric() || c == '_') {
         return Err(anyhow::anyhow!("Invalid field name: '{}'", field));

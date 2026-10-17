@@ -147,9 +147,8 @@ pub struct MissingCompanyScope {
 ///
 /// The literal is safe to interpolate: `column` is generator-emitted (never client
 /// input) and `Uuid`'s `Display` can only produce hex and dashes, so neither side can
-/// carry a quote. The ORM's filter layer has no typed-parameter slot for a base
-/// condition — `__base_condition` is injected verbatim — so this is the seam the
-/// design already established for `SoftDelete`.
+/// carry a quote. A base condition is code-authored SQL with no parameter slot, the
+/// same seam the soft-delete guard uses.
 pub fn company_fence<T: EntityRepoMeta>(company: Option<Uuid>) -> Result<Option<String>, MissingCompanyScope> {
     match (T::company_field(), company) {
         (None, _) => Ok(None),
@@ -180,10 +179,8 @@ pub fn strip_client_company_filters<T: EntityRepoMeta>(filters: &mut HashMap<Str
     });
 }
 
-/// AND two optional SQL conditions into the single `__base_condition` slot.
-///
-/// `__base_condition` is one HashMap key, so the soft-delete guard and the company fence
-/// have to arrive as a single string rather than two independent predicates.
+/// AND two optional SQL conditions into the single base-condition argument the filtered
+/// queries take, so the soft-delete guard and the company fence travel as one string.
 pub fn and_conditions(a: Option<&str>, b: Option<String>) -> Option<String> {
     match (a, b) {
         (None, None) => None,
@@ -208,6 +205,9 @@ fn snake_to_camel(s: &str) -> String {
     }
     out
 }
+
+/// The not-deleted predicate an update of a soft-delete entity carries, against the alias `t`.
+const ACTIVE_ROW_GUARD: &str = " AND t.metadata->>'deleted_at' IS NULL";
 
 /// Marker: entity uses JSONB-based soft delete (`metadata->>'deleted_at'`).
 ///
@@ -359,10 +359,10 @@ where
 
     /// Execute a filtered / paginated query against this entity's table.
     ///
-    /// `base_condition` — when `Some`, it is inserted as the `__base_condition`
-    /// filter key which the ORM injects verbatim into the WHERE clause.  Use
-    /// this to add soft-delete guards without touching the caller-supplied
-    /// filters.
+    /// `base_condition` — when `Some`, raw SQL ANDed as its own parenthesised group ahead of
+    /// the caller-supplied filters, which can therefore never widen past it (not even with
+    /// an `[or]` filter). It must be code-authored; the filters map cannot carry one, since
+    /// the parser ignores every `__`-prefixed key.
     ///
     /// NOTE: prefer the `*_scoped` entry points for anything a client can reach —
     /// they compose the company fence into this condition. This raw form applies no
@@ -378,12 +378,14 @@ where
     where
         T: Send + Sync,
     {
-        let mut filters_map = filters.clone();
-        if let Some(cond) = base_condition {
-            filters_map.insert("__base_condition".to_string(), cond.to_string());
-        }
         self.inner
-            .list_with_filters(pagination, &filters_map, column_types, search_fields)
+            .list_with_filters_and_base(
+                pagination,
+                base_condition,
+                filters,
+                column_types,
+                search_fields,
+            )
             .await
     }
 
@@ -416,12 +418,14 @@ where
                 spec.label_relation = Some((table.to_string(), base_fk));
             }
         }
-        let mut filters_map = filters.clone();
-        if let Some(cond) = base_condition {
-            filters_map.insert("__base_condition".to_string(), cond.to_string());
-        }
         self.inner
-            .aggregate_with_filters(&spec, &filters_map, column_types, search_fields)
+            .aggregate_with_filters_and_base(
+                &spec,
+                base_condition,
+                filters,
+                column_types,
+                search_fields,
+            )
             .await
     }
 }
@@ -502,7 +506,7 @@ where
     /// client-reachable read should use. Fails closed: a fenced entity with no company
     /// returns [`MissingCompanyScope`] rather than every company's rows.
     ///
-    /// The fence is ANDed into the same `__base_condition` the soft-delete guard uses, so
+    /// The fence is ANDed into the same base condition the soft-delete guard uses, so
     /// it lands in SQL — which is what keeps `total` honest. A post-filter in the handler
     /// would fetch `limit` rows and return the survivors, leaving callers unable to tell
     /// "end of data" from "filtered", and could not fix `COUNT` at all.
@@ -607,15 +611,34 @@ where
         Ok(results)
     }
 
-    /// Full update — skips silently if the record is already soft-deleted.
+    /// Full update of an active record; `Ok(None)` when it is missing or soft-deleted.
+    ///
+    /// The not-deleted predicate is part of the UPDATE itself, so a write racing a soft
+    /// delete can never revive the row.
     pub async fn update(&self, id: &str, entity: &T) -> Result<Option<T>>
     where
         T: Serialize + Send + Sync,
     {
-        if self.find_by_id(id).await?.is_none() {
-            return Ok(None);
-        }
-        self.inner.update(id, entity).await
+        self.inner
+            .update_guarded(id, entity, None, ACTIVE_ROW_GUARD)
+            .await
+    }
+
+    /// Update an active record from `before` (the row as read) to `after`, writing only the
+    /// columns whose value differs between the two; `Ok(None)` when the row is missing or was
+    /// soft-deleted since it was read.
+    ///
+    /// The path for a read-modify-write such as a PATCH: a column the caller did not change is
+    /// left as it now stands in the database, so a concurrent write to it (a verb moving a
+    /// status) is not overwritten with the stale value read before it.
+    pub async fn update_changed(&self, id: &str, before: &T, after: &T) -> Result<Option<T>>
+    where
+        T: Serialize + Send + Sync,
+    {
+        let changed = crate::repository::changed_columns(before, after)?;
+        self.inner
+            .update_guarded(id, after, Some(&changed), ACTIVE_ROW_GUARD)
+            .await
     }
 
     /// Soft-delete an entity (sets `metadata.deleted_at`).
@@ -917,7 +940,7 @@ where
         bulk_update_rows(
             self.pool(),
             self.table_name(),
-            " AND t.metadata->>'deleted_at' IS NULL",
+            ACTIVE_ROW_GUARD,
             entities,
         )
         .await
@@ -1034,6 +1057,16 @@ where
     /// Full update.
     pub async fn update(&self, id: &str, entity: &T) -> Result<Option<T>> {
         self.inner.update(id, entity).await
+    }
+
+    /// Update a record from `before` (the row as read) to `after`, writing only the columns
+    /// whose value differs; `Ok(None)` when the row no longer exists. See the soft-delete
+    /// twin for why a read-modify-write must not write back the columns it did not change.
+    pub async fn update_changed(&self, id: &str, before: &T, after: &T) -> Result<Option<T>> {
+        let changed = crate::repository::changed_columns(before, after)?;
+        self.inner
+            .update_guarded(id, after, Some(&changed), "")
+            .await
     }
 
     /// Permanently delete an entity by primary key.

@@ -76,6 +76,12 @@ fn normalize_enum_value(value: String) -> String {
     }
 }
 
+/// True for a key in the framework's internal `__` namespace (`__base_condition`,
+/// `__base_condition[eq]`, …), which no client-supplied filter may use.
+pub fn is_internal_key(key: &str) -> bool {
+    key.trim_start().starts_with("__")
+}
+
 /// Parse filter from query parameters HashMap
 ///
 /// # Arguments
@@ -104,6 +110,14 @@ pub fn parse_filters(
     let mut or_conditions: Vec<FilterCondition> = Vec::new();
 
     for (key, value) in params {
+        // `__`-prefixed keys are the framework's internal namespace, never a filter a client
+        // may send. They are skipped like any other invalid key: in particular a client can
+        // never supply raw SQL for the WHERE clause, which only repository code may add
+        // (see `QueryFilter::add_base_condition`).
+        if is_internal_key(key) {
+            continue;
+        }
+
         // Parse bracket notation: field[operator]
         if let Some(bracket_pos) = key.find('[') {
             if key.ends_with(']') {
@@ -350,11 +364,6 @@ pub fn parse_filters(
                 }
                 "estimate" | "estimate_total" => {
                     filter.estimate_total = matches!(value.as_str(), "1" | "true" | "yes");
-                }
-                "__base_condition" => {
-                    // Raw SQL condition to be ANDed with all other conditions
-                    // Used for soft delete exclusion, tenant filtering, etc.
-                    filter.base_conditions.push(value.clone());
                 }
                 _ => {
                     // Treat as simple equality filter

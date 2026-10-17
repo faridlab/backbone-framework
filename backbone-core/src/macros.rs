@@ -42,6 +42,7 @@ pub fn log_include_hydration_failure(table: &str, error: &str) {
 /// | `find_by_id`                  | `find_by_id(id)`                    |
 /// | `find_by_id_including_deleted`| `find_deleted_by_id(id)`            |
 /// | `update`                      | `update(&id, &entity)`              |
+/// | `update_changed`              | `update_changed(&id, &before, &after)` |
 /// | `soft_delete`                 | `soft_delete(id)`                   |
 /// | `restore`                     | `restore(id)`                       |
 /// | `hard_delete`                 | `permanent_delete(id)`              |
@@ -138,6 +139,18 @@ macro_rules! impl_crud_repository {
                     .await
                     .map_err(backbone_core::RepositoryError::from_source)
                     .and_then(|opt| opt.ok_or(backbone_core::RepositoryError::NotFound))
+            }
+
+            async fn update_changed(
+                &self,
+                before: &$entity,
+                after: $entity,
+            ) -> Result<Option<$entity>, backbone_core::RepositoryError> {
+                let id = backbone_core::PersistentEntity::entity_id(&after);
+                (&**self)
+                    .update_changed(&id, before, &after)
+                    .await
+                    .map_err(backbone_core::RepositoryError::from_source)
             }
 
             async fn soft_delete(
@@ -383,6 +396,18 @@ macro_rules! impl_crud_repository {
                     .await
                     .map_err(backbone_core::RepositoryError::from_source)
                     .and_then(|opt| opt.ok_or(backbone_core::RepositoryError::NotFound))
+            }
+
+            async fn update_changed(
+                &self,
+                before: &$entity,
+                after: $entity,
+            ) -> Result<Option<$entity>, backbone_core::RepositoryError> {
+                let id = backbone_core::PersistentEntity::entity_id(&after);
+                (&**self)
+                    .update_changed(&id, before, &after)
+                    .await
+                    .map_err(backbone_core::RepositoryError::from_source)
             }
 
             async fn soft_delete(

@@ -536,3 +536,124 @@ fn an_or_condition_takes_the_hinted_cast_and_enum_normalization() {
     assert_eq!(where_clause, " WHERE status = $1::approval_status");
     assert_eq!(binds, vec!["in_review".to_string()]);
 }
+
+// ── Base conditions never come from the wire ─────────────────────────────────
+
+#[test]
+fn a_wire_base_condition_key_never_reaches_the_sql() {
+    let mut params = HashMap::new();
+    params.insert("__base_condition".to_string(), "1=1".to_string());
+    params.insert("__base_condition[eq]".to_string(), "2=2".to_string());
+    let filter = parse_filters(&params, &HashMap::new(), None).unwrap();
+    let (where_clause, binds) = filter.build_where_clause();
+    assert!(
+        !where_clause.contains("1=1"),
+        "raw wire SQL reached the WHERE: {where_clause}"
+    );
+    assert!(!where_clause.contains("__base_condition"), "{where_clause}");
+    assert!(where_clause.is_empty(), "{where_clause}");
+    assert!(binds.is_empty());
+}
+
+#[test]
+fn every_double_underscore_wire_key_is_ignored() {
+    let mut params = HashMap::new();
+    params.insert("__internal".to_string(), "x".to_string());
+    params.insert("__internal[gt]".to_string(), "1".to_string());
+    params.insert("orderby".to_string(), "__internal".to_string());
+    params.insert("searchFields".to_string(), "__internal".to_string());
+    let filter = parse_filters(&params, &HashMap::new(), None).unwrap();
+    assert!(filter.conditions.is_empty(), "{:?}", filter.conditions);
+    assert!(filter.sorts.is_empty(), "{:?}", filter.sorts);
+    assert!(
+        filter.search_fields.is_empty(),
+        "{:?}",
+        filter.search_fields
+    );
+}
+
+#[test]
+fn a_repository_base_condition_survives_a_hostile_wire_key() {
+    let mut params = HashMap::new();
+    params.insert("__base_condition".to_string(), "1=1".to_string());
+    params.insert("name".to_string(), "acme".to_string());
+    let mut filter = parse_filters(&params, &HashMap::new(), None).unwrap();
+    filter.add_base_condition("metadata->>'deleted_at' IS NULL");
+    let (where_clause, binds) = filter.build_where_clause();
+    assert_eq!(
+        where_clause,
+        " WHERE (metadata->>'deleted_at' IS NULL) AND (name = $1)"
+    );
+    assert_eq!(binds, vec!["acme".to_string()]);
+}
+
+// ── Base conditions bind tighter than any client OR ──────────────────────────
+
+#[test]
+fn an_or_filter_cannot_escape_the_base_conditions() {
+    let mut params = HashMap::new();
+    params.insert("status[or]".to_string(), "active".to_string());
+    let mut filter = parse_filters(&params, &HashMap::new(), None).unwrap();
+    filter.add_base_condition("metadata->>'deleted_at' IS NULL");
+    filter.add_base_condition("company_id = '00000000-0000-0000-0000-000000000001'");
+    let (where_clause, binds) = filter.build_where_clause();
+    assert_eq!(
+        where_clause,
+        " WHERE (metadata->>'deleted_at' IS NULL) \
+         AND (company_id = '00000000-0000-0000-0000-000000000001') \
+         AND (status = $1)"
+    );
+    assert_eq!(binds, vec!["active".to_string()]);
+}
+
+#[test]
+fn and_then_or_conditions_group_together_under_the_base() {
+    let mut filter = QueryFilter::new();
+    filter.add_base_condition("metadata->>'deleted_at' IS NULL");
+    filter.add_condition(FilterCondition::new(
+        "kind".to_string(),
+        FilterOperator::Equal,
+        FilterValue::Single("a".to_string()),
+    ));
+    filter.add_condition(
+        FilterCondition::new(
+            "status".to_string(),
+            FilterOperator::Equal,
+            FilterValue::Single("active".to_string()),
+        )
+        .with_logical(FilterLogical::Or),
+    );
+    let (where_clause, binds) = filter.build_where_clause();
+    assert_eq!(
+        where_clause,
+        " WHERE (metadata->>'deleted_at' IS NULL) AND (kind = $1 OR status = $2)"
+    );
+    assert_eq!(binds, vec!["a".to_string(), "active".to_string()]);
+}
+
+#[test]
+fn an_or_filter_cannot_escape_the_search() {
+    let mut filter = QueryFilter::new();
+    filter.add_base_condition("metadata->>'deleted_at' IS NULL");
+    filter.search = Some("jo".to_string());
+    filter.search_fields = vec!["name".to_string(), "email".to_string()];
+    filter.add_condition(
+        FilterCondition::new(
+            "status".to_string(),
+            FilterOperator::Equal,
+            FilterValue::Single("active".to_string()),
+        )
+        .with_logical(FilterLogical::Or),
+    );
+    let (where_clause, binds) = filter.build_where_clause();
+    assert_eq!(
+        where_clause,
+        " WHERE (metadata->>'deleted_at' IS NULL) \
+         AND (name ILIKE $1 OR email ILIKE $2) \
+         AND (status = $3)"
+    );
+    assert_eq!(
+        binds,
+        vec!["%jo%".to_string(), "%jo%".to_string(), "active".to_string()]
+    );
+}

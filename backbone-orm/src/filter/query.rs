@@ -24,9 +24,11 @@ pub struct QueryFilter {
     /// planner's row estimate. Screens that need the exact figure use the
     /// separate count endpoint.
     pub estimate_total: bool,
-    /// Base conditions that are always applied (e.g., soft delete exclusion)
-    /// These are raw SQL conditions that will be ANDed with other conditions
-    pub base_conditions: Vec<String>,
+    /// Conditions every query of this filter must satisfy (soft-delete exclusion, the company
+    /// fence). They are raw SQL, so only repository code may add them, through
+    /// [`QueryFilter::add_base_condition`]; the wire parser never fills this list, and the
+    /// field is crate-private so nothing outside the ORM can splice SQL into it.
+    pub(crate) base_conditions: Vec<String>,
 }
 
 impl QueryFilter {
@@ -57,29 +59,46 @@ impl QueryFilter {
         self.limit = Some(limit);
     }
 
-    /// Add a base condition (raw SQL that is always ANDed with other conditions)
-    /// Used for soft delete exclusion, tenant filtering, etc.
-    pub fn add_base_condition(&mut self, condition: String) {
-        self.base_conditions.push(condition);
+    /// Add a base condition: raw SQL that every row of the result must satisfy.
+    ///
+    /// Crate-internal on purpose. Base conditions are spliced into the WHERE clause unbound,
+    /// so they may only come from repository code (soft-delete guards, the company fence) and
+    /// never from a request.
+    pub(crate) fn add_base_condition(&mut self, condition: impl Into<String>) {
+        self.base_conditions.push(condition.into());
     }
 
-    /// Build the complete WHERE clause
+    /// The base conditions this filter carries, in the order they were added.
+    pub fn base_conditions(&self) -> &[String] {
+        &self.base_conditions
+    }
+
+    /// Build the complete WHERE clause.
+    ///
+    /// The clause is a conjunction of independent groups: each base condition, the search,
+    /// and the caller's own conditions. Every group is parenthesised whenever there is more
+    /// than one, so an `OR` inside the caller's conditions (or inside a base condition) can
+    /// only widen its own group and never escape the soft-delete guard, the company fence or
+    /// the search. Parameters are numbered in the order the groups are emitted.
     pub fn build_where_clause(&self) -> (String, Vec<String>) {
-        let mut parts = Vec::new();
+        let mut groups: Vec<String> = Vec::new();
         let mut params = Vec::new();
         let mut param_idx = 1usize;
 
-        // Add base conditions first (e.g., soft delete exclusion)
-        // These are raw SQL that don't require parameter binding
+        // Base conditions are repository-authored SQL and carry no parameters.
         for base_condition in &self.base_conditions {
-            parts.push(base_condition.clone());
+            let trimmed = base_condition.trim();
+            if !trimmed.is_empty() {
+                groups.push(trimmed.to_string());
+            }
         }
 
-        // Add search condition (if specified)
         if let Some(search_term) = &self.search {
             if !self.search_fields.is_empty() && !search_term.is_empty() {
                 let search_pattern = format!("%{}%", search_term);
-                let search_conditions: Vec<String> = self.search_fields.iter()
+                let search_conditions: Vec<String> = self
+                    .search_fields
+                    .iter()
                     .map(|field| {
                         let condition = format!("{} ILIKE ${}", field, param_idx);
                         param_idx += 1;
@@ -87,39 +106,38 @@ impl QueryFilter {
                         condition
                     })
                     .collect();
-
-                if !search_conditions.is_empty() {
-                    if parts.is_empty() {
-                        parts.push(format!("({})", search_conditions.join(" OR ")));
-                    } else {
-                        parts.push(format!(" AND ({})", search_conditions.join(" OR ")));
-                    }
-                }
+                groups.push(search_conditions.join(" OR "));
             }
         }
 
-        // Add all filter conditions
+        // The caller's conditions keep their own AND/OR chaining inside one group.
+        let mut user = String::new();
         for condition in &self.conditions {
             let condition_sql = condition.build_sql_without_prefix(&mut param_idx);
             params.extend(condition.get_params());
-
-            // Prepend logical operator if not the first condition
-            let logical_prefix = match condition.logical {
-                FilterLogical::And => " AND ",
-                FilterLogical::Or => " OR ",
-            };
-
-            if !parts.is_empty() {
-                parts.push(format!("{}{}", logical_prefix, condition_sql));
-            } else {
-                parts.push(condition_sql);
+            if !user.is_empty() {
+                user.push_str(match condition.logical {
+                    FilterLogical::And => " AND ",
+                    FilterLogical::Or => " OR ",
+                });
             }
+            user.push_str(&condition_sql);
+        }
+        if !user.is_empty() {
+            groups.push(user);
         }
 
-        let where_clause = if parts.is_empty() {
-            String::new()
-        } else {
-            format!(" WHERE {}", parts.join(""))
+        let where_clause = match groups.len() {
+            0 => String::new(),
+            1 => format!(" WHERE {}", groups[0]),
+            _ => format!(
+                " WHERE {}",
+                groups
+                    .iter()
+                    .map(|g| format!("({g})"))
+                    .collect::<Vec<_>>()
+                    .join(" AND ")
+            ),
         };
 
         (where_clause, params)

@@ -68,6 +68,7 @@ pub use filter::{
     SortSpec,
     FilterableEntity,
     parse_filters,
+    is_internal_key,
     is_valid_field,
     sanitize_field_name,
 };

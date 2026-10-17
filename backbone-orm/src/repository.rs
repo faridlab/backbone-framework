@@ -259,8 +259,32 @@ impl<T: for<'a> FromRow<'a, PgRow> + Send + Unpin> PostgresRepository<T> {
     where
         T: Send + Sync,
     {
+        self.list_with_filters_and_base(pagination, None, filters, column_types, search_fields)
+            .await
+    }
+
+    /// [`Self::list_with_filters`] under a repository-authored base condition.
+    ///
+    /// `base_condition` is raw SQL ANDed, as its own parenthesised group, ahead of everything
+    /// the request asked for. It must come from code (a soft-delete guard, the company fence),
+    /// never from the request — which is why it is a separate argument and not a filter key:
+    /// the wire parser ignores every `__`-prefixed key.
+    pub(crate) async fn list_with_filters_and_base(
+        &self,
+        pagination: PaginationParams,
+        base_condition: Option<&str>,
+        filters: &HashMap<String, String>,
+        column_types: &HashMap<String, String>,
+        search_fields: &[&str],
+    ) -> anyhow::Result<PaginatedResult<T>>
+    where
+        T: Send + Sync,
+    {
         // Parse filters from HashMap (no field allow-list by default for backward compatibility)
         let mut query_filter = self.parse_typed_filters(filters, column_types, None).await?;
+        if let Some(cond) = base_condition {
+            query_filter.add_base_condition(cond);
+        }
 
         // Set up search fields if provided
         if !search_fields.is_empty() {
@@ -322,6 +346,83 @@ impl<T: for<'a> FromRow<'a, PgRow> + Send + Unpin> PostgresRepository<T> {
         }
 
         self.execute_list(pagination, query_filter).await
+    }
+
+    /// Update one row by id, setting only `only` columns when given (every serialized column but
+    /// `id` otherwise), and only while `guard` holds.
+    ///
+    /// `guard` is repository-authored SQL ANDed into the `WHERE` after the id match (`""` for
+    /// none), written against the table alias `t` — e.g. `" AND t.metadata->>'deleted_at' IS
+    /// NULL"`. Putting the not-deleted predicate in the UPDATE itself is what keeps a write that
+    /// races a soft delete from reviving the row: a separate existence check before the UPDATE
+    /// leaves a window in which the delete lands. `Ok(None)` when no row matched.
+    ///
+    /// With `only` empty nothing is written, and the current row (under the same guard) is
+    /// returned unchanged.
+    pub async fn update_guarded(
+        &self,
+        id: &str,
+        entity: &T,
+        only: Option<&[String]>,
+        guard: &str,
+    ) -> anyhow::Result<Option<T>>
+    where
+        T: Serialize + Send + Sync,
+    {
+        let json_obj = match serde_json::to_value(entity)? {
+            Value::Object(obj) => obj,
+            _ => return Err(anyhow::anyhow!("Entity must serialize to a JSON object")),
+        };
+
+        let update_columns: Vec<&String> = json_obj
+            .keys()
+            .filter(|k| *k != "id")
+            .filter(|k| only.is_none_or(|cols| cols.iter().any(|c| c == *k)))
+            .collect();
+
+        if update_columns.is_empty() {
+            let query = format!(
+                "SELECT t.* FROM {} AS t WHERE t.id = $1::uuid{}",
+                self.table_name, guard
+            );
+            return Ok(crate::company_scope::fetch_optional_scoped(
+                &self.pool,
+                sqlx::query_as::<_, T>(&query).bind(id),
+            )
+            .await?);
+        }
+
+        let column_names = update_columns
+            .iter()
+            .map(|k| quote_ident(k))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let json_str = serde_json::to_string(&json_obj)?;
+
+        // jsonb_populate_record in a CTE gives every value its column's real type (enums,
+        // booleans, numerics) without per-column casts.
+        let query = format!(
+            r#"
+            WITH new_row AS (
+                SELECT (jsonb_populate_record(NULL::{table}, $1::jsonb)).*
+            )
+            UPDATE {table} AS t
+            SET ({columns}) = (SELECT {columns} FROM new_row)
+            WHERE t.id = $2::uuid{guard}
+            RETURNING t.*
+            "#,
+            table = self.table_name,
+            columns = column_names,
+            guard = guard,
+        );
+
+        let result = crate::company_scope::fetch_optional_scoped(
+            &self.pool,
+            sqlx::query_as::<_, T>(&query).bind(&json_str).bind(id),
+        )
+        .await?;
+
+        Ok(result)
     }
 
     /// Parse the wire filters with a cast for every typed column they compare.
@@ -420,11 +521,7 @@ impl<T: for<'a> FromRow<'a, PgRow> + Send + Unpin> PostgresRepository<T> {
                 &boundary_casts,
                 backwards,
             );
-            if where_clause.is_empty() {
-                where_clause = format!(" WHERE {}", keyset_sql);
-            } else {
-                where_clause = format!("{} AND ({})", where_clause, keyset_sql);
-            }
+            where_clause = and_keyset_predicate(&where_clause, &keyset_sql);
             filter_params.extend(keyset_params);
             let parts: Vec<String> = sorts
                 .iter()
@@ -687,6 +784,33 @@ impl<T: for<'a> FromRow<'a, PgRow> + Send + Unpin> PostgresRepository<T> {
 
 /// The placeholder cast for a column type, or None when a bare text bind
 /// compares correctly.
+/// The serialized fields whose value differs between `before` and `after` (never `id`), in
+/// `after`'s field order — the columns an update that started from `before` actually changes.
+/// A field `after` no longer serializes is not a change: an update cannot unset a column by
+/// leaving it out.
+pub fn changed_columns<T: Serialize>(before: &T, after: &T) -> anyhow::Result<Vec<String>> {
+    let (Value::Object(before), Value::Object(after)) =
+        (serde_json::to_value(before)?, serde_json::to_value(after)?)
+    else {
+        return Err(anyhow::anyhow!("Entity must serialize to a JSON object"));
+    };
+    Ok(after
+        .into_iter()
+        .filter(|(k, v)| k != "id" && before.get(k) != Some(v))
+        .map(|(k, _)| k)
+        .collect())
+}
+
+/// AND the keyset predicate onto a built WHERE clause. The existing clause is parenthesised
+/// as a whole first: a lone group may carry a client `OR`, which would otherwise bind looser
+/// than the keyset and let rows from outside the page window through.
+fn and_keyset_predicate(where_clause: &str, keyset_sql: &str) -> String {
+    match where_clause.trim_start().strip_prefix("WHERE ") {
+        None => format!(" WHERE {}", keyset_sql),
+        Some(existing) => format!(" WHERE ({}) AND ({})", existing, keyset_sql),
+    }
+}
+
 fn cast_suffix(data_type: &str, udt_name: &str, udt_schema: &str) -> Option<String> {
     match data_type {
         "uuid" => Some("uuid".into()),
@@ -893,48 +1017,7 @@ where
     }
 
     async fn update(&self, id: &str, entity: &T) -> anyhow::Result<Option<T>> {
-        // Serialize entity to JSON
-        let json_value = serde_json::to_value(entity)?;
-
-        let json_obj = match json_value {
-            Value::Object(obj) => obj,
-            _ => return Err(anyhow::anyhow!("Entity must serialize to a JSON object")),
-        };
-
-        // Build column list for the update (excluding 'id')
-        let update_columns: Vec<&String> = json_obj.keys()
-            .filter(|k| *k != "id")
-            .collect();
-
-        let column_names = update_columns.iter()
-            .map(|k| quote_ident(k))
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        let json_str = serde_json::to_string(&json_obj)?;
-
-        // Use jsonb_populate_record with CTE to get properly typed values
-        let query = format!(
-            r#"
-            WITH new_row AS (
-                SELECT (jsonb_populate_record(NULL::{table}, $1::jsonb)).*
-            )
-            UPDATE {table} AS t
-            SET ({columns}) = (SELECT {columns} FROM new_row)
-            WHERE t.id = $2::uuid
-            RETURNING t.*
-            "#,
-            table = self.table_name,
-            columns = column_names
-        );
-
-        let result = crate::company_scope::fetch_optional_scoped(
-            &self.pool,
-            sqlx::query_as::<_, T>(&query).bind(&json_str).bind(id),
-        )
-        .await?;
-
-        Ok(result)
+        self.update_guarded(id, entity, None, "").await
     }
 
     async fn delete(&self, id: &str) -> anyhow::Result<bool> {
@@ -1157,7 +1240,25 @@ impl<T: for<'a> FromRow<'a, PgRow> + Send + Unpin> PostgresRepository<T> {
         column_types: &HashMap<String, String>,
         search_fields: &[&str],
     ) -> anyhow::Result<AggregateResult> {
+        self.aggregate_with_filters_and_base(spec, None, filters, column_types, search_fields)
+            .await
+    }
+
+    /// [`Self::aggregate_with_filters`] under a repository-authored base condition — the same
+    /// contract as [`Self::list_with_filters_and_base`], so an aggregate reduces exactly the
+    /// rows the matching list returns.
+    pub(crate) async fn aggregate_with_filters_and_base(
+        &self,
+        spec: &AggregateSpec,
+        base_condition: Option<&str>,
+        filters: &HashMap<String, String>,
+        column_types: &HashMap<String, String>,
+        search_fields: &[&str],
+    ) -> anyhow::Result<AggregateResult> {
         let mut query_filter = self.parse_typed_filters(filters, column_types, None).await?;
+        if let Some(cond) = base_condition {
+            query_filter.add_base_condition(cond);
+        }
         if !search_fields.is_empty() {
             query_filter.search_fields = search_fields.iter().map(|s| s.to_string()).collect();
         }
@@ -1485,5 +1586,58 @@ mod filter_cast_tests {
         assert!(parse(&[("folded", "false")]));
         assert!(parse(&[("scheduled_at[between]", "2026-10-01,2026-10-03")]));
         assert!(parse(&[("sequence[or]", "3")]));
+    }
+}
+
+#[cfg(test)]
+mod keyset_predicate_tests {
+    use super::and_keyset_predicate;
+
+    #[test]
+    fn a_client_or_cannot_escape_the_keyset_window() {
+        assert_eq!(
+            and_keyset_predicate(" WHERE kind = $1 OR status = $2", "id > $3"),
+            " WHERE (kind = $1 OR status = $2) AND (id > $3)"
+        );
+    }
+
+    #[test]
+    fn no_filter_leaves_the_keyset_alone() {
+        assert_eq!(and_keyset_predicate("", "id > $1"), " WHERE id > $1");
+    }
+}
+
+#[cfg(test)]
+mod changed_columns_tests {
+    use super::changed_columns;
+
+    #[derive(serde::Serialize)]
+    struct Row {
+        id: &'static str,
+        notes: &'static str,
+        status: &'static str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        label: Option<&'static str>,
+    }
+
+    #[test]
+    fn only_the_fields_that_differ_are_changed() {
+        let before = Row {
+            id: "1",
+            notes: "a",
+            status: "draft",
+            label: None,
+        };
+        let after = Row {
+            id: "2",
+            notes: "b",
+            status: "draft",
+            label: Some("x"),
+        };
+        assert_eq!(
+            changed_columns(&before, &after).unwrap(),
+            vec!["label".to_string(), "notes".to_string()]
+        );
+        assert!(changed_columns(&before, &before).unwrap().is_empty());
     }
 }

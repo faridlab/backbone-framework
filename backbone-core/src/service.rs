@@ -376,11 +376,15 @@ where
         refuse_protected_changes::<E>(&as_object(&before)?, &as_object(&updated)?)?;
         self.consult(crate::write_guard::WriteKind::Update, Some(&before), Some(&updated)).await?;
         self.lifecycle.before_update(&mut updated).await?;
-        let saved = self
+        // The same changed-fields, live-row-only save as `partial_update`.
+        let Some(saved) = self
             .repository
-            .update(updated)
+            .update_changed(&before, updated)
             .await
-            .map_err(ServiceError::Repository)?;
+            .map_err(ServiceError::Repository)?
+        else {
+            return Ok(None);
+        };
         self.lifecycle.after_update(&saved).await?;
 
         let meta = EventMetadata::new(saved.entity_id(), std::any::type_name::<E>());
@@ -567,11 +571,16 @@ where
         let mut patched = merge_patch(&before, fields)?;
         self.consult(crate::write_guard::WriteKind::Update, Some(&before), Some(&patched)).await?;
         self.lifecycle.before_update(&mut patched).await?;
-        let saved = self
+        // Only the fields this write changed are saved, and only while the row is still live:
+        // see `CrudRepository::update_changed`. A row deleted since the read answers not found.
+        let Some(saved) = self
             .repository
-            .update(patched)
+            .update_changed(&before, patched)
             .await
-            .map_err(ServiceError::Repository)?;
+            .map_err(ServiceError::Repository)?
+        else {
+            return Ok(None);
+        };
         self.lifecycle.after_update(&saved).await?;
 
         let meta = EventMetadata::new(saved.entity_id(), std::any::type_name::<E>());
@@ -886,13 +895,22 @@ fn as_object(entity: &impl serde::Serialize) -> ServiceResult<serde_json::Map<St
 /// Refuse a generic write that gives a protected field a new value. Carrying
 /// the stored value unchanged is allowed, so a form that sends the whole
 /// record is not refused for fields it did not touch.
+///
+/// A state machine's verb writes through the same path, inside
+/// [`as_transition`](crate::write_guard::as_transition), and its whole point is
+/// to move the state field the entity protects from generic writes. Inside a
+/// transition the entity's [`PersistentEntity::state_fields`] are therefore let
+/// through — those and nothing else; the write guard still decides whether the
+/// move itself is allowed.
 fn refuse_protected_changes<E: PersistentEntity>(
     before: &serde_json::Map<String, serde_json::Value>,
     after: &serde_json::Map<String, serde_json::Value>,
 ) -> ServiceResult<()> {
+    let in_transition = crate::write_guard::current_transition().is_some();
     let refused: Vec<crate::violation::Violation> = ALWAYS_WRITE_PROTECTED
         .iter()
         .chain(E::write_protected_fields())
+        .filter(|key| !(in_transition && E::state_fields().contains(*key)))
         .filter(|key| before.get(**key) != after.get(**key))
         .map(|key| {
             crate::violation::Violation::new(
@@ -1190,13 +1208,16 @@ mod tests {
 
     // ── Minimal in-memory repository for testing ──────────────────────────
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     struct Widget {
         id: String,
         name: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         note: Option<String>,
         secret_hash: String,
+        /// A state-machine field: protected from generic writes, moved by verbs.
+        #[serde(default)]
+        state: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         deleted_at: Option<DateTime<Utc>>,
         created_at: DateTime<Utc>,
@@ -1205,7 +1226,10 @@ mod tests {
 
     impl crate::persistence::traits::PersistentEntity for Widget {
         fn write_protected_fields() -> &'static [&'static str] {
-            &["secret_hash"]
+            &["secret_hash", "state"]
+        }
+        fn state_fields() -> &'static [&'static str] {
+            &["state"]
         }
         fn entity_id(&self) -> String {
             self.id.clone()
@@ -1248,6 +1272,7 @@ mod tests {
                 name: dto.name,
                 note: None,
                 secret_hash: "h0".into(),
+                state: "draft".into(),
                 deleted_at: None,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
@@ -1266,12 +1291,21 @@ mod tests {
     // Minimal in-memory CrudRepository
     struct InMemoryWidgetRepo {
         data: tokio::sync::Mutex<Vec<Widget>>,
+        /// Every `update_changed` call, as (before, after).
+        changed_writes: std::sync::Mutex<Vec<(Widget, Widget)>>,
+        /// Every full `update` call.
+        full_writes: std::sync::atomic::AtomicUsize,
+        /// Make the next changed-columns write find the row gone (a concurrent delete).
+        vanish_on_write: std::sync::atomic::AtomicBool,
     }
 
     impl InMemoryWidgetRepo {
         fn new() -> Self {
             Self {
                 data: tokio::sync::Mutex::new(Vec::new()),
+                changed_writes: std::sync::Mutex::new(Vec::new()),
+                full_writes: std::sync::atomic::AtomicUsize::new(0),
+                vanish_on_write: std::sync::atomic::AtomicBool::new(false),
             }
         }
     }
@@ -1294,10 +1328,33 @@ mod tests {
         }
 
         async fn update(&self, entity: Widget) -> Result<Widget, RepositoryError> {
+            self.full_writes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let mut data = self.data.lock().await;
             data.retain(|w| w.id != entity.id);
             data.push(entity.clone());
             Ok(entity)
+        }
+
+        async fn update_changed(
+            &self,
+            before: &Widget,
+            after: Widget,
+        ) -> Result<Option<Widget>, RepositoryError> {
+            self.changed_writes
+                .lock()
+                .unwrap()
+                .push((before.clone(), after.clone()));
+            if self
+                .vanish_on_write
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return Ok(None);
+            }
+            let mut data = self.data.lock().await;
+            data.retain(|w| w.id != after.id);
+            data.push(after.clone());
+            Ok(Some(after))
         }
 
         async fn soft_delete(&self, id: &str) -> Result<bool, RepositoryError> {
@@ -1427,6 +1484,156 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(updated.unwrap().name, "new");
+    }
+
+    // ── Generic writes go through the changed-columns path ───────────────────
+
+    #[tokio::test]
+    async fn a_patch_writes_only_through_the_changed_columns_path() {
+        let repo = Arc::new(InMemoryWidgetRepo::new());
+        let service: GenericCrudService<
+            Widget,
+            CreateWidgetDto,
+            UpdateWidgetDto,
+            InMemoryWidgetRepo,
+        > = GenericCrudService::with_repository(repo.clone());
+        let w = service
+            .create(CreateWidgetDto { name: "old".into() })
+            .await
+            .unwrap();
+
+        let mut fields = HashMap::new();
+        fields.insert("note".to_string(), serde_json::json!("edited"));
+        let saved = service
+            .partial_update(&w.id, fields)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.note.as_deref(), Some("edited"));
+
+        let writes = repo.changed_writes.lock().unwrap().clone();
+        assert_eq!(writes.len(), 1, "a PATCH must save through update_changed");
+        assert_eq!(writes[0].0, w, "the write starts from the row as read");
+        assert_eq!(
+            repo.full_writes.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn a_put_writes_only_through_the_changed_columns_path() {
+        let repo = Arc::new(InMemoryWidgetRepo::new());
+        let service: GenericCrudService<
+            Widget,
+            CreateWidgetDto,
+            UpdateWidgetDto,
+            InMemoryWidgetRepo,
+        > = GenericCrudService::with_repository(repo.clone());
+        let w = service
+            .create(CreateWidgetDto { name: "old".into() })
+            .await
+            .unwrap();
+        service
+            .update(&w.id, UpdateWidgetDto { name: "new".into() })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(repo.changed_writes.lock().unwrap().len(), 1);
+        assert_eq!(
+            repo.full_writes.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn a_write_whose_row_vanished_meanwhile_answers_not_found() {
+        let repo = Arc::new(InMemoryWidgetRepo::new());
+        let service: GenericCrudService<
+            Widget,
+            CreateWidgetDto,
+            UpdateWidgetDto,
+            InMemoryWidgetRepo,
+        > = GenericCrudService::with_repository(repo.clone());
+        let w = service
+            .create(CreateWidgetDto { name: "old".into() })
+            .await
+            .unwrap();
+        repo.vanish_on_write
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let mut fields = HashMap::new();
+        fields.insert("note".to_string(), serde_json::json!("edited"));
+        assert!(service
+            .partial_update(&w.id, fields)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(service
+            .update(&w.id, UpdateWidgetDto { name: "new".into() })
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    // ── A transition may move the state field, and only that ─────────────────
+
+    #[tokio::test]
+    async fn a_transition_moves_its_protected_state_field() {
+        let service = svc();
+        let w = service
+            .create(CreateWidgetDto { name: "w".into() })
+            .await
+            .unwrap();
+        let mut fields = HashMap::new();
+        fields.insert("state".to_string(), serde_json::json!("active"));
+        let saved =
+            crate::write_guard::as_transition("activate", service.partial_update(&w.id, fields))
+                .await
+                .expect("a verb moves its own state field")
+                .unwrap();
+        assert_eq!(saved.state, "active");
+    }
+
+    #[tokio::test]
+    async fn a_transition_still_cannot_move_another_protected_field() {
+        let service = svc();
+        let w = service
+            .create(CreateWidgetDto { name: "w".into() })
+            .await
+            .unwrap();
+        let mut fields = HashMap::new();
+        fields.insert("state".to_string(), serde_json::json!("active"));
+        fields.insert("secret_hash".to_string(), serde_json::json!("h1"));
+        let err =
+            crate::write_guard::as_transition("activate", service.partial_update(&w.id, fields))
+                .await
+                .unwrap_err();
+        match err {
+            ServiceError::Violations(v) => {
+                assert_eq!(v.len(), 1, "{v:?}");
+                assert_eq!(
+                    (v[0].path.as_str(), v[0].code.as_str()),
+                    ("secret_hash", "field_not_writable")
+                );
+            }
+            other => panic!("expected a violation, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_generic_write_still_cannot_move_the_state_field() {
+        let service = svc();
+        let w = service
+            .create(CreateWidgetDto { name: "w".into() })
+            .await
+            .unwrap();
+        let mut fields = HashMap::new();
+        fields.insert("state".to_string(), serde_json::json!("active"));
+        let err = service.partial_update(&w.id, fields).await.unwrap_err();
+        assert!(
+            matches!(err, ServiceError::Violations(ref v) if v[0].path == "state"),
+            "{err:?}"
+        );
     }
 
     // ── Batch operations ──────────────────────────────────────────────────────
