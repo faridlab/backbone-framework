@@ -152,27 +152,30 @@ fn error_at<T>(
 /// Bind the request's correlation id for the writes it makes, so the events they stage (and
 /// the logs and audit rows of the request) share one id.
 ///
-/// The id is the request's `x-correlation-id` header when it carries a usable one (printable
-/// ASCII, at most 128 characters), else the audit attribution's the composing service already
-/// bound, else a fresh uuid. The generic write routes carry this layer; a hand-written route that
-/// writes through the service can add it with `axum::middleware::from_fn`.
+/// A composing service that already attributes the request (its guard binds a
+/// [`RequestAuditContext`](backbone_orm::RequestAuditContext) carrying the correlation id, which
+/// it echoes on the response) is left alone: that id is the one the hooks read, so events, audit
+/// rows and the response header agree. Otherwise the id is the request's `x-correlation-id`
+/// header when it carries a usable one (printable ASCII, at most 128 characters), else a fresh
+/// uuid. The generic write routes and the generated transition routes carry this layer; a
+/// hand-written route that writes through the service can add it with
+/// `axum::middleware::from_fn`.
 pub async fn correlation_middleware(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    let from_header = req
+    let attributed = backbone_orm::audit_context::current_request_audit()
+        .is_some_and(|audit| !audit.correlation_id.is_empty());
+    if attributed {
+        return next.run(req).await;
+    }
+    let id = req
         .headers()
         .get("x-correlation-id")
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
         .filter(|v| !v.is_empty() && v.len() <= 128 && v.bytes().all(|b| b.is_ascii_graphic()))
-        .map(str::to_string);
-    let id = from_header
-        .or_else(|| {
-            backbone_orm::audit_context::current_request_audit()
-                .map(|a| a.correlation_id)
-                .filter(|c| !c.is_empty())
-        })
+        .map(str::to_string)
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     crate::write_hooks::with_correlation_id(id, next.run(req)).await
 }
