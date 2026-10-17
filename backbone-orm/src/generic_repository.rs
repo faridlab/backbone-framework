@@ -262,18 +262,60 @@ where
         self.inner.create(entity).await
     }
 
-    /// Insert multiple entity rows inside a single transaction.
+    /// Insert multiple entity rows inside a single transaction: all of them, or none.
+    ///
+    /// The first row the database refuses rolls the whole batch back, and the error is a
+    /// [`BatchItemError`] naming that row's position in `entities`. The transaction runs on the
+    /// request's own connection when a request scope holds one, so it carries the same fence
+    /// (company, org units, audit attribution) as a single create.
     pub async fn bulk_create(&self, entities: &[T]) -> Result<Vec<T>>
     where
         T: Serialize + Send + Sync,
     {
-        let tx = sqlx::pool::Pool::begin(self.pool()).await?;
-        let mut results = Vec::with_capacity(entities.len());
-        for entity in entities {
-            results.push(self.create(entity).await?);
+        if entities.is_empty() {
+            return Ok(Vec::new());
         }
+        let table = self.table_name();
+        if let Some(conn) = crate::company_scope::current_request_conn() {
+            let mut held = conn.lock().await;
+            let mut tx = sqlx::Connection::begin(&mut **held).await?;
+            let rows = insert_each(&mut tx, table, entities).await?;
+            tx.commit().await?;
+            return Ok(rows);
+        }
+        let mut tx = self.pool().begin().await?;
+        crate::company_scope::bind_current_company(&mut tx).await?;
+        let rows = insert_each(&mut tx, table, entities).await?;
         tx.commit().await?;
-        Ok(results)
+        Ok(rows)
+    }
+
+    /// Update many rows from `(before, after)` pairs inside one transaction, writing for each
+    /// only the columns that differ — the batch twin of a single changed-columns update — and
+    /// only while `guard` holds (see [`crate::repository::PostgresRepository::update_guarded`]).
+    ///
+    /// A row that no longer matches rolls the whole batch back with a [`BatchItemError`]
+    /// naming its position.
+    async fn bulk_update_changed_guarded(&self, pairs: &[(T, T)], guard: &str) -> Result<Vec<T>>
+    where
+        T: Serialize + Send + Sync,
+    {
+        if pairs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let table = self.table_name();
+        if let Some(conn) = crate::company_scope::current_request_conn() {
+            let mut held = conn.lock().await;
+            let mut tx = sqlx::Connection::begin(&mut **held).await?;
+            let rows = update_each_changed(&mut tx, table, guard, pairs).await?;
+            tx.commit().await?;
+            return Ok(rows);
+        }
+        let mut tx = self.pool().begin().await?;
+        crate::company_scope::bind_current_company(&mut tx).await?;
+        let rows = update_each_changed(&mut tx, table, guard, pairs).await?;
+        tx.commit().await?;
+        Ok(rows)
     }
 
     // ── Generic unique-field lookups ──────────────────────────────────────────
@@ -551,18 +593,19 @@ where
         let mut filters_map = filters.cloned().unwrap_or_default();
         strip_client_company_filters::<T>(&mut filters_map);
         let column_types = T::column_types();
-        let empty: &[&str] = &[];
+        let search_fields: Vec<&'static str> = T::search_fields().to_vec();
         self.run_filtered_query(
             pagination,
             and_conditions(Some("metadata->>'deleted_at' IS NOT NULL"), fence).as_deref(),
             &filters_map,
             &column_types,
-            empty,
+            &search_fields,
         )
         .await
     }
 
-    /// Paginate soft-deleted entities with filter support.
+    /// Paginate soft-deleted entities with filter and search support — the trash twin of
+    /// [`Self::list_paginated_filtered`].
     pub async fn list_deleted_filtered(
         &self,
         pagination: PaginationParams,
@@ -573,13 +616,13 @@ where
     {
         let filters_map = filters.cloned().unwrap_or_default();
         let column_types = T::column_types();
-        let empty: &[&str] = &[];
+        let search_fields: Vec<&'static str> = T::search_fields().to_vec();
         self.run_filtered_query(
             pagination,
             Some("metadata->>'deleted_at' IS NOT NULL"),
             &filters_map,
             &column_types,
-            empty,
+            &search_fields,
         ).await
     }
 
@@ -945,6 +988,16 @@ where
         )
         .await
     }
+
+    /// Update many active rows from `(before, after)` pairs atomically, writing only the
+    /// columns each update changed; a row missing or soft-deleted since it was read rolls the
+    /// whole batch back.
+    pub async fn bulk_update_changed(&self, pairs: &[(T, T)]) -> Result<Vec<T>>
+    where
+        T: Serialize + Send + Sync,
+    {
+        self.bulk_update_changed_guarded(pairs, ACTIVE_ROW_GUARD).await
+    }
 }
 
 /// Build `"$1::uuid, $2::uuid, …"` for an `id IN (…)` clause of `n` bound ids.
@@ -953,6 +1006,101 @@ fn id_in_placeholders(n: usize) -> String {
         .map(|i| format!("${i}::uuid"))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// One item of a batch write failed, so the whole batch was rolled back.
+///
+/// `index` is the item's position in the batch as the caller passed it; `error` is why it
+/// failed (a database refusal keeps its `sqlx::Error` inside, so a caller can still read the
+/// constraint it broke).
+#[derive(Debug)]
+pub struct BatchItemError {
+    /// Position of the failed item in the batch.
+    pub index: usize,
+    /// Why it failed.
+    pub error: anyhow::Error,
+}
+
+impl std::fmt::Display for BatchItemError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "item {} of the batch: {}; rolled back", self.index, self.error)
+    }
+}
+
+impl std::error::Error for BatchItemError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.error.as_ref())
+    }
+}
+
+/// Insert each entity on `conn` (an open transaction), stopping at the first failure.
+async fn insert_each<T>(conn: &mut sqlx::PgConnection, table: &str, entities: &[T]) -> Result<Vec<T>>
+where
+    T: for<'r> FromRow<'r, PgRow> + Serialize + Send + Sync + Unpin,
+{
+    let mut out = Vec::with_capacity(entities.len());
+    for (index, entity) in entities.iter().enumerate() {
+        let (query, json) = crate::repository::insert_statement(table, entity)
+            .map_err(|error| BatchItemError { index, error })?;
+        let statement = match json {
+            Some(json) => sqlx::query_as::<_, T>(&query).bind(json),
+            None => sqlx::query_as::<_, T>(&query),
+        };
+        let row = statement.fetch_one(&mut *conn).await.map_err(|e| BatchItemError {
+            index,
+            error: crate::repository::explain_unknown_column(e, table),
+        })?;
+        out.push(row);
+    }
+    Ok(out)
+}
+
+/// Apply each `(before, after)` pair on `conn` (an open transaction) as a changed-columns
+/// update under `guard`, stopping at the first row that fails or no longer matches.
+async fn update_each_changed<T>(
+    conn: &mut sqlx::PgConnection,
+    table: &str,
+    guard: &str,
+    pairs: &[(T, T)],
+) -> Result<Vec<T>>
+where
+    T: for<'r> FromRow<'r, PgRow> + Serialize + Send + Sync + Unpin,
+{
+    use crate::repository::UpdateStatement;
+    let mut out = Vec::with_capacity(pairs.len());
+    for (index, (before, after)) in pairs.iter().enumerate() {
+        let item = |error: anyhow::Error| BatchItemError { index, error };
+        let id = match serde_json::to_value(after).map_err(|e| item(e.into()))? {
+            serde_json::Value::Object(obj) => match obj.get("id") {
+                Some(serde_json::Value::String(id)) => id.clone(),
+                _ => return Err(item(anyhow::anyhow!("entity missing string 'id' field")).into()),
+            },
+            _ => return Err(item(anyhow::anyhow!("entity must serialize to a JSON object")).into()),
+        };
+        let changed = crate::repository::changed_columns(before, after).map_err(item)?;
+        let updated = match crate::repository::update_statement(table, after, Some(&changed), guard)
+            .map_err(item)?
+        {
+            UpdateStatement::Unchanged(query) => {
+                sqlx::query_as::<_, T>(&query).bind(&id).fetch_optional(&mut *conn).await
+            }
+            UpdateStatement::Update { query, json } => {
+                sqlx::query_as::<_, T>(&query)
+                    .bind(json)
+                    .bind(&id)
+                    .fetch_optional(&mut *conn)
+                    .await
+            }
+        }
+        .map_err(|e| item(e.into()))?;
+        match updated {
+            Some(row) => out.push(row),
+            None => {
+                return Err(item(anyhow::anyhow!("id '{id}' not found or already deleted")).into())
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Serialize an entity and return `(id, json_string, quoted_column_list)` for the
@@ -1152,6 +1300,12 @@ where
     /// Update many rows atomically. No soft-delete guard in this mode.
     pub async fn bulk_update(&self, entities: &[T]) -> Result<Vec<T>> {
         bulk_update_rows(self.pool(), self.table_name(), "", entities).await
+    }
+
+    /// Update many rows from `(before, after)` pairs atomically, writing only the columns each
+    /// update changed; a row deleted since it was read rolls the whole batch back.
+    pub async fn bulk_update_changed(&self, pairs: &[(T, T)]) -> Result<Vec<T>> {
+        self.bulk_update_changed_guarded(pairs, "").await
     }
 }
 

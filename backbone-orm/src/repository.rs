@@ -369,58 +369,22 @@ impl<T: for<'a> FromRow<'a, PgRow> + Send + Unpin> PostgresRepository<T> {
     where
         T: Serialize + Send + Sync,
     {
-        let json_obj = match serde_json::to_value(entity)? {
-            Value::Object(obj) => obj,
-            _ => return Err(anyhow::anyhow!("Entity must serialize to a JSON object")),
+        let result = match update_statement(&self.table_name, entity, only, guard)? {
+            UpdateStatement::Unchanged(query) => {
+                crate::company_scope::fetch_optional_scoped(
+                    &self.pool,
+                    sqlx::query_as::<_, T>(&query).bind(id),
+                )
+                .await?
+            }
+            UpdateStatement::Update { query, json } => {
+                crate::company_scope::fetch_optional_scoped(
+                    &self.pool,
+                    sqlx::query_as::<_, T>(&query).bind(json).bind(id),
+                )
+                .await?
+            }
         };
-
-        let update_columns: Vec<&String> = json_obj
-            .keys()
-            .filter(|k| *k != "id")
-            .filter(|k| only.is_none_or(|cols| cols.iter().any(|c| c == *k)))
-            .collect();
-
-        if update_columns.is_empty() {
-            let query = format!(
-                "SELECT t.* FROM {} AS t WHERE t.id = $1::uuid{}",
-                self.table_name, guard
-            );
-            return Ok(crate::company_scope::fetch_optional_scoped(
-                &self.pool,
-                sqlx::query_as::<_, T>(&query).bind(id),
-            )
-            .await?);
-        }
-
-        let column_names = update_columns
-            .iter()
-            .map(|k| quote_ident(k))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let json_str = serde_json::to_string(&json_obj)?;
-
-        // jsonb_populate_record in a CTE gives every value its column's real type (enums,
-        // booleans, numerics) without per-column casts.
-        let query = format!(
-            r#"
-            WITH new_row AS (
-                SELECT (jsonb_populate_record(NULL::{table}, $1::jsonb)).*
-            )
-            UPDATE {table} AS t
-            SET ({columns}) = (SELECT {columns} FROM new_row)
-            WHERE t.id = $2::uuid{guard}
-            RETURNING t.*
-            "#,
-            table = self.table_name,
-            columns = column_names,
-            guard = guard,
-        );
-
-        let result = crate::company_scope::fetch_optional_scoped(
-            &self.pool,
-            sqlx::query_as::<_, T>(&query).bind(&json_str).bind(id),
-        )
-        .await?;
 
         Ok(result)
     }
@@ -784,6 +748,106 @@ impl<T: for<'a> FromRow<'a, PgRow> + Send + Unpin> PostgresRepository<T> {
 
 /// The placeholder cast for a column type, or None when a bare text bind
 /// compares correctly.
+/// The SQL of one guarded row update — see [`PostgresRepository::update_guarded`].
+pub(crate) enum UpdateStatement {
+    /// Nothing to write: re-read the row under the guard. Binds `$1` = id.
+    Unchanged(String),
+    /// The UPDATE. Binds `$1` = the row as JSON, `$2` = id.
+    Update { query: String, json: String },
+}
+
+/// Build the guarded update of `entity` in `table`, setting only `only` columns when given.
+pub(crate) fn update_statement<T: Serialize>(
+    table: &str,
+    entity: &T,
+    only: Option<&[String]>,
+    guard: &str,
+) -> anyhow::Result<UpdateStatement> {
+    let json_obj = match serde_json::to_value(entity)? {
+        Value::Object(obj) => obj,
+        _ => return Err(anyhow::anyhow!("Entity must serialize to a JSON object")),
+    };
+
+    let update_columns: Vec<&String> = json_obj
+        .keys()
+        .filter(|k| *k != "id")
+        .filter(|k| only.is_none_or(|cols| cols.iter().any(|c| c == *k)))
+        .collect();
+
+    if update_columns.is_empty() {
+        return Ok(UpdateStatement::Unchanged(format!(
+            "SELECT t.* FROM {table} AS t WHERE t.id = $1::uuid{guard}"
+        )));
+    }
+
+    let column_names = update_columns
+        .iter()
+        .map(|k| quote_ident(k))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let json = serde_json::to_string(&json_obj)?;
+
+    // jsonb_populate_record in a CTE gives every value its column's real type (enums,
+    // booleans, numerics) without per-column casts.
+    let query = format!(
+        r#"
+            WITH new_row AS (
+                SELECT (jsonb_populate_record(NULL::{table}, $1::jsonb)).*
+            )
+            UPDATE {table} AS t
+            SET ({columns}) = (SELECT {columns} FROM new_row)
+            WHERE t.id = $2::uuid{guard}
+            RETURNING t.*
+            "#,
+        table = table,
+        columns = column_names,
+        guard = guard,
+    );
+    Ok(UpdateStatement::Update { query, json })
+}
+
+/// The SQL of one insert: the query, and the JSON payload it binds as `$1` (`None` for the
+/// `DEFAULT VALUES` form, which binds nothing).
+pub(crate) fn insert_statement<T: Serialize>(
+    table: &str,
+    entity: &T,
+) -> anyhow::Result<(String, Option<String>)> {
+    let json_obj = match serde_json::to_value(entity)? {
+        Value::Object(obj) => obj,
+        _ => return Err(anyhow::anyhow!("Entity must serialize to a JSON object")),
+    };
+
+    // Name only the columns the payload actually carries.
+    //
+    // `SELECT (jsonb_populate_record(...)).*` emits EVERY column of the row type, so a column
+    // the entity does not know about arrived as an explicit NULL — and an explicit NULL is not
+    // an absent value: it overrides the column DEFAULT. That is invisible until a table's
+    // correctness depends on a default, which is exactly what composition-installed tenancy
+    // does (a scoped table defaults `org_unit_id` from the acting unit), so generic creates
+    // over such a table wrote NULL and were refused by the write-path guard.
+    //
+    // Listing the payload's own keys leaves every other column unmentioned, so its default
+    // applies. A key that is present with a JSON null is still written as NULL, which is
+    // right: the caller said so. This mirrors the update path, which has always built its
+    // column list from these same keys.
+    let insert_columns: Vec<String> = json_obj.keys().map(|k| quote_ident(k)).collect();
+
+    if insert_columns.is_empty() {
+        // Nothing supplied at all: let every column take its default rather than emitting
+        // `INSERT INTO t () SELECT`, which is not valid SQL.
+        return Ok((format!("INSERT INTO {table} DEFAULT VALUES RETURNING *"), None));
+    }
+    let columns = insert_columns.join(", ");
+    let query = format!(
+        r#"
+            INSERT INTO {table} ({columns})
+            SELECT {columns} FROM jsonb_populate_record(NULL::{table}, $1::jsonb)
+            RETURNING *
+            "#,
+    );
+    Ok((query, Some(serde_json::to_string(&json_obj)?)))
+}
+
 /// The serialized fields whose value differs between `before` and `after` (never `id`), in
 /// `after`'s field order — the columns an update that started from `before` actually changes.
 /// A field `after` no longer serializes is not a change: an update cannot unset a column by
@@ -910,7 +974,7 @@ fn merge_filter_casts(
 /// unknown keys away; now it fails, and the bare Postgres error does not say why. Serialized field
 /// and table column are meant to be the same set — the update path has always assumed it — so this
 /// points at the mismatch rather than leaving someone to guess.
-fn explain_unknown_column(error: sqlx::Error, table: &str) -> anyhow::Error {
+pub(crate) fn explain_unknown_column(error: sqlx::Error, table: &str) -> anyhow::Error {
     let text = error.to_string();
     if text.contains("does not exist") && text.contains("column") {
         return anyhow::Error::new(error).context(format!(
@@ -938,55 +1002,11 @@ where
     T: for<'a> FromRow<'a, PgRow> + Send + Sync + Unpin + Serialize,
 {
     async fn create(&self, entity: &T) -> anyhow::Result<T> {
-        // Serialize entity to JSON to extract field names and values
-        let json_value = serde_json::to_value(entity)?;
-
-        let json_obj = match json_value {
-            Value::Object(obj) => obj,
-            _ => return Err(anyhow::anyhow!("Entity must serialize to a JSON object")),
-        };
-
-        // Build dynamic INSERT query using jsonb_populate_record
-        // This approach handles all PostgreSQL types correctly including ENUMs and booleans
-        let json_str = serde_json::to_string(&json_obj)?;
-
-        // Name only the columns the payload actually carries.
-        //
-        // `SELECT (jsonb_populate_record(...)).*` emits EVERY column of the row type, so a column
-        // the entity does not know about arrived as an explicit NULL — and an explicit NULL is not
-        // an absent value: it overrides the column DEFAULT. That is invisible until a table's
-        // correctness depends on a default, which is exactly what composition-installed tenancy
-        // does (a scoped table defaults `org_unit_id` from the acting unit), so generic creates
-        // over such a table wrote NULL and were refused by the write-path guard.
-        //
-        // Listing the payload's own keys leaves every other column unmentioned, so its default
-        // applies. A key that is present with a JSON null is still written as NULL, which is
-        // right: the caller said so. This mirrors the update path below, which has always built
-        // its column list from these same keys.
-        let insert_columns: Vec<String> = json_obj.keys().map(|k| quote_ident(k)).collect();
-
-        let query = if insert_columns.is_empty() {
-            // Nothing supplied at all: let every column take its default rather than emitting
-            // `INSERT INTO t () SELECT`, which is not valid SQL.
-            format!("INSERT INTO {table} DEFAULT VALUES RETURNING *", table = self.table_name)
-        } else {
-            let columns = insert_columns.join(", ");
-            format!(
-                r#"
-            INSERT INTO {table} ({columns})
-            SELECT {columns} FROM jsonb_populate_record(NULL::{table}, $1::jsonb)
-            RETURNING *
-            "#,
-                table = self.table_name,
-                columns = columns
-            )
-        };
-
+        let (query, json) = insert_statement(&self.table_name, entity)?;
         // The DEFAULT VALUES form takes no bind; every other form binds the payload.
-        let statement = if insert_columns.is_empty() {
-            sqlx::query_as::<_, T>(&query)
-        } else {
-            sqlx::query_as::<_, T>(&query).bind(&json_str)
+        let statement = match json {
+            Some(json) => sqlx::query_as::<_, T>(&query).bind(json),
+            None => sqlx::query_as::<_, T>(&query),
         };
         let result = crate::company_scope::fetch_one_scoped(&self.pool, statement)
             .await

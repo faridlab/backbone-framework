@@ -48,7 +48,7 @@ pub use org_scope::{
 pub use audit_context::{RequestAuditContext, AUDIT_CONTEXT_VARS};
 pub use generic_repository::{
     and_conditions, fetch_by_ids_as_json, strip_client_company_filters, company_fence,
-    qualify_relation_table, EntityRepoMeta, GenericCrudRepository, HardDelete, MissingCompanyScope,
+    qualify_relation_table, BatchItemError, EntityRepoMeta, GenericCrudRepository, HardDelete, MissingCompanyScope,
     SoftDelete,
 };
 pub use migrations::*;
