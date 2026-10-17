@@ -16,6 +16,8 @@ back to the `## [Unreleased]` section.
 
 ## [Unreleased]
 
+## [3.13.0] - 2026-10-18
+
 ### Security
 
 - **backbone-core** / **backbone-orm** — Postgres checks a foreign key without row-level
