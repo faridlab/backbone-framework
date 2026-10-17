@@ -7,8 +7,10 @@
 //! which under database-per-tenant is the whole isolation story: a request can only ever touch the
 //! database its host resolved to.
 //!
-//! Two things land in the request extensions:
+//! Three things land in the request extensions:
 //!
+//! - [`TenantId`] — the resolved tenant, which [`tenant_audience`] hands to the auth guards'
+//!   token binding so a session minted for one tenant cannot open another;
 //! - `Arc<F::Runtime>` — the tenant's runtime, for handlers/composers that need the whole thing;
 //! - `sqlx::PgPool` — when the runtime [`ProvidesDatabase`], its tenant-dedicated pool. This is
 //!   the extension the auth middlewares look for: `backbone_auth::company::company_auth` today,
@@ -48,6 +50,13 @@ impl ProvidesDatabase for sqlx::PgPool {
     fn database(&self) -> Option<&sqlx::PgPool> {
         Some(self)
     }
+}
+
+/// The tenant [`tenant_route`] resolved for this request, as the audience a session token must
+/// carry — the `source` for `backbone_auth`'s `OrgVerifier::bind_audience` and
+/// `CompanyVerifier::bind_audience`. `None` when the request did not pass the tenant router.
+pub fn tenant_audience(extensions: &axum::http::Extensions) -> Option<String> {
+    extensions.get::<TenantId>().map(|t| t.as_str().to_string())
 }
 
 /// Middleware state: how to resolve a host, and where built runtimes come from.
@@ -145,6 +154,8 @@ where
         req.extensions_mut().insert(pool.clone());
     }
     req.extensions_mut().insert(runtime);
+    // The resolved tenant itself, for the session guards' token binding (`tenant_audience`).
+    req.extensions_mut().insert(tenant);
 
     next.run(req).await
 }

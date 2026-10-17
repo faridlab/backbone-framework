@@ -176,3 +176,34 @@ async fn a_tenant_that_cannot_build_answers_unavailable_not_someone_elses_runtim
         .unwrap();
     assert_eq!(res.status(), 503);
 }
+
+/// The resolved tenant rides the request as a `TenantId`, and `tenant_audience` reads it as the
+/// audience a session token must carry — the hand-off the auth guards' tenant binding uses.
+#[tokio::test]
+async fn the_resolved_tenant_rides_the_request_for_the_token_binding() {
+    use backbone_tenant::axum_router::tenant_audience;
+
+    async fn audience(req: axum::extract::Request) -> String {
+        let id = req.extensions().get::<TenantId>().map(|t| t.as_str().to_string());
+        format!("{:?}|{:?}", id, tenant_audience(req.extensions()))
+    }
+
+    let app = Router::new().route("/aud", get(audience)).layer(
+        axum::middleware::from_fn_with_state(
+            TenantRouter::new(HostResolver::new("app.example.com"), TenantRegistry::new(EchoFactory, 8)),
+            tenant_route,
+        ),
+    );
+    let res = app
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/aud")
+                .header("host", "acme.app.example.com")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    assert_eq!(body(res).await, r#"Some("acme")|Some("acme")"#);
+}

@@ -39,7 +39,7 @@ use std::sync::Arc;
 
 use axum::{
     extract::{FromRequestParts, Request, State},
-    http::{header, request::Parts, StatusCode},
+    http::{header, request::Parts, Extensions, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
     Json,
@@ -48,7 +48,8 @@ use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::org::TOKEN_TYPE_ACCESS;
+use crate::audience::AudienceBinding;
+use crate::org::{session_validation, TOKEN_TYPE_ACCESS};
 
 /// The company + subject proven by a validated access token.
 ///
@@ -86,13 +87,21 @@ pub struct CompanyClaims {
     /// value other than `"access"` — e.g. a refresh token — is refused.
     #[serde(default)]
     pub typ: Option<String>,
+    /// The tenants this token was minted for (the standard `aud` claim, a string or an array).
+    /// Empty on tokens minted without a tenant — see [`crate::audience`].
+    #[serde(default, deserialize_with = "crate::audience::deserialize_audience")]
+    pub aud: Vec<String>,
 }
 
 /// Verifier the composing service builds once (from its JWT secret) and clones into guarded routes.
+///
+/// Bind it to the request's tenant with [`bind_audience`](Self::bind_audience) in any deployment
+/// where tenants share a signing key.
 #[derive(Clone)]
 pub struct CompanyVerifier {
     key: Arc<DecodingKey>,
     validation: Arc<Validation>,
+    audience: Option<AudienceBinding>,
 }
 
 impl CompanyVerifier {
@@ -100,7 +109,8 @@ impl CompanyVerifier {
     pub fn hs256(secret: &[u8]) -> Self {
         Self {
             key: Arc::new(DecodingKey::from_secret(secret)),
-            validation: Arc::new(Validation::new(Algorithm::HS256)),
+            validation: Arc::new(session_validation(Algorithm::HS256)),
+            audience: None,
         }
     }
 
@@ -112,8 +122,35 @@ impl CompanyVerifier {
     pub fn rs256(public_key_pem: &[u8]) -> Result<Self, jsonwebtoken::errors::Error> {
         Ok(Self {
             key: Arc::new(DecodingKey::from_rsa_pem(public_key_pem)?),
-            validation: Arc::new(Validation::new(Algorithm::RS256)),
+            validation: Arc::new(session_validation(Algorithm::RS256)),
+            audience: None,
         })
+    }
+
+    /// Bind the guard to the request's tenant: `source` reads the tenant the request was routed
+    /// to from its extensions, and [`company_auth`] refuses (401) a token whose `aud` does not
+    /// name it. A surface that resolves no tenant accepts only tokens that name none. With
+    /// `backbone-tenant`, pass `backbone_tenant::axum_router::tenant_audience`.
+    #[must_use]
+    pub fn bind_audience<F>(mut self, source: F) -> Self
+    where
+        F: Fn(&Extensions) -> Option<String> + Send + Sync + 'static,
+    {
+        self.audience = Some(AudienceBinding::new(source));
+        self
+    }
+
+    /// Accept tokens that name no tenant on a tenant's surface, as before the binding existed.
+    /// Off by default; see [`crate::org::OrgVerifier::accept_unbound_tokens`].
+    #[deprecated(
+        note = "accepts tokens that can be replayed across tenants; refresh the session instead"
+    )]
+    #[must_use]
+    pub fn accept_unbound_tokens(mut self, accept: bool) -> Self {
+        if let Some(binding) = self.audience.as_mut() {
+            binding.accept_unbound = accept;
+        }
+        self
     }
 
     /// Validate a raw access token → a company context, or `None` if the signature/expiry is
@@ -122,7 +159,21 @@ impl CompanyVerifier {
     /// A `typ` claim of anything other than `"access"` fails verification: a refresh token is a
     /// rotation credential, and presenting it to a guarded route must not open a scoped session.
     /// Tokens minted before `typ` existed carry no claim and stay accepted.
+    ///
+    /// This does NOT check the token's tenant — [`company_auth`] does, through the binding; use
+    /// [`verify_for_audience`](Self::verify_for_audience) outside a request.
     pub fn verify(&self, token: &str) -> Option<CompanyContext> {
+        self.verify_claims(token).map(|(ctx, _)| ctx)
+    }
+
+    /// [`verify`](Self::verify), plus the tenant check: `tenant` is the tenant the caller serves
+    /// (`None` for a surface that serves none), and the token must have been minted for it.
+    pub fn verify_for_audience(&self, token: &str, tenant: Option<&str>) -> Option<CompanyContext> {
+        let (ctx, aud) = self.verify_claims(token)?;
+        crate::audience::admits(tenant, &aud, false).then_some(ctx)
+    }
+
+    fn verify_claims(&self, token: &str) -> Option<(CompanyContext, Vec<String>)> {
         let data = decode::<CompanyClaims>(token, &self.key, &self.validation).ok()?;
         let c = data.claims;
         if let Some(typ) = &c.typ {
@@ -130,11 +181,12 @@ impl CompanyVerifier {
                 return None;
             }
         }
-        Some(CompanyContext {
+        let ctx = CompanyContext {
             company_id: c.company_id?,
             branch_id: c.branch_id,
             user_id: c.sub,
-        })
+        };
+        Some((ctx, c.aud))
     }
 }
 
@@ -173,8 +225,17 @@ pub async fn company_auth(
     let Some(token) = token else {
         return unauthorized("missing bearer token");
     };
-    match verifier.verify(token) {
-        Some(ctx) => {
+    match verifier.verify_claims(token) {
+        // Tenants share the signing key, so the token must name THIS request's tenant.
+        Some((_, aud))
+            if verifier
+                .audience
+                .as_ref()
+                .is_some_and(|binding| !binding.admits(req.extensions(), &aud)) =>
+        {
+            unauthorized("token was not issued for this tenant")
+        }
+        Some((ctx, _)) => {
             // Bind the request's company for the whole downstream handler so the RLS fence (ADR-0008)
             // returns this company's rows: every ORM statement runs with `app.company_id` set to
             // `ctx.company_id` — the same signed id the write guard trusts.

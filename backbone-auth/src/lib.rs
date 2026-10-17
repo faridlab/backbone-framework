@@ -42,6 +42,8 @@ pub mod token_generator;
 pub mod traits;
 pub mod resource_policy;
 #[cfg(feature = "axum")]
+pub mod audience;
+#[cfg(feature = "axum")]
 pub mod company;
 #[cfg(feature = "axum")]
 pub mod idempotency;
@@ -70,6 +72,9 @@ pub use org::{
     org_auth, OrgClaims, OrgContext, OrgIssuer, OrgVerifier, TOKEN_TYPE_ACCESS,
     TOKEN_TYPE_REFRESH,
 };
+/// Tenant binding of session tokens (feature `axum`): the `aud` claim against the request's tenant.
+#[cfg(feature = "axum")]
+pub use audience::AudienceSource;
 #[cfg(feature = "axum")]
 pub use idempotency::{IdempotencyState, idempotency_middleware, migrate as migrate_idempotency};
 

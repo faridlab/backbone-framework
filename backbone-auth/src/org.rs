@@ -51,7 +51,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{
     extract::{FromRequestParts, Request, State},
-    http::{header, request::Parts, HeaderMap, HeaderValue, StatusCode},
+    http::{header, request::Parts, Extensions, HeaderMap, HeaderValue, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
     Json,
@@ -60,6 +60,8 @@ use backbone_orm::audit_context::RequestAuditContext;
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+use crate::audience::AudienceBinding;
 
 /// Marks a token's purpose. Access tokens carry `"access"` and open scoped sessions; refresh
 /// tokens carry `"refresh"` and are rotation credentials ONLY — the verifier refuses them, so a
@@ -117,14 +119,33 @@ pub struct OrgClaims {
     /// value other than `"access"` — e.g. a refresh token — is refused.
     #[serde(default)]
     pub typ: Option<String>,
+    /// The tenants this token was minted for (the standard `aud` claim, a string or an array).
+    /// Empty on tokens minted without a tenant — see [`crate::audience`] for how a bound
+    /// verifier treats them.
+    #[serde(default, deserialize_with = "crate::audience::deserialize_audience")]
+    pub aud: Vec<String>,
 }
 
 /// Verifier the composing service builds once (from its JWT secret) and clones into guarded
 /// routes — the org twin of [`crate::company::CompanyVerifier`].
+///
+/// Bind it to the request's tenant with [`bind_audience`](Self::bind_audience) in any deployment
+/// where tenants share a signing key; without a binding the guard cannot tell a token minted for
+/// another tenant from one minted for this one.
 #[derive(Clone)]
 pub struct OrgVerifier {
     key: Arc<DecodingKey>,
     validation: Arc<Validation>,
+    audience: Option<AudienceBinding>,
+}
+
+/// Signature and expiry are checked by the decoder; `aud` is checked by the tenant binding,
+/// which knows the request's tenant — the decoder's own audience check would refuse every
+/// tenant-bound token outright.
+pub(crate) fn session_validation(algorithm: Algorithm) -> Validation {
+    let mut validation = Validation::new(algorithm);
+    validation.validate_aud = false;
+    validation
 }
 
 impl OrgVerifier {
@@ -132,7 +153,8 @@ impl OrgVerifier {
     pub fn hs256(secret: &[u8]) -> Self {
         Self {
             key: Arc::new(DecodingKey::from_secret(secret)),
-            validation: Arc::new(Validation::new(Algorithm::HS256)),
+            validation: Arc::new(session_validation(Algorithm::HS256)),
+            audience: None,
         }
     }
 
@@ -144,8 +166,41 @@ impl OrgVerifier {
     pub fn rs256(public_key_pem: &[u8]) -> Result<Self, jsonwebtoken::errors::Error> {
         Ok(Self {
             key: Arc::new(DecodingKey::from_rsa_pem(public_key_pem)?),
-            validation: Arc::new(Validation::new(Algorithm::RS256)),
+            validation: Arc::new(session_validation(Algorithm::RS256)),
+            audience: None,
         })
+    }
+
+    /// Bind the guard to the request's tenant: `source` reads the tenant the request was routed
+    /// to from its extensions, and [`org_auth`] refuses (401) a token whose `aud` does not name
+    /// it. With `backbone-tenant`, pass `backbone_tenant::axum_router::tenant_audience`.
+    ///
+    /// Tokens that name no tenant are refused on a tenant's surface; see
+    /// [`accept_unbound_tokens`](Self::accept_unbound_tokens) for the deploy-time exception.
+    #[must_use]
+    pub fn bind_audience<F>(mut self, source: F) -> Self
+    where
+        F: Fn(&Extensions) -> Option<String> + Send + Sync + 'static,
+    {
+        self.audience = Some(AudienceBinding::new(source));
+        self
+    }
+
+    /// Accept tokens that name no tenant on a tenant's surface, as before the binding existed.
+    ///
+    /// Off by default, and not needed for a normal deploy: a refused access token answers 401,
+    /// the client refreshes, and the refresh mints a tenant-bound pair. Turn it on only for
+    /// clients that cannot refresh, for at most one access-token lifetime. Has no effect on an
+    /// unbound verifier.
+    #[deprecated(
+        note = "accepts tokens that can be replayed across tenants; refresh the session instead"
+    )]
+    #[must_use]
+    pub fn accept_unbound_tokens(mut self, accept: bool) -> Self {
+        if let Some(binding) = self.audience.as_mut() {
+            binding.accept_unbound = accept;
+        }
+        self
     }
 
     /// Validate a raw access token → an org context, or `None` if the signature/expiry is bad,
@@ -154,7 +209,23 @@ impl OrgVerifier {
     /// A `typ` claim of anything other than `"access"` fails verification: a refresh token is a
     /// rotation credential, and presenting it to a guarded route must not open a scoped session.
     /// Tokens minted before `typ` existed carry no claim and stay accepted.
+    ///
+    /// This does NOT check the token's tenant — [`org_auth`] does, through the binding; use
+    /// [`verify_for_audience`](Self::verify_for_audience) outside a request.
     pub fn verify(&self, token: &str) -> Option<OrgContext> {
+        self.verify_claims(token).map(|(ctx, _)| ctx)
+    }
+
+    /// [`verify`](Self::verify), plus the tenant check: `tenant` is the tenant the caller serves
+    /// (`None` for a surface that serves none), and the token must have been minted for it.
+    /// Tokens naming no tenant are refused for `Some(tenant)` regardless of the compatibility flag.
+    pub fn verify_for_audience(&self, token: &str, tenant: Option<&str>) -> Option<OrgContext> {
+        let (ctx, aud) = self.verify_claims(token)?;
+        crate::audience::admits(tenant, &aud, false).then_some(ctx)
+    }
+
+    /// The verified context plus the token's audience, for the guard's tenant check.
+    fn verify_claims(&self, token: &str) -> Option<(OrgContext, Vec<String>)> {
         let data = decode::<OrgClaims>(token, &self.key, &self.validation).ok()?;
         let c = data.claims;
         if let Some(typ) = &c.typ {
@@ -162,12 +233,13 @@ impl OrgVerifier {
                 return None;
             }
         }
-        Some(OrgContext {
+        let ctx = OrgContext {
             acting_unit_id: c.org_unit_id?,
             entitled_units: c.entitled_units,
             legacy_company_id: c.company_id,
             user_id: c.sub,
-        })
+        };
+        Some((ctx, c.aud))
     }
 }
 
@@ -207,6 +279,7 @@ impl OrgVerifier {
 pub struct OrgIssuer {
     key: Arc<EncodingKey>,
     algorithm: Algorithm,
+    audience: Option<String>,
 }
 
 /// The claims the issuer seals — a wire superset of [`OrgClaims`] (the verifier ignores `iat`;
@@ -224,6 +297,9 @@ struct IssuedSessionClaims {
     /// entirely when `None`, so an org-only mint stays byte-shaped like a pre-twin token.
     #[serde(skip_serializing_if = "Option::is_none")]
     company_id: Option<Uuid>,
+    /// The tenant the token was minted for — see [`OrgIssuer::for_audience`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    aud: Option<String>,
 }
 
 impl OrgIssuer {
@@ -232,6 +308,7 @@ impl OrgIssuer {
         Self {
             key: Arc::new(EncodingKey::from_secret(secret)),
             algorithm: Algorithm::HS256,
+            audience: None,
         }
     }
 
@@ -244,7 +321,22 @@ impl OrgIssuer {
         Ok(Self {
             key: Arc::new(EncodingKey::from_rsa_pem(private_key_pem)?),
             algorithm: Algorithm::RS256,
+            audience: None,
         })
+    }
+
+    /// An issuer that seals `tenant` into every token's `aud` claim — the tenant the session was
+    /// resolved in (its slug). Mint through this whenever tenants share a signing key: a verifier
+    /// bound with [`OrgVerifier::bind_audience`] accepts the token only on that tenant's requests.
+    ///
+    /// Cheap: it shares the key with `self`, so call it per request.
+    #[must_use]
+    pub fn for_audience(&self, tenant: impl Into<String>) -> Self {
+        Self {
+            key: Arc::clone(&self.key),
+            algorithm: self.algorithm,
+            audience: Some(tenant.into()),
+        }
     }
 
     /// Mint an access token: the credential guarded routes accept.
@@ -299,6 +391,7 @@ impl OrgIssuer {
             org_unit_id: acting_unit,
             entitled_units: entitled_units.to_vec(),
             company_id: legacy_company,
+            aud: self.audience.clone(),
         };
         encode(&Header::new(self.algorithm), &claims, &self.key)
     }
@@ -396,6 +489,8 @@ fn audit_context_of(ctx: &OrgContext, req: &Request) -> RequestAuditContext {
 ///
 /// Rejections, in order:
 /// - 401 — missing/expired/malformed token, or a token with no `org_unit_id` claim;
+/// - 401 — on a verifier bound with [`OrgVerifier::bind_audience`], a token whose `aud` does
+///   not name the request's tenant;
 /// - 403 — a valid token whose acting node is not in THIS tenant's org tree (the cross-tenant
 ///   case: identity is fine, the tenant is wrong);
 /// - 500 — no pool on the request (router wiring), the org spine absent (deployment), or the
@@ -416,9 +511,16 @@ pub async fn org_auth(
     let Some(token) = token else {
         return unauthorized("missing bearer token");
     };
-    let Some(ctx) = verifier.verify(token) else {
+    let Some((ctx, aud)) = verifier.verify_claims(token) else {
         return unauthorized("invalid token or missing org_unit_id claim");
     };
+    // Tenants share the signing key and may share node ids, so the token must name THIS
+    // request's tenant — checked before any database is touched.
+    if let Some(binding) = &verifier.audience {
+        if !binding.admits(req.extensions(), &aud) {
+            return unauthorized("token was not issued for this tenant");
+        }
+    }
 
     // The scope can only be resolved against the tenant's own tree, so this guard has no
     // task-local fallback (unlike the company guard, whose company id rides the token). No pool
