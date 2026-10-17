@@ -238,6 +238,24 @@ where
     Ok(done.rows_affected() == 1)
 }
 
+/// Stage an event on the write transaction the current task runs in
+/// (`backbone_orm::in_write_tx`), so it commits or rolls back with the write that raised it.
+/// The write-transaction twin of [`stage`], with the same idempotency on the event `id`.
+///
+/// # Errors
+/// A database error when no write transaction is active for the task (a configuration error:
+/// the caller meant to stage inside one), or whatever [`stage`] reports.
+#[cfg(feature = "write-tx")]
+pub async fn stage_in_write_tx(schema: &str, rec: &OutboxRecord) -> Result<bool> {
+    let Some(tx) = backbone_orm::current_write_tx() else {
+        return Err(OutboxError::Db(sqlx::Error::Configuration(
+            "stage_in_write_tx called outside a write transaction".into(),
+        )));
+    };
+    let mut conn = tx.conn().await;
+    stage(&mut *conn, schema, rec).await
+}
+
 /// Count of events the transport gave up on — dead-lettered, awaiting a re-emit.
 ///
 /// Worth alerting on: it is the number of cross-module effects that did not happen. A silently

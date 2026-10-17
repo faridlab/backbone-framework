@@ -70,4 +70,18 @@ impl OutboxRecord {
         self.correlation_id = Some(id.into());
         self
     }
+
+    /// Set the event schema version (a declared event's `version`).
+    pub fn with_version(mut self, version: i32) -> Self {
+        self.version = version;
+        self
+    }
+
+    /// Set the causation id: the id of the event, or the trigger or workflow step, whose
+    /// handling produced this one. Chains events into the cause-and-effect trail
+    /// `correlation_id` only groups.
+    pub fn with_causation_id(mut self, id: impl Into<String>) -> Self {
+        self.causation_id = Some(id.into());
+        self
+    }
 }
