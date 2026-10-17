@@ -16,6 +16,64 @@ back to the `## [Unreleased]` section.
 
 ## [Unreleased]
 
+### Security
+
+- **backbone-core** / **backbone-orm** — Postgres checks a foreign key without row-level
+  security, so a request scoped to one company could create or move a record onto another
+  company's row (and probe which ids exist). `PersistentEntity::references()` (new, defaulted
+  to none) lists an entity's foreign keys as `Reference { field, table, column }`; before a
+  generic create, PUT, PATCH, bulk create, bulk update or bulk PATCH stores a reference — every
+  one on a create, those whose value changes on an update — the service asks the repository
+  whether the row is visible on the request's own scope (`CrudRepository::reference_visible`,
+  defaulted to "cannot tell"; `impl_crud_repository!` implements it with
+  `backbone_orm::reference_visible`). A hidden or missing row answers 422 `reference_missing`
+  on the field, the same answer a missing row gets. The schema generator emits the list.
+- **backbone-core** — a write whose new row a row-level security policy refuses (a forged
+  `company_id` or `org_unit_id`, SQLSTATE 42501) answered 500. It now answers 422
+  `scope_refused`, naming no table or policy; a 42501 for a missing grant stays a 500.
+- **backbone-core** — a 404 named the entity's full Rust type path. Every 404 now answers
+  `Not found` with a `not_found` violation; the entity and id go to the debug log, and
+  `CrudService::entity_name` of the generic service is the type's own name.
+
+### Fixed
+
+- **backbone-core** — **breaking (behaviour):** every unique violation is now 422 with a
+  violation: the code a generated name carries (`uq_<table>…__<code>`), else `taken`. A unique
+  index with another name used to answer 409 with the raw Postgres sentence, which named the
+  index. The path comes from the `Key (…)` detail, or — on a table with row-level security,
+  where Postgres leaves the detail out — from the constraint name (see below).
+- **backbone-core** — a constraint refusal on a table with row-level security came back with an
+  empty path. The path is now read out of the generated constraint name when Postgres reports
+  none: a foreign key `fk_<table>_<column>` (or `…_fk` on a link table), a field check
+  `ck_<table>_<field>_<code>__<code>`, and the new `<prefix>_<table>_on_<field>__<code>` shape
+  for a rule or unique key about one field (`ck_`, `uq_`, `ex_`, `tg_`). A rule about the whole
+  record (`<prefix>_<table>_<rule>__<code>`) keeps an empty path.
+- **backbone-core** — a row rule compared two decimals as text, since a decimal serializes as
+  a string: `"50" <= "100"` was false and refused a valid row. Two texts that are both written
+  as decimals now compare exactly as numbers (`"1.10" == "1.1"`); text that only looks numeric
+  (`"007"`, `"1e3"`) still compares as text.
+- **backbone-core** — a PATCH value the entity cannot hold answered 400 with serde's sentence
+  and no violation. A wrong type is now 422 `invalid_value` on the field and a null on a field
+  that may not be empty 422 `required`, the codes a create body gets for the same mistakes.
+- **backbone-core** — the list routes ignored `sort_by`/`sort_order`; they now sort, through
+  the same field sanitizer and allow-list as the filter grammar's `orderby` (which wins when
+  both are given).
+- **backbone-core** / **backbone-orm** — **breaking (behaviour):** `impl_crud_repository!` built
+  its page with a struct literal, so `limit=1000` read a thousand rows, and `page=0` panicked
+  on an underflow. Every generated list now builds its page with `PaginationParams::new`
+  (page 0 reads as page 1, at most `PaginationParams::MAX_PER_PAGE` = 100 rows), `offset()`
+  saturates, and the list routes normalize the page they report the same way. Code that read
+  more than 100 rows in one `list`/`list_deleted` call must page. Restore-all and empty-trash
+  now walk the trash page by page.
+- **backbone-core** — a client refusal that named no rule (a plain 400, a 409) carried no code.
+  Every 4xx body from the generic handlers and `service_error_response` now carries at least one
+  violation: `invalid_request` (400), `not_found` (404), `conflict` (409), `invalid_value`
+  (422 without a rule). A refused list request carries one too (`invalid_request`, or
+  `invalid_query` for a filter or sort the database refuses — whose sentence no longer repeats
+  the database's error text); `PaginatedApiResponse` gains an optional `violations` field —
+  **breaking** for code that builds it with a struct literal.
+- **backbone-search** — a page number of 0 underflowed the Elasticsearch offset.
+
 ## [3.12.0] - 2026-10-17
 
 ### Security
