@@ -161,6 +161,17 @@ impl From<sqlx::Error> for OrgScopeError {
     }
 }
 
+/// The company node governing a unit: the unit itself when it is a company, otherwise its
+/// NEAREST company ancestor. The walk carries each step's depth and the pick orders by it, so
+/// with nested companies (a subsidiary under a parent company) a subsidiary's branch acts as
+/// the subsidiary — never as whichever company in the chain happens to have the lowest id.
+const NEAREST_COMPANY_SQL: &str = "WITH RECURSIVE up AS ( \
+        SELECT id, parent_id, kind, 0 AS depth FROM organization.org_units WHERE id = $1 \
+        UNION ALL \
+        SELECT o.id, o.parent_id, o.kind, up.depth + 1 FROM organization.org_units o \
+          JOIN up ON o.id = up.parent_id \
+     ) SELECT up.id FROM up WHERE up.kind::text = 'company' ORDER BY up.depth LIMIT 1";
+
 /// Resolve a session's scope from the org tree.
 ///
 /// `acting_unit` is the node the session acts at (from the signed token / tenant registry).
@@ -207,14 +218,7 @@ pub async fn resolve_org_scope(
     }
 
     // Walk up from the acting node to the governing company node for the legacy fence.
-    let legacy_company_id: Option<Uuid> = sqlx::query_scalar(
-        "WITH RECURSIVE up AS ( \
-            SELECT id, parent_id, kind FROM organization.org_units WHERE id = $1 \
-            UNION ALL \
-            SELECT o.id, o.parent_id, o.kind FROM organization.org_units o \
-              JOIN up ON o.id = up.parent_id \
-         ) SELECT up.id FROM up WHERE up.kind::text = 'company' ORDER BY up.id LIMIT 1",
-    )
+    let legacy_company_id: Option<Uuid> = sqlx::query_scalar(NEAREST_COMPANY_SQL)
     .bind(acting_unit)
     .fetch_optional(&mut *conn)
     .await?;
@@ -323,24 +327,44 @@ async fn open_org_request_scope<F, R>(
 where
     F: Future<Output = R>,
 {
-    let mut conn = pool.acquire().await?;
-    sqlx::query("SELECT set_config('app.scope_unit_ids', $1, false)")
-        .bind(scope.scope_unit_ids_csv())
-        .execute(&mut *conn)
-        .await?;
-    sqlx::query("SELECT set_config('app.company_id', $1, false)")
-        .bind(scope.legacy_company_id.map(|id| id.to_string()).unwrap_or_default())
-        .execute(&mut *conn)
-        .await?;
-    sqlx::query("SELECT set_config('app.acting_unit_id', $1, false)")
-        .bind(scope.acting_unit_id.to_string())
-        .execute(&mut *conn)
-        .await?;
-    if let Some(audit) = audit {
-        audit.bind_on(&mut conn, false).await?;
+    let conn = pool.acquire().await?;
+    let holder = Arc::new(Mutex::new(conn));
+    // Armed before the first variable is set, so a failed bind halfway through, a panic, or the
+    // whole future being dropped (a client disconnect) still clears every fence and audit
+    // variable before the connection can return to the pool. Resetting a variable this scope
+    // did not set costs one cheap set_config and keeps the inventory one list.
+    let reset = crate::company_scope::ScopeResetGuard::new(
+        holder.clone(),
+        ORG_FENCE_VARS
+            .into_iter()
+            .chain(AUDIT_CONTEXT_VARS)
+            .collect(),
+        "backbone_orm::org_scope",
+    );
+    {
+        let mut conn = holder.lock().await;
+        sqlx::query("SELECT set_config('app.scope_unit_ids', $1, false)")
+            .bind(scope.scope_unit_ids_csv())
+            .execute(&mut **conn)
+            .await?;
+        sqlx::query("SELECT set_config('app.company_id', $1, false)")
+            .bind(
+                scope
+                    .legacy_company_id
+                    .map(|id| id.to_string())
+                    .unwrap_or_default(),
+            )
+            .execute(&mut **conn)
+            .await?;
+        sqlx::query("SELECT set_config('app.acting_unit_id', $1, false)")
+            .bind(scope.acting_unit_id.to_string())
+            .execute(&mut **conn)
+            .await?;
+        if let Some(audit) = audit {
+            audit.bind_on(&mut conn, false).await?;
+        }
     }
 
-    let holder = Arc::new(Mutex::new(conn));
     let scope_arc = Arc::new(scope);
     let pool_identity = pool.connect_options();
     // The audit attribution rides as a task-local TOO (not only as variables on
@@ -367,29 +391,11 @@ where
         )
         .await;
 
-    // Unconditional reset of every variable the scope may have set — fence always, audit when
-    // the request carried a context (resetting anyway when it did not costs six cheap
-    // set_config calls and keeps the inventory one list; see with_request_scope for the
-    // lingering-clone reasoning — the same contract applies to every variable).
-    {
-        let mut guard = holder.lock().await;
-        for var in ORG_FENCE_VARS.into_iter().chain(AUDIT_CONTEXT_VARS) {
-            if let Err(e) = sqlx::query("SELECT set_config($1, '', false)")
-                .bind(var)
-                .execute(&mut **guard)
-                .await
-            {
-                tracing::error!(
-                    target: "backbone_orm::org_scope",
-                    error = %e,
-                    var,
-                    "failed to reset fence variable on org request connection; the pool \
-                     connection may carry the previous session's scope — treat as a \
-                     fence-hygiene incident",
-                );
-            }
-        }
-    }
+    // The normal exit resets in line (see with_request_scope for the lingering-clone
+    // reasoning — the same contract applies to every variable); every other exit is the
+    // guard's Drop.
+    reset.reset().await;
+    drop(holder);
     Ok(result)
 }
 

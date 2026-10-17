@@ -57,13 +57,24 @@ pub async fn with_request_scope<F, R>(pool: &PgPool, company: Uuid, f: F) -> Res
 where
     F: Future<Output = R>,
 {
-    let mut conn = pool.acquire().await?;
-    sqlx::query("SELECT set_config('app.company_id', $1, false)")
-        .bind(company.to_string())
-        .execute(&mut *conn)
-        .await?;
-
+    let conn = pool.acquire().await?;
     let holder = Arc::new(Mutex::new(conn));
+    // Armed before the first variable is set: every exit from here on — a failed bind, a
+    // panic, or the whole future being dropped by a client disconnect — resets the connection
+    // before it can return to the pool (see `ScopeResetGuard`).
+    let reset = ScopeResetGuard::new(
+        holder.clone(),
+        vec!["app.company_id"],
+        "backbone_orm::company_scope",
+    );
+    {
+        let mut g = holder.lock().await;
+        sqlx::query("SELECT set_config('app.company_id', $1, false)")
+            .bind(company.to_string())
+            .execute(&mut **g)
+            .await?;
+    }
+
     // Publish the COMPANY task-local too, matching `with_company_scope`'s visibility contract.
     // The dedicated connection carries the company in its session var, but code that asks
     // `current_company()` (application-layer adapters, audit stamps) has no other way to learn
@@ -73,37 +84,17 @@ where
         .scope(Some(company), REQUEST_CONN.scope(holder.clone(), f))
         .await;
 
-    // Unconditional reset. We do NOT gate on `Arc::try_unwrap(holder)` (sole-reference check):
-    // `REQUEST_CONN` is a clonable `Arc`, and every scoped helper takes a clone via `request_conn()`.
-    // A clone that outlives the scope (a `tokio::spawn` capturing it, a value held across an `.await`
-    // that outlives the request future, or cancellation with a lingering task) would make `try_unwrap`
-    // return `Err`, skipping this block entirely and leaving `app.company_id` set at SESSION level —
-    // the connection then returns to the pool dirty, and the next acquire reads the PREVIOUS tenant's
-    // rows. That is a non-deterministic cross-tenant leak, not fail-closed. (Regression test:
-    // `lingering_request_conn_clone_does_not_dirty_the_pooled_connection`.)
-    //
-    // Locking the mutex here serializes behind any in-flight clone query, then clears the session var
-    // regardless of how many clones exist or when they drop. The `PoolConnection` only returns to the
-    // pool when the LAST `Arc` reference drops — by which point the var is already cleared here. A
-    // clone that runs further queries after this reset does so unscoped (fail-closed), which is the
-    // correct behaviour for work that outlived its request scope.
-    {
-        let mut guard = holder.lock().await;
-        if let Err(e) = sqlx::query("SELECT set_config('app.company_id', '', false)")
-            .execute(&mut **guard)
-            .await
-        {
-            // A reset failure (transient DB error) could leave the session var set. We cannot `detach`
-            // the connection from a `&mut` borrow, so log loud at ERROR — this must surface in ops as
-            // a fence-hygiene alert, not be swallowed silently. (Previously `let _ =` hid this.)
-            tracing::error!(
-                target: "backbone_orm::company_scope",
-                error = %e,
-                "failed to reset app.company_id on request connection; the pool connection may carry \
-                 the previous tenant's company_id — treat as a fence-hygiene incident",
-            );
-        }
-    }
+    // Unconditional reset, awaited here on the normal path. It is NOT gated on
+    // `Arc::try_unwrap(holder)` (sole-reference check): `REQUEST_CONN` is a clonable `Arc`, and a
+    // clone that outlives the scope (a `tokio::spawn` capturing it, a value held across an
+    // `.await`) would make `try_unwrap` fail and skip the reset, returning the connection to the
+    // pool with `app.company_id` still set — a cross-tenant leak. (Regression test:
+    // `lingering_request_conn_clone_does_not_dirty_the_pooled_connection`.) The reset locks the
+    // mutex, so it serializes behind any in-flight clone query; the `PoolConnection` only returns
+    // to the pool when the LAST `Arc` drops, by which point the variable is already cleared. A
+    // clone that runs further queries afterwards does so unscoped (fail-closed).
+    reset.reset().await;
+    drop(holder);
     Ok(result)
 }
 
@@ -117,6 +108,115 @@ fn request_conn() -> Option<Arc<Mutex<PoolConnection<Postgres>>>> {
 /// per-statement callers share one fence surface).
 pub(crate) fn current_request_conn() -> Option<Arc<Mutex<PoolConnection<Postgres>>>> {
     request_conn()
+}
+
+/// Clears a request connection's session variables on every exit from a request scope.
+///
+/// A request scope sets session-level variables (the fence, the acting unit, the audit
+/// attribution) on a pooled connection and must clear them before the connection serves anyone
+/// else. Clearing them after the wrapped future returns covers only the normal path: a client
+/// disconnect or a timeout layer DROPS the future, a failed bind returns early, and a panic
+/// unwinds — and each of those used to hand the connection back to the pool still scoped to the
+/// previous request.
+///
+/// The guard is armed as soon as the connection is acquired. [`ScopeResetGuard::reset`] clears
+/// the variables in line on the normal path. If the guard is dropped instead, `Drop` cannot
+/// await, so it moves its `Arc` of the connection into a spawned task that clears them: the
+/// connection only returns to the pool when the last `Arc` drops, so no other request can draw
+/// it before the reset has run. When the reset itself fails, or no runtime is left to run it,
+/// the connection is detached from the pool (closed) rather than returned dirty, whenever this
+/// is the last reference to it.
+pub(crate) struct ScopeResetGuard {
+    holder: Option<Arc<Mutex<PoolConnection<Postgres>>>>,
+    vars: Vec<&'static str>,
+    target: &'static str,
+}
+
+impl ScopeResetGuard {
+    /// Arm a guard that clears `vars` on `holder`'s connection. `target` names the log target
+    /// a reset failure is reported under.
+    pub(crate) fn new(
+        holder: Arc<Mutex<PoolConnection<Postgres>>>,
+        vars: Vec<&'static str>,
+        target: &'static str,
+    ) -> Self {
+        Self {
+            holder: Some(holder),
+            vars,
+            target,
+        }
+    }
+
+    /// Clear the variables now (the normal exit) and disarm the guard.
+    pub(crate) async fn reset(mut self) {
+        if let Some(holder) = self.holder.take() {
+            reset_or_detach(holder, std::mem::take(&mut self.vars), self.target).await;
+        }
+    }
+}
+
+impl Drop for ScopeResetGuard {
+    fn drop(&mut self) {
+        let Some(holder) = self.holder.take() else {
+            return;
+        };
+        let vars = std::mem::take(&mut self.vars);
+        let target = self.target;
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn(reset_or_detach(holder, vars, target));
+            }
+            // No runtime left to run the reset (shutdown): never return the connection dirty.
+            Err(_) => detach_if_last(holder, target),
+        }
+    }
+}
+
+/// Clear `vars` on the connection; if that fails, close the connection instead of returning it.
+async fn reset_or_detach(
+    holder: Arc<Mutex<PoolConnection<Postgres>>>,
+    vars: Vec<&'static str>,
+    target: &'static str,
+) {
+    let mut failed = false;
+    {
+        let mut guard = holder.lock().await;
+        for var in &vars {
+            if let Err(e) = sqlx::query("SELECT set_config($1, '', false)")
+                .bind(*var)
+                .execute(&mut **guard)
+                .await
+            {
+                failed = true;
+                tracing::error!(
+                    target: "backbone_orm::scope_reset",
+                    scope = target,
+                    error = %e,
+                    var = *var,
+                    "failed to reset a session variable on a request connection; closing the \
+                     connection instead of returning it to the pool",
+                );
+            }
+        }
+    }
+    if failed {
+        detach_if_last(holder, target);
+    }
+}
+
+/// Close the connection rather than return it to the pool, when `holder` is its last reference.
+/// A lingering clone keeps it alive; that clone's own drop returns it, so this logs loudly.
+fn detach_if_last(holder: Arc<Mutex<PoolConnection<Postgres>>>, target: &'static str) {
+    match Arc::try_unwrap(holder) {
+        Ok(mutex) => drop(mutex.into_inner().detach()),
+        Err(_) => tracing::error!(
+            target: "backbone_orm::scope_reset",
+            scope = target,
+            "a request connection could not be reset and is still referenced elsewhere; it may \
+             return to the pool carrying the previous request's scope — treat as a \
+             fence-hygiene incident",
+        ),
+    }
 }
 
 /// Count rows with one query on the request's own connection: `sql` selects a single `count(*)`
