@@ -50,6 +50,9 @@ impl Default for InMemoryStorage {
     }
 }
 
+/// Entry count past which an increment for a new key first drops expired entries.
+const SWEEP_THRESHOLD: usize = 10_000;
+
 fn now_unix() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -66,6 +69,15 @@ impl StorageBackend for InMemoryStorage {
     ) -> RateLimitResult<IncrementOutcome> {
         let mut data = self.data.write().await;
         let now = now_unix();
+
+        // One entry per client address: drop the finished windows once the map grows, so a
+        // stream of distinct addresses cannot grow it without bound.
+        if data.len() >= SWEEP_THRESHOLD && !data.contains_key(key) {
+            data.retain(|_, s| {
+                s.locked_until.is_some_and(|until| until > now)
+                    || now.saturating_sub(s.window_start) <= config.window_seconds
+            });
+        }
 
         let state = data.entry(key.to_string()).or_insert_with(|| CounterState {
             count: 0,
