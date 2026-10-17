@@ -926,6 +926,17 @@ where
         None
     }
 
+    /// The pool this repository writes through, when it has one.
+    ///
+    /// The generic service opens one write transaction on it around each write
+    /// ([`backbone_orm::in_write_tx`]), so the write, its hooks and the events they stage commit
+    /// or roll back together. `None` (the default: an in-memory repository, a mock) leaves the
+    /// write without a transaction of its own. The Postgres-backed generated repositories
+    /// override this via `impl_crud_repository!`.
+    fn write_pool(&self) -> Option<&backbone_orm::PgPool> {
+        None
+    }
+
     async fn aggregate_filtered(
         &self,
         spec: &backbone_orm::repository::AggregateSpec,

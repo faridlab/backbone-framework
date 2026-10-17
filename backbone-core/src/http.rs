@@ -149,6 +149,34 @@ fn error_at<T>(
     }
 }
 
+/// Bind the request's correlation id for the writes it makes, so the events they stage (and
+/// the logs and audit rows of the request) share one id.
+///
+/// The id is the request's `x-correlation-id` header when it carries a usable one (printable
+/// ASCII, at most 128 characters), else the audit attribution's the composing service already
+/// bound, else a fresh uuid. The generic write routes carry this layer; a hand-written route that
+/// writes through the service can add it with `axum::middleware::from_fn`.
+pub async fn correlation_middleware(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let from_header = req
+        .headers()
+        .get("x-correlation-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty() && v.len() <= 128 && v.bytes().all(|b| b.is_ascii_graphic()))
+        .map(str::to_string);
+    let id = from_header
+        .or_else(|| {
+            backbone_orm::audit_context::current_request_audit()
+                .map(|a| a.correlation_id)
+                .filter(|c| !c.is_empty())
+        })
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    crate::write_hooks::with_correlation_id(id, next.run(req)).await
+}
+
 /// The status a [`ServiceError`](crate::service::ServiceError) answers with, by variant.
 ///
 /// A refusal for named reasons — a protected field, a broken rule, a constraint the database
@@ -1737,6 +1765,8 @@ where
                     Self::restore_handler(h, path).await
                 }
             }))
+            // Every write stages its events under the request's correlation id.
+            .layer(axum::middleware::from_fn(correlation_middleware))
     }
 
     // ============================================================

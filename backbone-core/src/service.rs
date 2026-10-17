@@ -36,6 +36,7 @@ use std::sync::Arc;
 use backbone_messaging::crud_event::{CrudEvent, CrudEventPublisher, EventMetadata, NoOpCrudEventPublisher};
 
 use crate::persistence::traits::{CrudRepository, PersistentEntity, RepositoryError};
+use crate::write_hooks::{Change, NoWriteHooks, WriteCtx, WriteHooks};
 
 // ─── Service error ───────────────────────────────────────────────────────────
 
@@ -190,6 +191,7 @@ where
     lifecycle: Arc<dyn ServiceLifecycle<E>>,
     event_publisher: Arc<dyn CrudEventPublisher<E>>,
     guard: Arc<dyn crate::write_guard::WriteGuard<E>>,
+    hooks: Arc<dyn WriteHooks<E>>,
     _phantom: PhantomData<(C, U)>,
 }
 
@@ -211,6 +213,7 @@ where
             lifecycle,
             event_publisher,
             guard: Arc::new(crate::write_guard::AllowAll),
+            hooks: Arc::new(NoWriteHooks),
             _phantom: PhantomData,
         }
     }
@@ -220,6 +223,49 @@ where
     pub fn with_guard(mut self, guard: Arc<dyn crate::write_guard::WriteGuard<E>>) -> Self {
         self.guard = guard;
         self
+    }
+
+    /// Run `hooks` inside every write's transaction, before and after the repository write (see
+    /// [`crate::write_hooks`]). Declared events are staged by the hooks the schema generator
+    /// emits for a model.
+    pub fn with_write_hooks(mut self, hooks: Arc<dyn WriteHooks<E>>) -> Self {
+        self.hooks = hooks;
+        self
+    }
+
+    /// The context a write's hooks receive.
+    fn write_ctx(&self) -> WriteCtx {
+        WriteCtx::current(self.hooks.outbox_schema())
+    }
+
+    /// Run `work` inside one write transaction on the repository's pool: committed when it
+    /// returns `Ok`, rolled back when it fails or is dropped. A repository with no pool (an
+    /// in-memory one) runs `work` as it is.
+    ///
+    /// Joined to the transaction already open for the task when there is one, as a savepoint:
+    /// a hand-written verb that opened its own transaction and writes through this service
+    /// keeps one transaction.
+    async fn atomically<T>(
+        &self,
+        work: impl std::future::Future<Output = ServiceResult<T>>,
+    ) -> ServiceResult<T> {
+        let Some(pool) = self.repository.write_pool() else {
+            return work.await;
+        };
+        match backbone_orm::in_write_tx_result(pool, work).await {
+            Ok(value) => Ok(value),
+            Err(backbone_orm::WriteTxFailure::Inner(e)) => Err(e),
+            Err(backbone_orm::WriteTxFailure::Db(e)) => {
+                Err(ServiceError::Repository(RepositoryError::from_source(e)))
+            }
+        }
+    }
+
+    /// Publish the events of a committed write, best effort and in process.
+    async fn publish_all(&self, events: Vec<CrudEvent<E>>) {
+        for event in events {
+            let _ = self.event_publisher.publish(event).await;
+        }
     }
 
     /// Ask the guard about one write.
@@ -382,23 +428,28 @@ where
     }
 
     pub async fn create(&self, dto: C) -> ServiceResult<E> {
-        let mut entity = E::from_create_dto(dto)?;
-        self.consult(crate::write_guard::WriteKind::Create, None, Some(&entity)).await?;
-        self.lifecycle.before_create(&mut entity).await?;
-        self.check_references(None, &entity).await?;
-        let saved = self
-            .repository
-            .create(entity)
-            .await
-            .map_err(ServiceError::Repository)?;
-        self.lifecycle.after_create(&saved).await?;
+        let (saved, events) = self
+            .atomically(async {
+                let ctx = self.write_ctx();
+                let mut entity = E::from_create_dto(dto)?;
+                self.consult(crate::write_guard::WriteKind::Create, None, Some(&entity)).await?;
+                self.lifecycle.before_create(&mut entity).await?;
+                self.hooks.before(&ctx, &mut Change::Created { after: &mut entity }).await?;
+                self.check_references(None, &entity).await?;
+                let mut saved = self
+                    .repository
+                    .create(entity)
+                    .await
+                    .map_err(ServiceError::Repository)?;
+                self.lifecycle.after_create(&saved).await?;
+                self.hooks.after(&ctx, &Change::Created { after: &mut saved }).await?;
 
-        let meta = EventMetadata::new(saved.entity_id(), std::any::type_name::<E>());
-        let _ = self
-            .event_publisher
-            .publish(CrudEvent::Created { entity: saved.clone(), metadata: meta })
-            .await;
-
+                let meta = EventMetadata::new(saved.entity_id(), std::any::type_name::<E>());
+                let event = CrudEvent::Created { entity: saved.clone(), metadata: meta };
+                Ok((saved, vec![event]))
+            })
+            .await?;
+        self.publish_all(events).await;
         Ok(saved)
     }
 
@@ -410,114 +461,144 @@ where
     }
 
     pub async fn update(&self, id: &str, dto: U) -> ServiceResult<Option<E>> {
-        let existing = self
-            .repository
-            .find_by_id(id)
-            .await
-            .map_err(ServiceError::Repository)?;
-        let Some(before) = existing else {
+        let written = self
+            .atomically(async {
+                let ctx = self.write_ctx();
+                let existing = self
+                    .repository
+                    .find_by_id(id)
+                    .await
+                    .map_err(ServiceError::Repository)?;
+                let Some(before) = existing else {
+                    return Ok(None);
+                };
+                let mut updated = before.clone().apply_update(dto)?;
+                refuse_protected_changes::<E>(&as_object(&before)?, &as_object(&updated)?)?;
+                self.consult(crate::write_guard::WriteKind::Update, Some(&before), Some(&updated)).await?;
+                self.lifecycle.before_update(&mut updated).await?;
+                self.hooks.before(&ctx, &mut Change::update(&before, &mut updated)).await?;
+                self.check_references(Some(&before), &updated).await?;
+                // The same changed-fields, live-row-only save as `partial_update`.
+                let Some(mut saved) = self
+                    .repository
+                    .update_changed(&before, updated)
+                    .await
+                    .map_err(ServiceError::Repository)?
+                else {
+                    return Ok(None);
+                };
+                self.lifecycle.after_update(&saved).await?;
+                self.hooks.after(&ctx, &Change::update(&before, &mut saved)).await?;
+
+                let meta = EventMetadata::new(saved.entity_id(), std::any::type_name::<E>());
+                let event = CrudEvent::Updated { before, after: saved.clone(), metadata: meta };
+                Ok(Some((saved, vec![event])))
+            })
+            .await?;
+        let Some((saved, events)) = written else {
             return Ok(None);
         };
-        let mut updated = before.clone().apply_update(dto)?;
-        refuse_protected_changes::<E>(&as_object(&before)?, &as_object(&updated)?)?;
-        self.consult(crate::write_guard::WriteKind::Update, Some(&before), Some(&updated)).await?;
-        self.lifecycle.before_update(&mut updated).await?;
-        self.check_references(Some(&before), &updated).await?;
-        // The same changed-fields, live-row-only save as `partial_update`.
-        let Some(saved) = self
-            .repository
-            .update_changed(&before, updated)
-            .await
-            .map_err(ServiceError::Repository)?
-        else {
-            return Ok(None);
-        };
-        self.lifecycle.after_update(&saved).await?;
-
-        let meta = EventMetadata::new(saved.entity_id(), std::any::type_name::<E>());
-        let _ = self
-            .event_publisher
-            .publish(CrudEvent::Updated { before, after: saved.clone(), metadata: meta })
-            .await;
-
+        self.publish_all(events).await;
         Ok(Some(saved))
     }
 
     pub async fn soft_delete(&self, id: &str) -> ServiceResult<bool> {
-        let existing = self
-            .repository
-            .find_by_id(id)
-            .await
-            .map_err(ServiceError::Repository)?;
-        let Some(entity) = existing else {
-            return Ok(false);
-        };
-        self.consult(crate::write_guard::WriteKind::Delete, Some(&entity), None).await?;
-        self.lifecycle.before_delete(&entity).await?;
-        let deleted = self
-            .repository
-            .soft_delete(id)
-            .await
-            .map_err(ServiceError::Repository)?;
-        self.lifecycle.after_delete(id).await?;
+        let (deleted, events) = self
+            .atomically(async {
+                let ctx = self.write_ctx();
+                let existing = self
+                    .repository
+                    .find_by_id(id)
+                    .await
+                    .map_err(ServiceError::Repository)?;
+                let Some(entity) = existing else {
+                    return Ok((false, Vec::new()));
+                };
+                self.consult(crate::write_guard::WriteKind::Delete, Some(&entity), None).await?;
+                self.lifecycle.before_delete(&entity).await?;
+                self.hooks
+                    .before(&ctx, &mut Change::Deleted { before: &entity, hard: false })
+                    .await?;
+                let deleted = self
+                    .repository
+                    .soft_delete(id)
+                    .await
+                    .map_err(ServiceError::Repository)?;
+                self.lifecycle.after_delete(id).await?;
+                if !deleted {
+                    return Ok((false, Vec::new()));
+                }
+                self.hooks
+                    .after(&ctx, &Change::Deleted { before: &entity, hard: false })
+                    .await?;
 
-        if deleted {
-            let meta = EventMetadata::new(id, std::any::type_name::<E>());
-            let _ = self
-                .event_publisher
-                .publish(CrudEvent::SoftDeleted { entity, metadata: meta })
-                .await;
-        }
-
+                let meta = EventMetadata::new(id, std::any::type_name::<E>());
+                Ok((true, vec![CrudEvent::SoftDeleted { entity, metadata: meta }]))
+            })
+            .await?;
+        self.publish_all(events).await;
         Ok(deleted)
     }
 
     pub async fn restore(&self, id: &str) -> ServiceResult<Option<E>> {
-        let Some(trashed) = self.get_deleted_by_id(id).await? else {
-            return Ok(None);
-        };
-        self.consult(crate::write_guard::WriteKind::Restore, Some(&trashed), None).await?;
-        self.lifecycle.before_restore(&trashed).await?;
-        let restored = self
-            .repository
-            .restore(id)
-            .await
-            .map_err(ServiceError::Repository)?;
+        let (restored, events) = self
+            .atomically(async {
+                let ctx = self.write_ctx();
+                let Some(trashed) = self.get_deleted_by_id(id).await? else {
+                    return Ok((None, Vec::new()));
+                };
+                self.consult(crate::write_guard::WriteKind::Restore, Some(&trashed), None).await?;
+                self.lifecycle.before_restore(&trashed).await?;
+                self.hooks.before(&ctx, &mut Change::Restored { entity: &trashed }).await?;
+                let restored = self
+                    .repository
+                    .restore(id)
+                    .await
+                    .map_err(ServiceError::Repository)?;
 
-        if let Some(ref entity) = restored {
-            let meta = EventMetadata::new(entity.entity_id(), std::any::type_name::<E>());
-            let _ = self
-                .event_publisher
-                .publish(CrudEvent::Restored { entity: entity.clone(), metadata: meta })
-                .await;
-        }
-
+                let mut events = Vec::new();
+                if let Some(ref entity) = restored {
+                    self.hooks.after(&ctx, &Change::Restored { entity }).await?;
+                    let meta = EventMetadata::new(entity.entity_id(), std::any::type_name::<E>());
+                    events.push(CrudEvent::Restored { entity: entity.clone(), metadata: meta });
+                }
+                Ok((restored, events))
+            })
+            .await?;
+        self.publish_all(events).await;
         Ok(restored)
     }
 
     pub async fn hard_delete(&self, id: &str) -> ServiceResult<bool> {
-        let Some(entity) = self.get_deleted_by_id(id).await? else {
-            return Ok(false);
-        };
-        self.consult(crate::write_guard::WriteKind::HardDelete, Some(&entity), None).await?;
-        self.lifecycle.before_hard_delete(&entity).await?;
-        let deleted = self
-            .repository
-            .hard_delete(id)
-            .await
-            .map_err(ServiceError::Repository)?;
+        let (deleted, events) = self
+            .atomically(async {
+                let ctx = self.write_ctx();
+                let Some(entity) = self.get_deleted_by_id(id).await? else {
+                    return Ok((false, Vec::new()));
+                };
+                self.consult(crate::write_guard::WriteKind::HardDelete, Some(&entity), None).await?;
+                self.lifecycle.before_hard_delete(&entity).await?;
+                self.hooks
+                    .before(&ctx, &mut Change::Deleted { before: &entity, hard: true })
+                    .await?;
+                let deleted = self
+                    .repository
+                    .hard_delete(id)
+                    .await
+                    .map_err(ServiceError::Repository)?;
+                if !deleted {
+                    return Ok((false, Vec::new()));
+                }
+                self.hooks
+                    .after(&ctx, &Change::Deleted { before: &entity, hard: true })
+                    .await?;
 
-        if deleted {
-            let meta = EventMetadata::new(id, std::any::type_name::<E>());
-            let _ = self
-                .event_publisher
-                .publish(CrudEvent::HardDeleted {
-                    entity_id: id.to_string(),
-                    metadata: meta,
-                })
-                .await;
-        }
-
+                let meta = EventMetadata::new(id, std::any::type_name::<E>());
+                let event = CrudEvent::HardDeleted { entity_id: id.to_string(), metadata: meta };
+                Ok((true, vec![event]))
+            })
+            .await?;
+        self.publish_all(events).await;
         Ok(deleted)
     }
 
@@ -540,31 +621,36 @@ where
     /// rolls back unless every one is still in the trash, so a row trashed after the check is
     /// never deleted unchecked.
     pub async fn empty_trash(&self) -> ServiceResult<u64> {
-        self.lifecycle.before_empty_trash().await?;
-        let trashed = self.whole_trash("emptied").await?;
-        if trashed.is_empty() {
-            return Ok(0);
-        }
-        for entity in &trashed {
-            self.consult(crate::write_guard::WriteKind::HardDelete, Some(entity), None).await?;
-            self.lifecycle.before_hard_delete(entity).await?;
-        }
-        let ids: Vec<String> = trashed.iter().map(|e| e.entity_id()).collect();
-        let affected = self
-            .repository
-            .bulk_hard_delete(&ids)
-            .await
-            .map_err(ServiceError::Repository)?;
-        for id in &ids {
-            let meta = EventMetadata::new(id, std::any::type_name::<E>());
-            let _ = self
-                .event_publisher
-                .publish(CrudEvent::HardDeleted {
-                    entity_id: id.to_string(),
-                    metadata: meta,
-                })
-                .await;
-        }
+        let (affected, events) = self
+            .atomically(async {
+                let ctx = self.write_ctx();
+                self.lifecycle.before_empty_trash().await?;
+                let trashed = self.whole_trash("emptied").await?;
+                if trashed.is_empty() {
+                    return Ok((0, Vec::new()));
+                }
+                for entity in &trashed {
+                    self.consult(crate::write_guard::WriteKind::HardDelete, Some(entity), None).await?;
+                    self.lifecycle.before_hard_delete(entity).await?;
+                    self.hooks
+                        .before(&ctx, &mut Change::Deleted { before: entity, hard: true })
+                        .await?;
+                }
+                let ids: Vec<String> = trashed.iter().map(|e| e.entity_id()).collect();
+                let affected = self
+                    .repository
+                    .bulk_hard_delete(&ids)
+                    .await
+                    .map_err(ServiceError::Repository)?;
+                for entity in &trashed {
+                    self.hooks
+                        .after(&ctx, &Change::Deleted { before: entity, hard: true })
+                        .await?;
+                }
+                Ok((affected, hard_deleted_events::<E>(&ids)))
+            })
+            .await?;
+        self.publish_all(events).await;
         Ok(affected)
     }
 
@@ -682,36 +768,45 @@ where
     where
         E: serde::Serialize + serde::de::DeserializeOwned,
     {
-        let existing = self
-            .repository
-            .find_by_id(id)
-            .await
-            .map_err(ServiceError::Repository)?;
-        let Some(before) = existing else {
+        let written = self
+            .atomically(async {
+                let ctx = self.write_ctx();
+                let existing = self
+                    .repository
+                    .find_by_id(id)
+                    .await
+                    .map_err(ServiceError::Repository)?;
+                let Some(before) = existing else {
+                    return Ok(None);
+                };
+                let mut patched = merge_patch(&before, fields)?;
+                self.consult(crate::write_guard::WriteKind::Update, Some(&before), Some(&patched)).await?;
+                self.lifecycle.before_update(&mut patched).await?;
+                self.hooks.before(&ctx, &mut Change::update(&before, &mut patched)).await?;
+                self.check_references(Some(&before), &patched).await?;
+                // Only the fields this write changed are saved, and only while the row is still
+                // live: see `CrudRepository::update_changed`. A row deleted since the read
+                // answers not found.
+                let Some(mut saved) = self
+                    .repository
+                    .update_changed(&before, patched)
+                    .await
+                    .map_err(ServiceError::Repository)?
+                else {
+                    return Ok(None);
+                };
+                self.lifecycle.after_update(&saved).await?;
+                self.hooks.after(&ctx, &Change::update(&before, &mut saved)).await?;
+
+                let meta = EventMetadata::new(saved.entity_id(), std::any::type_name::<E>());
+                let event = CrudEvent::Updated { before, after: saved.clone(), metadata: meta };
+                Ok(Some((saved, vec![event])))
+            })
+            .await?;
+        let Some((saved, events)) = written else {
             return Ok(None);
         };
-        let mut patched = merge_patch(&before, fields)?;
-        self.consult(crate::write_guard::WriteKind::Update, Some(&before), Some(&patched)).await?;
-        self.lifecycle.before_update(&mut patched).await?;
-        self.check_references(Some(&before), &patched).await?;
-        // Only the fields this write changed are saved, and only while the row is still live:
-        // see `CrudRepository::update_changed`. A row deleted since the read answers not found.
-        let Some(saved) = self
-            .repository
-            .update_changed(&before, patched)
-            .await
-            .map_err(ServiceError::Repository)?
-        else {
-            return Ok(None);
-        };
-        self.lifecycle.after_update(&saved).await?;
-
-        let meta = EventMetadata::new(saved.entity_id(), std::any::type_name::<E>());
-        let _ = self
-            .event_publisher
-            .publish(CrudEvent::Updated { before, after: saved.clone(), metadata: meta })
-            .await;
-
+        self.publish_all(events).await;
         Ok(Some(saved))
     }
 
@@ -726,30 +821,40 @@ where
         E: FromCreateDto<C>,
     {
         check_batch_size(dtos.len())?;
-        let mut prepared = Vec::with_capacity(dtos.len());
-        for (index, dto) in dtos.into_iter().enumerate() {
-            let at = |e: ServiceError| at_batch_index(e, index);
-            let mut entity = E::from_create_dto(dto).map_err(at)?;
-            self.consult(crate::write_guard::WriteKind::Create, None, Some(&entity))
-                .await
-                .map_err(at)?;
-            self.lifecycle.before_create(&mut entity).await.map_err(at)?;
-            self.check_references(None, &entity).await.map_err(at)?;
-            prepared.push(entity);
-        }
-        let saved = self
-            .repository
-            .bulk_create(prepared)
-            .await
-            .map_err(ServiceError::Repository)?;
-        for entity in &saved {
-            self.lifecycle.after_create(entity).await?;
-            let meta = EventMetadata::new(entity.entity_id(), std::any::type_name::<E>());
-            let _ = self
-                .event_publisher
-                .publish(CrudEvent::Created { entity: entity.clone(), metadata: meta })
-                .await;
-        }
+        let (saved, events) = self
+            .atomically(async {
+                let ctx = self.write_ctx();
+                let mut prepared = Vec::with_capacity(dtos.len());
+                for (index, dto) in dtos.into_iter().enumerate() {
+                    let at = |e: ServiceError| at_batch_index(e, index);
+                    let mut entity = E::from_create_dto(dto).map_err(at)?;
+                    self.consult(crate::write_guard::WriteKind::Create, None, Some(&entity))
+                        .await
+                        .map_err(at)?;
+                    self.lifecycle.before_create(&mut entity).await.map_err(at)?;
+                    self.hooks
+                        .before(&ctx, &mut Change::Created { after: &mut entity })
+                        .await
+                        .map_err(at)?;
+                    self.check_references(None, &entity).await.map_err(at)?;
+                    prepared.push(entity);
+                }
+                let mut saved = self
+                    .repository
+                    .bulk_create(prepared)
+                    .await
+                    .map_err(ServiceError::Repository)?;
+                let mut events = Vec::with_capacity(saved.len());
+                for entity in saved.iter_mut() {
+                    self.lifecycle.after_create(entity).await?;
+                    self.hooks.after(&ctx, &Change::Created { after: entity }).await?;
+                    let meta = EventMetadata::new(entity.entity_id(), std::any::type_name::<E>());
+                    events.push(CrudEvent::Created { entity: entity.clone(), metadata: meta });
+                }
+                Ok((saved, events))
+            })
+            .await?;
+        self.publish_all(events).await;
         Ok(saved)
     }
 
@@ -764,39 +869,50 @@ where
     pub async fn bulk_soft_delete(&self, ids: Vec<String>) -> ServiceResult<u64> {
         check_batch_size(ids.len())?;
         let ids = dedup_ids(ids);
-        // Load the entities up-front: they are the payloads for the lifecycle
-        // `before_delete` hook and the `SoftDeleted` event below. The repository's
-        // atomic affected-row check (not this loop) is what guarantees the write
-        // is all-or-nothing.
-        let mut entities = Vec::with_capacity(ids.len());
-        for id in &ids {
-            match self
-                .repository
-                .find_by_id(id)
-                .await
-                .map_err(ServiceError::Repository)?
-            {
-                Some(e) => entities.push(e),
-                None => return Err(ServiceError::Validation(format!("id '{id}' not found"))),
-            }
-        }
-        for entity in &entities {
-            self.consult(crate::write_guard::WriteKind::Delete, Some(entity), None).await?;
-            self.lifecycle.before_delete(entity).await?;
-        }
-        let affected = self
-            .repository
-            .bulk_soft_delete(&ids)
-            .await
-            .map_err(ServiceError::Repository)?;
-        for (id, entity) in ids.iter().zip(entities.into_iter()) {
-            self.lifecycle.after_delete(id).await?;
-            let meta = EventMetadata::new(id, std::any::type_name::<E>());
-            let _ = self
-                .event_publisher
-                .publish(CrudEvent::SoftDeleted { entity, metadata: meta })
-                .await;
-        }
+        let (affected, events) = self
+            .atomically(async {
+                let ctx = self.write_ctx();
+                // Load the entities up-front: they are the payloads for the lifecycle
+                // `before_delete` hook and the `SoftDeleted` event below. The repository's
+                // atomic affected-row check (not this loop) is what guarantees the write
+                // is all-or-nothing.
+                let mut entities = Vec::with_capacity(ids.len());
+                for id in &ids {
+                    match self
+                        .repository
+                        .find_by_id(id)
+                        .await
+                        .map_err(ServiceError::Repository)?
+                    {
+                        Some(e) => entities.push(e),
+                        None => return Err(ServiceError::Validation(format!("id '{id}' not found"))),
+                    }
+                }
+                for entity in &entities {
+                    self.consult(crate::write_guard::WriteKind::Delete, Some(entity), None).await?;
+                    self.lifecycle.before_delete(entity).await?;
+                    self.hooks
+                        .before(&ctx, &mut Change::Deleted { before: entity, hard: false })
+                        .await?;
+                }
+                let affected = self
+                    .repository
+                    .bulk_soft_delete(&ids)
+                    .await
+                    .map_err(ServiceError::Repository)?;
+                let mut events = Vec::with_capacity(entities.len());
+                for (id, entity) in ids.iter().zip(entities.into_iter()) {
+                    self.lifecycle.after_delete(id).await?;
+                    self.hooks
+                        .after(&ctx, &Change::Deleted { before: &entity, hard: false })
+                        .await?;
+                    let meta = EventMetadata::new(id, std::any::type_name::<E>());
+                    events.push(CrudEvent::SoftDeleted { entity, metadata: meta });
+                }
+                Ok((affected, events))
+            })
+            .await?;
+        self.publish_all(events).await;
         Ok(affected)
     }
 
@@ -804,27 +920,40 @@ where
     pub async fn bulk_restore(&self, ids: Vec<String>) -> ServiceResult<Vec<E>> {
         check_batch_size(ids.len())?;
         let ids = dedup_ids(ids);
-        // Ask the lifecycle about every row it can see; an id that is not in
-        // the trash is left to the repository's atomic check below.
-        for id in &ids {
-            if let Some(trashed) = self.get_deleted_by_id(id).await? {
-                self.consult(crate::write_guard::WriteKind::Restore, Some(&trashed), None).await?;
-                self.lifecycle.before_restore(&trashed).await?;
-            }
-        }
-        let restored = self
-            .repository
-            .bulk_restore(&ids)
-            .await
-            .map_err(ServiceError::Repository)?;
-        for entity in &restored {
-            let meta = EventMetadata::new(entity.entity_id(), std::any::type_name::<E>());
-            let _ = self
-                .event_publisher
-                .publish(CrudEvent::Restored { entity: entity.clone(), metadata: meta })
-                .await;
-        }
+        let (restored, events) = self
+            .atomically(async {
+                let ctx = self.write_ctx();
+                // Ask the lifecycle about every row it can see; an id that is not in
+                // the trash is left to the repository's atomic check below.
+                for id in &ids {
+                    if let Some(trashed) = self.get_deleted_by_id(id).await? {
+                        self.consult(crate::write_guard::WriteKind::Restore, Some(&trashed), None).await?;
+                        self.lifecycle.before_restore(&trashed).await?;
+                        self.hooks.before(&ctx, &mut Change::Restored { entity: &trashed }).await?;
+                    }
+                }
+                let restored = self
+                    .repository
+                    .bulk_restore(&ids)
+                    .await
+                    .map_err(ServiceError::Repository)?;
+                let events = self.restored_events(&ctx, &restored).await?;
+                Ok((restored, events))
+            })
+            .await?;
+        self.publish_all(events).await;
         Ok(restored)
+    }
+
+    /// Run the after-hooks of each restored row and build its `Restored` event.
+    async fn restored_events(&self, ctx: &WriteCtx, restored: &[E]) -> ServiceResult<Vec<CrudEvent<E>>> {
+        let mut events = Vec::with_capacity(restored.len());
+        for entity in restored {
+            self.hooks.after(ctx, &Change::Restored { entity }).await?;
+            let meta = EventMetadata::new(entity.entity_id(), std::any::type_name::<E>());
+            events.push(CrudEvent::Restored { entity: entity.clone(), metadata: meta });
+        }
+        Ok(events)
     }
 
     /// Restore every soft-deleted entity (atomic). Returns the number restored.
@@ -834,61 +963,70 @@ where
     /// [`MAX_BATCH_SIZE`]), each is put to the write guard and lifecycle as a single restore
     /// would be, and the restore names exactly those ids, all or nothing.
     pub async fn restore_all(&self) -> ServiceResult<u64> {
-        self.lifecycle.before_restore_all().await?;
-        let trashed = self.whole_trash("restored").await?;
-        if trashed.is_empty() {
-            return Ok(0);
-        }
-        for entity in &trashed {
-            self.consult(crate::write_guard::WriteKind::Restore, Some(entity), None).await?;
-            self.lifecycle.before_restore(entity).await?;
-        }
-        let ids: Vec<String> = trashed.iter().map(|e| e.entity_id()).collect();
-        let restored = self
-            .repository
-            .bulk_restore(&ids)
-            .await
-            .map_err(ServiceError::Repository)?;
-        for entity in &restored {
-            let meta = EventMetadata::new(entity.entity_id(), std::any::type_name::<E>());
-            let _ = self
-                .event_publisher
-                .publish(CrudEvent::Restored { entity: entity.clone(), metadata: meta })
-                .await;
-        }
-        Ok(restored.len() as u64)
+        let (count, events) = self
+            .atomically(async {
+                let ctx = self.write_ctx();
+                self.lifecycle.before_restore_all().await?;
+                let trashed = self.whole_trash("restored").await?;
+                if trashed.is_empty() {
+                    return Ok((0, Vec::new()));
+                }
+                for entity in &trashed {
+                    self.consult(crate::write_guard::WriteKind::Restore, Some(entity), None).await?;
+                    self.lifecycle.before_restore(entity).await?;
+                    self.hooks.before(&ctx, &mut Change::Restored { entity }).await?;
+                }
+                let ids: Vec<String> = trashed.iter().map(|e| e.entity_id()).collect();
+                let restored = self
+                    .repository
+                    .bulk_restore(&ids)
+                    .await
+                    .map_err(ServiceError::Repository)?;
+                let events = self.restored_events(&ctx, &restored).await?;
+                Ok((restored.len() as u64, events))
+            })
+            .await?;
+        self.publish_all(events).await;
+        Ok(count)
     }
 
     /// Permanently delete many soft-deleted entities by id (atomic).
     pub async fn bulk_permanent_delete(&self, ids: Vec<String>) -> ServiceResult<u64> {
         check_batch_size(ids.len())?;
         let ids = dedup_ids(ids);
-        // The lifecycle is asked about every row it can see. Whether every id
-        // is in the trash stays with `bulk_hard_delete`, which deletes only
-        // trashed rows and rolls the whole batch back unless every id matched,
-        // so a row that moves between this loop and the write cannot slip
-        // through.
-        for id in &ids {
-            if let Some(trashed) = self.get_deleted_by_id(id).await? {
-                self.consult(crate::write_guard::WriteKind::HardDelete, Some(&trashed), None).await?;
-                self.lifecycle.before_hard_delete(&trashed).await?;
-            }
-        }
-        let affected = self
-            .repository
-            .bulk_hard_delete(&ids)
-            .await
-            .map_err(ServiceError::Repository)?;
-        for id in &ids {
-            let meta = EventMetadata::new(id, std::any::type_name::<E>());
-            let _ = self
-                .event_publisher
-                .publish(CrudEvent::HardDeleted {
-                    entity_id: id.to_string(),
-                    metadata: meta,
-                })
-                .await;
-        }
+        let (affected, events) = self
+            .atomically(async {
+                let ctx = self.write_ctx();
+                // The lifecycle is asked about every row it can see. Whether every id
+                // is in the trash stays with `bulk_hard_delete`, which deletes only
+                // trashed rows and rolls the whole batch back unless every id matched,
+                // so a row that moves between this loop and the write cannot slip
+                // through.
+                let mut seen = Vec::new();
+                for id in &ids {
+                    if let Some(trashed) = self.get_deleted_by_id(id).await? {
+                        self.consult(crate::write_guard::WriteKind::HardDelete, Some(&trashed), None).await?;
+                        self.lifecycle.before_hard_delete(&trashed).await?;
+                        self.hooks
+                            .before(&ctx, &mut Change::Deleted { before: &trashed, hard: true })
+                            .await?;
+                        seen.push(trashed);
+                    }
+                }
+                let affected = self
+                    .repository
+                    .bulk_hard_delete(&ids)
+                    .await
+                    .map_err(ServiceError::Repository)?;
+                for trashed in &seen {
+                    self.hooks
+                        .after(&ctx, &Change::Deleted { before: trashed, hard: true })
+                        .await?;
+                }
+                Ok((affected, hard_deleted_events::<E>(&ids)))
+            })
+            .await?;
+        self.publish_all(events).await;
         Ok(affected)
     }
 
@@ -900,55 +1038,63 @@ where
                 "duplicate id '{dup}' in bulk update"
             )));
         }
-        let mut befores = Vec::with_capacity(items.len());
-        let mut prepared = Vec::with_capacity(items.len());
-        for (index, (id, dto)) in items.into_iter().enumerate() {
-            let Some(before) = self
-                .repository
-                .find_by_id(&id)
-                .await
-                .map_err(ServiceError::Repository)?
-            else {
-                return Err(ServiceError::Validation(format!("id '{id}' not found")));
-            };
-            let mut updated = before.clone().apply_update(dto)?;
-            refuse_protected_changes::<E>(&as_object(&before)?, &as_object(&updated)?)?;
-            self.consult(crate::write_guard::WriteKind::Update, Some(&before), Some(&updated)).await?;
-            self.lifecycle.before_update(&mut updated).await?;
-            self.check_references(Some(&before), &updated)
-                .await
-                .map_err(|e| at_batch_index(e, index))?;
-            prepared.push((before.clone(), updated));
-            befores.push(before);
-        }
-        // Only the fields each item changed are written, as a single PUT does, so a column a
-        // concurrent verb moved is not written back with the value read before it.
-        let saved = self
-            .repository
-            .bulk_update_changed(prepared)
-            .await
-            .map_err(ServiceError::Repository)?;
-        self.publish_bulk_updates(befores, &saved).await?;
+        let (saved, events) = self
+            .atomically(async {
+                let ctx = self.write_ctx();
+                let mut befores = Vec::with_capacity(items.len());
+                let mut prepared = Vec::with_capacity(items.len());
+                for (index, (id, dto)) in items.into_iter().enumerate() {
+                    let Some(before) = self
+                        .repository
+                        .find_by_id(&id)
+                        .await
+                        .map_err(ServiceError::Repository)?
+                    else {
+                        return Err(ServiceError::Validation(format!("id '{id}' not found")));
+                    };
+                    let mut updated = before.clone().apply_update(dto)?;
+                    refuse_protected_changes::<E>(&as_object(&before)?, &as_object(&updated)?)?;
+                    self.consult(crate::write_guard::WriteKind::Update, Some(&before), Some(&updated)).await?;
+                    self.lifecycle.before_update(&mut updated).await?;
+                    self.hooks.before(&ctx, &mut Change::update(&before, &mut updated)).await?;
+                    self.check_references(Some(&before), &updated)
+                        .await
+                        .map_err(|e| at_batch_index(e, index))?;
+                    prepared.push((before.clone(), updated));
+                    befores.push(before);
+                }
+                // Only the fields each item changed are written, as a single PUT does, so a
+                // column a concurrent verb moved is not written back with the value read before it.
+                let mut saved = self
+                    .repository
+                    .bulk_update_changed(prepared)
+                    .await
+                    .map_err(ServiceError::Repository)?;
+                let events = self.after_bulk_updates(&ctx, befores, &mut saved).await?;
+                Ok((saved, events))
+            })
+            .await?;
+        self.publish_all(events).await;
         Ok(saved)
     }
 
-    /// Fire `after_update` and a `Updated` event for each `(before, after)` pair.
-    /// Shared by [`bulk_update`](Self::bulk_update) and
-    /// [`bulk_partial_update`](Self::bulk_partial_update); events are best-effort.
-    async fn publish_bulk_updates(&self, befores: Vec<E>, saved: &[E]) -> ServiceResult<()> {
-        for (before, after) in befores.into_iter().zip(saved.iter()) {
+    /// Run `after_update` and the after-hooks for each `(before, after)` pair, and build its
+    /// `Updated` event. Shared by [`bulk_update`](Self::bulk_update) and
+    /// [`bulk_partial_update`](Self::bulk_partial_update).
+    async fn after_bulk_updates(
+        &self,
+        ctx: &WriteCtx,
+        befores: Vec<E>,
+        saved: &mut [E],
+    ) -> ServiceResult<Vec<CrudEvent<E>>> {
+        let mut events = Vec::with_capacity(saved.len());
+        for (before, after) in befores.into_iter().zip(saved.iter_mut()) {
             self.lifecycle.after_update(after).await?;
+            self.hooks.after(ctx, &Change::update(&before, after)).await?;
             let meta = EventMetadata::new(after.entity_id(), std::any::type_name::<E>());
-            let _ = self
-                .event_publisher
-                .publish(CrudEvent::Updated {
-                    before,
-                    after: after.clone(),
-                    metadata: meta,
-                })
-                .await;
+            events.push(CrudEvent::Updated { before, after: after.clone(), metadata: meta });
         }
-        Ok(())
+        Ok(events)
     }
 
     /// Partial-update many entities (atomic). Each item is `(id, field_map)`.
@@ -965,32 +1111,40 @@ where
                 "duplicate id '{dup}' in bulk partial update"
             )));
         }
-        let mut befores = Vec::with_capacity(items.len());
-        let mut prepared = Vec::with_capacity(items.len());
-        for (index, (id, fields)) in items.into_iter().enumerate() {
-            let Some(before) = self
-                .repository
-                .find_by_id(&id)
-                .await
-                .map_err(ServiceError::Repository)?
-            else {
-                return Err(ServiceError::Validation(format!("id '{id}' not found")));
-            };
-            let mut patched = merge_patch(&before, fields)?;
-            self.consult(crate::write_guard::WriteKind::Update, Some(&before), Some(&patched)).await?;
-            self.lifecycle.before_update(&mut patched).await?;
-            self.check_references(Some(&before), &patched)
-                .await
-                .map_err(|e| at_batch_index(e, index))?;
-            prepared.push((before.clone(), patched));
-            befores.push(before);
-        }
-        let saved = self
-            .repository
-            .bulk_update_changed(prepared)
-            .await
-            .map_err(ServiceError::Repository)?;
-        self.publish_bulk_updates(befores, &saved).await?;
+        let (saved, events) = self
+            .atomically(async {
+                let ctx = self.write_ctx();
+                let mut befores = Vec::with_capacity(items.len());
+                let mut prepared = Vec::with_capacity(items.len());
+                for (index, (id, fields)) in items.into_iter().enumerate() {
+                    let Some(before) = self
+                        .repository
+                        .find_by_id(&id)
+                        .await
+                        .map_err(ServiceError::Repository)?
+                    else {
+                        return Err(ServiceError::Validation(format!("id '{id}' not found")));
+                    };
+                    let mut patched = merge_patch(&before, fields)?;
+                    self.consult(crate::write_guard::WriteKind::Update, Some(&before), Some(&patched)).await?;
+                    self.lifecycle.before_update(&mut patched).await?;
+                    self.hooks.before(&ctx, &mut Change::update(&before, &mut patched)).await?;
+                    self.check_references(Some(&before), &patched)
+                        .await
+                        .map_err(|e| at_batch_index(e, index))?;
+                    prepared.push((before.clone(), patched));
+                    befores.push(before);
+                }
+                let mut saved = self
+                    .repository
+                    .bulk_update_changed(prepared)
+                    .await
+                    .map_err(ServiceError::Repository)?;
+                let events = self.after_bulk_updates(&ctx, befores, &mut saved).await?;
+                Ok((saved, events))
+            })
+            .await?;
+        self.publish_all(events).await;
         Ok(saved)
     }
 
@@ -1220,6 +1374,16 @@ fn at_batch_index(err: ServiceError, index: usize) -> ServiceError {
     }
 }
 
+/// The `HardDeleted` event of each id removed for good.
+fn hard_deleted_events<E: PersistentEntity>(ids: &[String]) -> Vec<CrudEvent<E>> {
+    ids.iter()
+        .map(|id| CrudEvent::HardDeleted {
+            entity_id: id.clone(),
+            metadata: EventMetadata::new(id, std::any::type_name::<E>()),
+        })
+        .collect()
+}
+
 /// Drop duplicate ids while preserving first-seen order. Id-list batch ops issue
 /// a SQL `IN (...)` whose distinct-row count would never match a list that
 /// repeats an id, so a stray duplicate would otherwise fail the whole batch.
@@ -1440,6 +1604,7 @@ where
             lifecycle: self.lifecycle.clone(),
             event_publisher: self.event_publisher.clone(),
             guard: self.guard.clone(),
+            hooks: self.hooks.clone(),
             _phantom: PhantomData,
         }
     }
@@ -1771,6 +1936,73 @@ mod tests {
         let found = service.get_by_id(&widget.id).await.unwrap();
         assert!(found.is_some());
         assert_eq!(found.unwrap().name, "sprocket");
+    }
+
+    /// Records every hook call, and refuses a create named `refuse-before`.
+    struct RecordingHooks(std::sync::Mutex<Vec<String>>);
+
+    #[async_trait]
+    impl WriteHooks<Widget> for RecordingHooks {
+        async fn before(&self, _ctx: &WriteCtx, change: &mut Change<'_, Widget>) -> ServiceResult<()> {
+            self.0.lock().unwrap().push(format!("before {:?}", change.kind()));
+            match change {
+                Change::Created { after } if after.name == "refuse-before" => {
+                    Err(ServiceError::Validation("refused by a hook".into()))
+                }
+                // A before-hook may fill a field of the row to be stored.
+                Change::Created { after } => {
+                    after.note = Some("filled".into());
+                    Ok(())
+                }
+                _ => Ok(()),
+            }
+        }
+
+        async fn after(&self, _ctx: &WriteCtx, change: &Change<'_, Widget>) -> ServiceResult<()> {
+            self.0.lock().unwrap().push(format!("after {:?}", change.kind()));
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn write_hooks_run_around_each_write_and_may_refuse_it() {
+        let repo = Arc::new(InMemoryWidgetRepo::new());
+        let hooks = Arc::new(RecordingHooks(Default::default()));
+        let service: GenericCrudService<Widget, CreateWidgetDto, UpdateWidgetDto, InMemoryWidgetRepo> =
+            GenericCrudService::with_repository(repo.clone()).with_write_hooks(hooks.clone());
+
+        let widget = service.create(CreateWidgetDto { name: "sprocket".into() }).await.unwrap();
+        assert_eq!(widget.note.as_deref(), Some("filled"), "a before-hook fills the row that is stored");
+        service.update(&widget.id, UpdateWidgetDto { name: "cog".into() }).await.unwrap();
+        service.soft_delete(&widget.id).await.unwrap();
+        service.restore(&widget.id).await.unwrap();
+        assert_eq!(
+            *hooks.0.lock().unwrap(),
+            vec![
+                "before Created",
+                "after Created",
+                "before Updated",
+                "after Updated",
+                "before Deleted",
+                "after Deleted",
+                "before Restored",
+                "after Restored",
+            ]
+        );
+
+        let refused = service.create(CreateWidgetDto { name: "refuse-before".into() }).await;
+        assert!(matches!(refused, Err(ServiceError::Validation(_))));
+        assert_eq!(repo.data.lock().await.len(), 1, "a refused write never reaches the repository");
+    }
+
+    #[tokio::test]
+    async fn a_service_without_hooks_behaves_as_before() {
+        let repo = Arc::new(InMemoryWidgetRepo::new());
+        let service: GenericCrudService<Widget, CreateWidgetDto, UpdateWidgetDto, InMemoryWidgetRepo> =
+            GenericCrudService::with_repository(repo);
+        let created = service.bulk_create(vec![CreateWidgetDto { name: "a".into() }]).await.unwrap();
+        assert_eq!(created.len(), 1);
+        assert_eq!(created[0].note, None);
     }
 
     #[tokio::test]

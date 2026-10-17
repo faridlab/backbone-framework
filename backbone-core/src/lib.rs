@@ -80,6 +80,7 @@ pub mod error;
 pub mod service;
 pub mod violation;
 pub mod write_guard;
+pub mod write_hooks;
 pub mod row_rule;
 pub mod actor_roles;
 pub mod usecase;
@@ -251,6 +252,9 @@ pub use error::{ModuleError, ErrorCategory, ErrorResponse, CommonError};
 // Generic base layer re-exports
 pub use violation::{code_from_constraint, Violation};
 pub use write_guard::{AllowAll, GuardOutcome, WriteCtx, WriteGuard, WriteKind};
+// The hooks' own context is `write_hooks::WriteCtx`: not re-exported here, where `WriteCtx` is
+// already the write guard's.
+pub use write_hooks::{Change, ChangeKind, DeclaredEvent, NoWriteHooks, WriteHooks};
 pub use service::{
     GenericCrudService, ServiceError, ServiceResult,
     FromCreateDto, ApplyUpdateDto, ServiceLifecycle, NoOpLifecycle,

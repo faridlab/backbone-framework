@@ -248,6 +248,10 @@ macro_rules! impl_crud_repository {
                 Some((&**self).table_name())
             }
 
+            fn write_pool(&self) -> Option<&backbone_orm::PgPool> {
+                Some((&**self).pool())
+            }
+
             async fn aggregate_filtered(
                 &self,
                 spec: &backbone_orm::repository::AggregateSpec,
@@ -540,6 +544,10 @@ macro_rules! impl_crud_repository {
 
             fn table_name(&self) -> Option<&str> {
                 Some((&**self).table_name())
+            }
+
+            fn write_pool(&self) -> Option<&backbone_orm::PgPool> {
+                Some((&**self).pool())
             }
 
             async fn aggregate_filtered(
