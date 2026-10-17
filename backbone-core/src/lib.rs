@@ -57,6 +57,7 @@ pub mod entity;
 pub mod repository;
 pub mod extractors;
 pub mod http;
+pub mod permission;
 pub mod grpc;
 pub mod builder;
 pub mod utils;

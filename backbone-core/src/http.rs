@@ -6,6 +6,9 @@
 //! - Response types: `ApiResponse`, `PaginatedResponse`, `BulkResponse`
 
 use crate::extractors::{JsonOrForm, StrictJsonOrForm};
+pub use crate::permission::{
+    guarded, guarded_all, permission_refusal, unauthenticated_refusal, CrudPermissions,
+};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -1522,12 +1525,42 @@ where
     /// 14. (Uses route 9 with filters)
     /// 15. `GET {base_path}/count` - Count active entities
     /// 16. `GET {base_path}/trash/count` - Count deleted entities
+    ///
+    /// These routes check no permission: whatever guards the mount is the only barrier. Generated
+    /// modules call [`routes_guarded`](Self::routes_guarded) instead, and `schema doctor` flags a
+    /// hand-written call of this one.
     pub fn routes(service: Arc<S>, base_path: &str) -> axum::Router<()>
     where
         S: Clone,
     {
         Self::read_routes(service.clone(), base_path)
             .merge(Self::write_routes(service, base_path))
+    }
+
+    /// [`routes`](Self::routes) with every route guarded by its permission. This is what the
+    /// generated `create_<entity>_routes` calls.
+    pub fn routes_guarded(
+        service: Arc<S>,
+        base_path: &str,
+        permissions: crate::permission::CrudPermissions,
+    ) -> axum::Router<()>
+    where
+        S: Clone,
+    {
+        Self::read_routes_guarded(service.clone(), base_path, permissions.clone())
+            .merge(Self::write_routes_guarded(service, base_path, permissions))
+    }
+
+    /// Wrap `route` with the permission check `gate` selects, when permissions are in force.
+    fn gate(
+        perms: &Option<crate::permission::CrudPermissions>,
+        gate: crate::permission::Gate,
+        route: axum::routing::MethodRouter<()>,
+    ) -> axum::routing::MethodRouter<()> {
+        match perms {
+            Some(p) => crate::permission::guarded_needs(route, p.needs(gate)),
+            None => route,
+        }
     }
 
     /// Create Axum router with only the read (GET) endpoints.
@@ -1547,6 +1580,35 @@ where
     where
         S: Clone,
     {
+        Self::read_routes_with(service, base_path, None)
+    }
+
+    /// [`read_routes`](Self::read_routes), each route refusing a caller who lacks the permission
+    /// `permissions` names for it (`<entity>:read` unless the schema says otherwise).
+    ///
+    /// A request with no `AuthContext` is `401`, a caller whose context lacks the permission `403`
+    /// with the violation `permission_required`. Nothing is allowed by default: with no grant
+    /// resolver installed the permissions are the ones already on the `AuthContext`.
+    pub fn read_routes_guarded(
+        service: Arc<S>,
+        base_path: &str,
+        permissions: crate::permission::CrudPermissions,
+    ) -> axum::Router<()>
+    where
+        S: Clone,
+    {
+        Self::read_routes_with(service, base_path, Some(permissions))
+    }
+
+    fn read_routes_with(
+        service: Arc<S>,
+        base_path: &str,
+        perms: Option<crate::permission::CrudPermissions>,
+    ) -> axum::Router<()>
+    where
+        S: Clone,
+    {
+        use crate::permission::Gate;
         // Building a generic surface for this entity records its secrets under its table, so
         // a cross-module `?include=` of the table strips them (see `secret_registry`).
         if let Some(table) = service.table_name() {
@@ -1562,63 +1624,63 @@ where
 
         Router::new()
             // GET /collection - List
-            .route(base_path, get({
+            .route(base_path, Self::gate(&perms, Gate::Read, get({
                 let h = handler.clone();
                 move |query: Query<ListQueryParams>, access: Option<Extension<AccessScope>>| async move {
                     Self::list_handler(h, query, access).await
                 }
-            }))
+            })))
             // GET /collection/trash - List deleted
-            .route(&format!("{}/trash", base_path), get({
+            .route(&format!("{}/trash", base_path), Self::gate(&perms, Gate::Read, get({
                 let h = handler.clone();
                 move |query: Query<ListQueryParams>, access: Option<Extension<AccessScope>>| async move {
                     Self::list_deleted_handler(h, query, access).await
                 }
-            }))
+            })))
             // GET /collection/:id - Get by ID
-            .route(&format!("{}/:id", base_path), get({
+            .route(&format!("{}/:id", base_path), Self::gate(&perms, Gate::Read, get({
                 let h = handler.clone();
                 move |path: Path<String>, query: Query<ListQueryParams>, access: Option<Extension<AccessScope>>| async move {
                     Self::get_handler(h, path, query, access).await
                 }
-            }))
+            })))
             // GET /collection/:id/deleted - Get deleted by ID
-            .route(&format!("{}/:id/deleted", base_path), get({
+            .route(&format!("{}/:id/deleted", base_path), Self::gate(&perms, Gate::Read, get({
                 let h = handler.clone();
                 move |path: Path<String>, query: Query<ListQueryParams>, access: Option<Extension<AccessScope>>| async move {
                     Self::get_deleted_handler(h, path, query, access).await
                 }
-            }))
+            })))
             // GET /collection/count - Count active entities
             // GET /collection/:id/history - This record's recorded changes
-            .route(&format!("{}/:id/history", base_path), get({
+            .route(&format!("{}/:id/history", base_path), Self::gate(&perms, Gate::Read, get({
                 let h = handler.clone();
                 move |path: axum::extract::Path<String>,
                       query: axum::extract::Query<ListQueryParams>,
                       provider: Option<axum::Extension<std::sync::Arc<dyn HistoryProvider>>>| async move {
                     Self::history_handler(h, path, query, provider).await
                 }
-            }))
+            })))
             // GET /collection/aggregate - Group and reduce
-            .route(&format!("{}/aggregate", base_path), get({
+            .route(&format!("{}/aggregate", base_path), Self::gate(&perms, Gate::Read, get({
                 let h = handler.clone();
                 move |query: axum::extract::Query<ListQueryParams>| async move {
                     Self::aggregate_handler(h, query).await
                 }
-            }))
-            .route(&format!("{}/count", base_path), get({
+            })))
+            .route(&format!("{}/count", base_path), Self::gate(&perms, Gate::Read, get({
                 let h = handler.clone();
                 move |query: axum::extract::Query<ListQueryParams>| async move {
                     Self::count_active_handler(h, query).await
                 }
-            }))
+            })))
             // GET /collection/trash/count - Count deleted entities
-            .route(&format!("{}/trash/count", base_path), get({
+            .route(&format!("{}/trash/count", base_path), Self::gate(&perms, Gate::Read, get({
                 let h = handler.clone();
                 move || async move {
                     Self::count_deleted_handler(h).await
                 }
-            }))
+            })))
     }
 
     /// Create Axum router with only the write (mutation) endpoints.
@@ -1641,6 +1703,33 @@ where
     where
         S: Clone,
     {
+        Self::write_routes_with(service, base_path, None)
+    }
+
+    /// [`write_routes`](Self::write_routes), each route refusing a caller who lacks the permission
+    /// `permissions` names for it: `create` for a create, bulk create, `update` for a put, patch
+    /// and bulk update, `create` and `update` for an upsert, `delete`, `restore`, and `purge` for
+    /// a hard delete or an emptied trash. See [`read_routes_guarded`](Self::read_routes_guarded).
+    pub fn write_routes_guarded(
+        service: Arc<S>,
+        base_path: &str,
+        permissions: crate::permission::CrudPermissions,
+    ) -> axum::Router<()>
+    where
+        S: Clone,
+    {
+        Self::write_routes_with(service, base_path, Some(permissions))
+    }
+
+    fn write_routes_with(
+        service: Arc<S>,
+        base_path: &str,
+        perms: Option<crate::permission::CrudPermissions>,
+    ) -> axum::Router<()>
+    where
+        S: Clone,
+    {
+        use crate::permission::Gate;
         // Building a generic surface for this entity records its secrets under its table, so
         // a cross-module `?include=` of the table strips them (see `secret_registry`).
         if let Some(table) = service.table_name() {
@@ -1656,118 +1745,118 @@ where
 
         Router::new()
             // POST /collection - Create
-            .route(base_path, post({
+            .route(base_path, Self::gate(&perms, Gate::Create, post({
                 let h = handler.clone();
                 move |body: StrictJsonOrForm<C>| async move {
                     Self::create_handler(h, body).await
                 }
-            }))
+            })))
             // POST /collection/bulk - Bulk create
-            .route(&format!("{}/bulk", base_path), post({
+            .route(&format!("{}/bulk", base_path), Self::gate(&perms, Gate::Create, post({
                 let h = handler.clone();
                 move |body: StrictJsonOrForm<Vec<C>>| async move {
                     Self::bulk_create_handler(h, body).await
                 }
-            }))
+            })))
             // POST /collection/upsert - Upsert
-            .route(&format!("{}/upsert", base_path), post({
+            .route(&format!("{}/upsert", base_path), Self::gate(&perms, Gate::CreateUpdate, post({
                 let h = handler.clone();
                 move |body: StrictJsonOrForm<C>| async move {
                     Self::upsert_handler(h, body).await
                 }
-            }))
+            })))
             // POST /collection/delete/bulk - Bulk soft delete by ids
-            .route(&format!("{}/delete/bulk", base_path), post({
+            .route(&format!("{}/delete/bulk", base_path), Self::gate(&perms, Gate::Delete, post({
                 let h = handler.clone();
                 move |body: JsonOrForm<BatchIdsRequest>| async move {
                     Self::bulk_delete_handler(h, body).await
                 }
-            }))
+            })))
             // POST /collection/restore/bulk - Bulk restore by ids
-            .route(&format!("{}/restore/bulk", base_path), post({
+            .route(&format!("{}/restore/bulk", base_path), Self::gate(&perms, Gate::Restore, post({
                 let h = handler.clone();
                 move |body: JsonOrForm<BatchIdsRequest>| async move {
                     Self::bulk_restore_handler(h, body).await
                 }
-            }))
+            })))
             // POST /collection/restore/all - Restore all soft-deleted
-            .route(&format!("{}/restore/all", base_path), post({
+            .route(&format!("{}/restore/all", base_path), Self::gate(&perms, Gate::Restore, post({
                 let h = handler.clone();
                 move || async move {
                     Self::restore_all_handler(h).await
                 }
-            }))
+            })))
             // DELETE /collection/trash/bulk - Bulk hard delete by ids
             // (registered alongside /trash/:id; matchit prioritises the static segment)
-            .route(&format!("{}/trash/bulk", base_path), delete({
+            .route(&format!("{}/trash/bulk", base_path), Self::gate(&perms, Gate::Purge, delete({
                 let h = handler.clone();
                 move |body: JsonOrForm<BatchIdsRequest>| async move {
                     Self::bulk_permanent_delete_handler(h, body).await
                 }
-            }))
+            })))
             // PUT /collection/bulk - Bulk full update
-            .route(&format!("{}/bulk", base_path), put({
+            .route(&format!("{}/bulk", base_path), Self::gate(&perms, Gate::Update, put({
                 let h = handler.clone();
                 move |body: JsonOrForm<Vec<serde_json::Map<String, serde_json::Value>>>| async move {
                     Self::bulk_update_handler(h, body).await
                 }
-            }))
+            })))
             // PATCH /collection/bulk - Bulk partial update (shared or per-id)
-            .route(&format!("{}/bulk", base_path), patch({
+            .route(&format!("{}/bulk", base_path), Self::gate(&perms, Gate::Update, patch({
                 let h = handler.clone();
                 move |body: JsonOrForm<BulkPatchRequest>| async move {
                     Self::bulk_patch_handler(h, body).await
                 }
-            }))
+            })))
             // POST /collection/bulk/preview - What the bulk partial update would do, nothing written
-            .route(&format!("{}/bulk/preview", base_path), post({
+            .route(&format!("{}/bulk/preview", base_path), Self::gate(&perms, Gate::Update, post({
                 let h = handler.clone();
                 move |body: JsonOrForm<BulkPatchRequest>| async move {
                     Self::bulk_patch_preview_handler(h, body).await
                 }
-            }))
+            })))
             // DELETE /collection/empty - Empty trash
-            .route(&format!("{}/empty", base_path), delete({
+            .route(&format!("{}/empty", base_path), Self::gate(&perms, Gate::Purge, delete({
                 let h = handler.clone();
                 move || async move {
                     Self::empty_trash_handler(h).await
                 }
-            }))
+            })))
             // DELETE /collection/trash/:id - Permanent delete from trash
-            .route(&format!("{}/trash/:id", base_path), delete({
+            .route(&format!("{}/trash/:id", base_path), Self::gate(&perms, Gate::Purge, delete({
                 let h = handler.clone();
                 move |path: Path<String>| async move {
                     Self::permanent_delete_handler(h, path).await
                 }
-            }))
+            })))
             // PUT /collection/:id - Full update
-            .route(&format!("{}/:id", base_path), put({
+            .route(&format!("{}/:id", base_path), Self::gate(&perms, Gate::Update, put({
                 let h = handler.clone();
                 move |path: Path<String>, body: StrictJsonOrForm<U>| async move {
                     Self::update_handler(h, path, body).await
                 }
-            }))
+            })))
             // PATCH /collection/:id - Partial update
-            .route(&format!("{}/:id", base_path), patch({
+            .route(&format!("{}/:id", base_path), Self::gate(&perms, Gate::Update, patch({
                 let h = handler.clone();
                 move |path: Path<String>, body: JsonOrForm<HashMap<String, serde_json::Value>>| async move {
                     Self::partial_update_handler(h, path, body).await
                 }
-            }))
+            })))
             // DELETE /collection/:id - Soft delete
-            .route(&format!("{}/:id", base_path), delete({
+            .route(&format!("{}/:id", base_path), Self::gate(&perms, Gate::Delete, delete({
                 let h = handler.clone();
                 move |path: Path<String>| async move {
                     Self::delete_handler(h, path).await
                 }
-            }))
+            })))
             // POST /collection/:id/restore - Restore
-            .route(&format!("{}/:id/restore", base_path), post({
+            .route(&format!("{}/:id/restore", base_path), Self::gate(&perms, Gate::Restore, post({
                 let h = handler.clone();
                 move |path: Path<String>| async move {
                     Self::restore_handler(h, path).await
                 }
-            }))
+            })))
             // Every write stages its events under the request's correlation id.
             .layer(axum::middleware::from_fn(correlation_middleware))
     }

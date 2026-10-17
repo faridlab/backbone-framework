@@ -9,6 +9,8 @@ repository = "https://github.com/faridlab/backbone-framework"
 [dependencies]
 # Sibling crates
 backbone-orm = { path = "../backbone-orm", version = "3.13.0" }
+# `AuthContext::require` and the permission matching the route layer (`permission`) applies.
+backbone-auth = { path = "../backbone-auth", version = "3.13.0" }
 # Staging declared events on the write transaction (`write_hooks::WriteCtx::stage`).
 backbone-outbox = { path = "../backbone-outbox", version = "3.13.0", features = ["write-tx"] }
 # Core dependencies
