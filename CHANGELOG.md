@@ -16,6 +16,45 @@ back to the `## [Unreleased]` section.
 
 ## [Unreleased]
 
+### Added
+
+- **backbone-orm** — `in_write_tx(pool, work)`: one task-local database transaction around everything
+  a write does, committed when `work` returns `Ok`, rolled back when it returns `Err` or is dropped.
+  It begins on the request scope's dedicated connection when there is one (the fence variables and
+  audit attribution set at session level hold inside it), else on a pool connection with the task's
+  company or org scope and audit actor bound transaction-locally. While one is active every scoped
+  statement helper and repository write runs on it and does not commit, bulk paths use savepoints,
+  and a write transaction opened inside another is a savepoint of it. `current_write_tx()`,
+  `in_write_tx_scope()`, `in_write_tx_result` (which keeps `WriteTxFailure::{Inner, Db}` apart) and
+  `WriteTx::conn()` expose it. With no write transaction active every path behaves exactly as before.
+  Postgres' quiet rollback on `COMMIT` of an aborted transaction is turned into an error, and a
+  dropped future rolls the transaction back and closes the connection if that fails.
+- **backbone-core** — `write_hooks`: `WriteHooks<E>` (defaulted async `before` and `after`),
+  `Change` (`Created`, `Updated`, `Transitioned` with the verb and the states it left and entered,
+  `Deleted`, `Restored`), `WriteCtx` (correlation id, causation id, actor, company, outbox schema,
+  `stage`), `DeclaredEvent` and `payload_from_row` for the generated event payloads, and
+  `GenericCrudService::with_write_hooks`. Every generic write (create, update, patch, put, delete,
+  restore, hard delete, their bulk forms, `empty_trash`, `restore_all` and a transition) now runs in
+  one `in_write_tx` in the order guard, `ServiceLifecycle::before_*`, `WriteHooks::before`,
+  repository write, `ServiceLifecycle::after_*`, `WriteHooks::after`, commit, so a failing hook or an
+  event that cannot be staged rolls back the row. The in-process `CrudEventPublisher` fires after the
+  commit. `CrudRepository::write_pool` (defaulted to none; `impl_crud_repository!` implements it)
+  names the pool the transaction opens on; a repository without one runs the write as before.
+  `http::correlation_middleware` binds the request's `x-correlation-id` for the writes of the generic
+  write routes (a composing service's audit attribution wins when it binds one). Not breaking: the
+  `WriteCtx` of the write guard keeps its name and path, the hooks' context is
+  `write_hooks::WriteCtx`.
+- **backbone-outbox** — `OutboxRecord::with_causation_id` and `with_version`, and, behind the new
+  `write-tx` feature, `outbox::stage_in_write_tx`, which stages on the task's write transaction.
+
+### Changed
+
+- **backbone-core** — a `ServiceLifecycle` hook now runs inside the write's transaction. A hook that
+  uses the ORM's scoped helpers or the repository rides it; one that opens a connection of its own
+  (a bare `pool.begin()`) is another transaction: it cannot see the row being written and a statement
+  of it waiting for a lock the write holds waits for a commit that waits for the hook. The trait is
+  unchanged, so no module needs a code change to compile.
+
 ## [3.13.0] - 2026-10-18
 
 ### Security
