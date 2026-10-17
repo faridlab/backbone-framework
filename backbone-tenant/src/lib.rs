@@ -28,12 +28,15 @@
 //!   runtime exactly once; the second awaits the first's result. (A cold build is expensive — a pool
 //!   plus N module graphs — so a double build is not just wasteful, it can double a tenant's
 //!   connections.)
-//! - **Failures don't poison.** If a build fails, the slot is left uninitialised and the next request
-//!   retries. A tenant whose database was briefly unreachable recovers on its own.
+//! - **Failures don't poison, and are not kept.** If a build fails, its entry is removed and the next
+//!   request retries. A tenant whose database was briefly unreachable recovers on its own, and a
+//!   valid-looking slug that names no provisioned tenant never holds a slot.
 //! - **Eviction never kills in-flight work.** Evicting a tenant drops the registry's handle; any
 //!   request already holding the runtime keeps it alive until it finishes (it is an `Arc`).
-//! - **Bounded.** `max_tenants` caps resident runtimes; the least-recently-used tenant is evicted
-//!   when a new build would exceed the cap. Idle eviction (by wall clock) layers on top via
+//! - **Bounded.** `max_tenants` caps built runtimes; the tenant least recently resolved
+//!   *successfully* is evicted when a new build would exceed the cap. Builds in flight and builds
+//!   that fail never count against the cap, so requests for unknown tenants cannot push
+//!   established tenants out. Idle eviction (by wall clock) layers on top via
 //!   [`TenantRegistry::evict_idle`], driven by the caller so this crate needs no clock.
 
 use std::collections::HashMap;
@@ -143,40 +146,96 @@ impl<F: TenantRuntimeFactory> TenantRegistry<F> {
         &self,
         tenant: &TenantId,
     ) -> Result<Arc<F::Runtime>, RegistryError<F::Error>> {
-        // Phase 1 (locked, brief): find or create the tenant's cell and mark it most-recently-used.
-        // The lock is released before the (slow) build so other tenants are never blocked by it.
+        // Phase 1 (locked, brief): find or create the tenant's cell. The lock is released before
+        // the (slow) build so other tenants are never blocked by it. A new entry is not yet
+        // resident: it neither counts against capacity nor takes part in LRU order until its
+        // build succeeds.
         let cell = {
             let mut inner = self.inner.lock().await;
-            inner.tick += 1;
             let tick = inner.tick;
-            let cell = inner
-                .entries
-                .entry(tenant.clone())
-                .or_insert_with(|| Entry {
-                    cell: Arc::new(OnceCell::new()),
-                    last: tick,
-                });
-            cell.last = tick;
-            Arc::clone(&cell.cell)
+            let entry = inner.entries.entry(tenant.clone()).or_insert_with(|| Entry {
+                cell: Arc::new(OnceCell::new()),
+                last: tick,
+            });
+            Arc::clone(&entry.cell)
         };
 
         // Phase 2 (unlocked): build-once. `get_or_try_init` runs the factory for the first caller and
         // makes the rest await it; on error the cell stays empty and a later call retries.
-        let runtime = cell
+        let built = cell
             .get_or_try_init(|| async {
                 self.factory.build(tenant).await.map(Arc::new)
             })
-            .await
-            .map_err(|source| RegistryError::Build {
-                tenant: tenant.0.clone(),
-                source,
-            })?;
+            .await;
+        let runtime = match built {
+            Ok(runtime) => Arc::clone(runtime),
+            Err(source) => {
+                // Never keep a failed build: a slug that names no provisioned tenant must not
+                // hold a slot, or enough of them push real tenants out at the next eviction.
+                self.forget_failed(tenant, &cell).await;
+                return Err(RegistryError::Build {
+                    tenant: tenant.0.clone(),
+                    source,
+                });
+            }
+        };
 
-        // Phase 3 (locked, brief): enforce the capacity bound. Evict the least-recently-used tenant
-        // other than this one — never the tenant just served.
-        self.evict_over_capacity(tenant).await;
+        // Phase 3 (locked, brief): mark this tenant most-recently-used by a SUCCESSFUL resolve, then
+        // enforce the capacity bound — evicting the least-recently-used built tenant other than this
+        // one.
+        self.touch_and_evict(tenant, &cell).await;
 
-        Ok(Arc::clone(runtime))
+        Ok(runtime)
+    }
+
+    /// Drop `tenant`'s entry after a failed build, unless another request has meanwhile replaced
+    /// it or built it — a concurrent retry that succeeded keeps its slot.
+    async fn forget_failed(&self, tenant: &TenantId, cell: &Arc<OnceCell<Arc<F::Runtime>>>) {
+        let mut inner = self.inner.lock().await;
+        let ours = inner
+            .entries
+            .get(tenant)
+            .is_some_and(|e| Arc::ptr_eq(&e.cell, cell) && !e.cell.initialized());
+        if ours {
+            inner.entries.remove(tenant);
+        }
+    }
+
+    /// Record a successful resolve of `tenant` and trim the registry back to capacity.
+    async fn touch_and_evict(&self, tenant: &TenantId, cell: &Arc<OnceCell<Arc<F::Runtime>>>) {
+        let mut inner = self.inner.lock().await;
+        inner.tick += 1;
+        let tick = inner.tick;
+        // A failed concurrent caller may have removed the entry between our build and this
+        // lock; the build succeeded, so put it back rather than lose it.
+        let entry = inner.entries.entry(tenant.clone()).or_insert_with(|| Entry {
+            cell: Arc::clone(cell),
+            last: tick,
+        });
+        entry.last = tick;
+
+        // Only built tenants count against the bound and only they are eviction victims; an
+        // entry mid-build is transient (it is either built or removed when its build ends).
+        loop {
+            let resident = inner.entries.values().filter(|e| e.cell.initialized()).count();
+            if resident <= self.max_tenants {
+                break;
+            }
+            let victim = inner
+                .entries
+                .iter()
+                .filter(|(id, e)| *id != tenant && e.cell.initialized())
+                .min_by_key(|(_, e)| e.last)
+                .map(|(id, _)| id.clone());
+            match victim {
+                Some(id) => {
+                    inner.entries.remove(&id);
+                }
+                // Only `tenant` remains built and we are still over cap — impossible unless
+                // max_tenants < 1, which the constructor forbids. Stop rather than loop forever.
+                None => break,
+            }
+        }
     }
 
     /// Number of resident tenants (built or mid-build).
@@ -214,27 +273,5 @@ impl<F: TenantRuntimeFactory> TenantRegistry<F> {
         let before = inner.entries.len();
         inner.entries.retain(|_, e| e.last >= cutoff);
         before - inner.entries.len()
-    }
-
-    /// Evict the LRU tenant (excluding `keep_tenant`) while over the capacity bound.
-    async fn evict_over_capacity(&self, keep_tenant: &TenantId) {
-        let mut inner = self.inner.lock().await;
-        while inner.entries.len() > self.max_tenants {
-            // Find the least-recently-used entry that is not the one we just served.
-            let victim = inner
-                .entries
-                .iter()
-                .filter(|(id, _)| *id != keep_tenant)
-                .min_by_key(|(_, e)| e.last)
-                .map(|(id, _)| id.clone());
-            match victim {
-                Some(id) => {
-                    inner.entries.remove(&id);
-                }
-                // Only `keep_tenant` remains and we are still over cap — impossible unless
-                // max_tenants < 1, which the constructor forbids. Stop rather than loop forever.
-                None => break,
-            }
-        }
     }
 }

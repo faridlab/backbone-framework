@@ -178,6 +178,54 @@ async fn evict_idle_drops_only_stale_tenants() {
     assert!(reg.evict(&"new".into()).await);
 }
 
+/// Builds every tenant except those whose slug starts with `ghost` — the shape of a valid slug
+/// whose database was never provisioned.
+struct GhostFactory {
+    builds: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl TenantRuntimeFactory for GhostFactory {
+    type Runtime = FakeRuntime;
+    type Error = StubError;
+
+    async fn build(&self, tenant: &TenantId) -> Result<FakeRuntime, StubError> {
+        if tenant.as_str().starts_with("ghost") {
+            return Err(StubError(tenant.0.clone()));
+        }
+        let serial = self.builds.fetch_add(1, Ordering::SeqCst);
+        Ok(FakeRuntime { tenant: tenant.0.clone(), serial })
+    }
+}
+
+#[tokio::test]
+async fn a_failed_build_leaves_nothing_resident() {
+    let reg = TenantRegistry::new(StubFactory::fail_first(1), 8);
+    assert!(reg.get_or_build(&"ghost".into()).await.is_err());
+    assert_eq!(reg.len().await, 0, "a tenant that failed to build must not hold a slot");
+}
+
+#[tokio::test]
+async fn unknown_slugs_never_evict_established_tenants() {
+    // Valid-looking slugs that fail to build must not take capacity from real tenants: before,
+    // each failure left an entry behind and the next successful request evicted a real tenant
+    // to make room for them.
+    let reg = TenantRegistry::new(GhostFactory { builds: AtomicUsize::new(0) }, 2);
+    let a = reg.get_or_build(&"a".into()).await.unwrap();
+    let b = reg.get_or_build(&"b".into()).await.unwrap();
+
+    for i in 0..10 {
+        let ghost = TenantId::from(format!("ghost{i}"));
+        assert!(reg.get_or_build(&ghost).await.is_err());
+    }
+
+    let a2 = reg.get_or_build(&"a".into()).await.unwrap();
+    let b2 = reg.get_or_build(&"b".into()).await.unwrap();
+    assert_eq!(a.serial, a2.serial, "a must still be resident");
+    assert_eq!(b.serial, b2.serial, "b must still be resident");
+    assert_eq!(reg.len().await, 2);
+}
+
 #[tokio::test]
 #[should_panic(expected = "max_tenants must be > 0")]
 async fn zero_capacity_is_rejected() {
