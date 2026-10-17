@@ -14,6 +14,44 @@ The release workflow reads the section matching the git tag's version and
 uses it as the GitHub Release body. If no matching section is found it falls
 back to the `## [Unreleased]` section.
 
+## [3.11.0] - 2026-10-17
+
+### Security
+
+- **backbone-orm** — a query-string key could reach the WHERE clause as raw SQL: the filter
+  parser copied a `__base_condition` key verbatim into the query's base conditions, so any list
+  or aggregate call on an entity without soft delete ran caller-supplied SQL. Base conditions are
+  now crate-internal and added only by repository code; the parser and the HTTP layer drop every
+  `__`-prefixed key, and field names starting with `__` are refused.
+- **backbone-orm** — an `[or]` filter was joined after the base conditions without parentheses,
+  so `?status[or]=active` escaped the soft-delete guard and the company fence. The WHERE clause is
+  now `(base) AND (search) AND (user conditions)` on list, count, estimate, aggregate and keyset
+  paths.
+- **backbone-orm** — a request cancelled mid-flight returned its connection to the pool still
+  carrying `app.company_id`, `app.scope_unit_ids` and the audit actor. A drop guard now resets
+  the scope (or closes the connection) on every exit path of the company and org request scopes.
+
+### Fixed
+
+- **backbone-orm** — the org scope picked the ancestor company with the lowest id rather than
+  the nearest one, so a user acting in a subsidiary could act as its parent.
+- **backbone-core** — generic PATCH and PUT wrote every column back from the row read before the
+  merge, so a concurrent verb's state change or a concurrent delete could be reverted. They now
+  write only the columns that changed (`CrudRepository::update_changed`, default falls back to
+  `update`), with a not-deleted predicate in the UPDATE; a row deleted meanwhile answers 404.
+- **backbone-core** — a database not-null violation became a raw driver message; it is now a
+  `required` violation on the column. Composite unique keys name their last non-scope column, and
+  CHECK violations read as plain sentences keyed by their code, with the column derived from the
+  generator's constraint naming. No message shows a rule identifier.
+- **backbone-core** — a field that is both write-protected and moved by a state machine could not
+  be written by its own transition. `PersistentEntity::state_fields()` (default empty) lists the
+  fields a transition may move; outside a transition they stay refused.
+
+### Added
+
+- **backbone-core** — `http::service_error_response(&ServiceError)` maps violations to 422,
+  validation to 400, not found to 404, duplicate or conflict to 409 and anything else to 500.
+
 ## [3.10.0] - 2026-10-17
 
 ### Changed
