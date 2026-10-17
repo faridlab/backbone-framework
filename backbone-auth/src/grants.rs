@@ -112,8 +112,13 @@ pub struct Held {
 }
 
 impl Held {
-    /// The canonical spelling.
+    /// The canonical spelling. A legacy "every verb" grant (`*:transition:*`) has no single one: it
+    /// reads `<resource>:<each verb>`, because a canonical `*` would also open generic reads and
+    /// writes, which it never did.
     pub fn canonical(&self) -> String {
+        if self.verbs_only && self.action == "*" {
+            return format!("{}:<each verb>", self.resource);
+        }
         format!("{}:{}", self.resource, self.action)
     }
 }
@@ -484,6 +489,8 @@ mod tests {
 
     #[test]
     fn a_legacy_transition_permission_covers_verbs_never_generic_actions() {
+        assert_eq!(normalise("ticket:transition:resolve").as_deref(), Some("ticket:resolve"));
+        assert_eq!(normalise("*:transition:*").as_deref(), Some("*:<each verb>"), "no single canonical form: never *:*");
         assert!(allows(&["ticket:transition:resolve"], "ticket:resolve"));
         assert!(allows(&["ticket:transition:*"], "ticket:resolve"));
         assert!(allows(&["*:transition:*"], "ticket:resolve"));
