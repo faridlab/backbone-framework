@@ -460,7 +460,7 @@ async fn a_dropped_future_leaves_no_transaction_open_and_no_row_behind() {
     // The rollback runs from a spawned task; the pool hands the connection back only after it.
     let open: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM pg_stat_activity \
-         WHERE datname = current_database() AND state LIKE 'idle in transaction%'",
+         WHERE usename = current_user AND state LIKE 'idle in transaction%'",
     )
     .fetch_one(&pool)
     .await
