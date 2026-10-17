@@ -46,9 +46,44 @@ back to the `## [Unreleased]` section.
   `write_hooks::WriteCtx`.
 - **backbone-outbox** — `OutboxRecord::with_causation_id` and `with_version`, and, behind the new
   `write-tx` feature, `outbox::stage_in_write_tx`, which stages on the task's write transaction.
+- **backbone-auth** — permissions as data (`grants`): the canonical name `<resource>:<action>`
+  (`*` allowed on either half of a held permission), `AuthContext::require(permission)` and
+  `require_with(permission, alternates)`, which refuse with `PermissionRequired`, and
+  `AuthContext::has_permission`. `require` reads `AuthContext.permissions` and nothing else, never
+  grants by role name, and allows nothing by default: an empty list holds nothing. The older
+  spellings still read for one release and each use that grants access raises a deprecation signal
+  (a `tracing` warning at target `backbone::auth` once per stored string, and
+  `legacy_spellings_seen()`): `resource.action`, `<action>:<module>` with `admin:*` and
+  `admin:<module>`, the composite action `<resource>:write` (covers create, update, restore and
+  verbs, never read, delete or purge), plural resource names, and `<model>:transition:<verb>`,
+  which covers verbs only, never a generic read or write. `Grants`, `GrantSource` (`load(user, unit)
+  -> Result<Grants, GrantError>`) and `PermissionWaiver`, a marker a gate that admitted a request on
+  a narrower rule attaches so the route layer lets it through.
+- **backbone-auth** — feature `axum`: `resolve_grants` (state `GrantResolver`), a request layer that
+  reads the session context (`OrgContext` or `CompanyContext`), asks the installed `GrantSource` once
+  per request and publishes the result as the request's `AuthContext` (and `Grants`); `ADMIN` and
+  `SUPERUSER` are written as `*:*`, a session naming no user of the tenant holds nothing, and a source
+  that cannot answer is `503 grants_unavailable`. Feature `identity-grants`: `IdentityGrantSource`, the
+  four-source union of assigned roles, the acting unit's membership role, direct grants and the
+  identity module's direct grants (revoked, expired, suspended, soft-deleted and record-narrowed
+  grants are not grants), on the request's bound connection and tenant pool, with `trusting_roles` for
+  roles a composition trusts with whole modules.
+- **backbone-core** — `permission`: `http::guarded(route, permission)`, `guarded_all` and
+  `guarded_needs`, a per-route layer that answers `401 authentication_required` for a request with no
+  `AuthContext` and `403` with the violation `permission_required` and `params.permission` for one
+  that lacks the permission, before the route's extractors and handler run
+  (`http::permission_refusal`, `http::unauthenticated_refusal`). `CrudPermissions` names an entity's
+  permissions (`<entity>:read`, `create`, `update`, `delete`, `restore`, `purge`, with renames), and
+  `BackboneCrudHandler::routes_guarded`, `read_routes_guarded` and `write_routes_guarded` guard every
+  generic route: reads need `read`; create and bulk create `create`; put, patch, bulk update and
+  preview `update`; an upsert `create` and `update`; delete and bulk delete `delete`; restore, restore
+  bulk and restore all `restore`; hard delete, bulk hard delete and empty trash `purge`. `routes`,
+  `read_routes` and `write_routes` are unchanged and check nothing.
 
 ### Changed
 
+- **backbone-core** now depends on **backbone-auth** (no features), for `AuthContext` in the route
+  layer. Not breaking for a consumer of either crate.
 - **backbone-core** — a `ServiceLifecycle` hook now runs inside the write's transaction. A hook that
   uses the ORM's scoped helpers or the repository rides it; one that opens a connection of its own
   (a bare `pool.begin()`) is another transaction: it cannot see the row being written and a statement
