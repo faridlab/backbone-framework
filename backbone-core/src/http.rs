@@ -5,7 +5,7 @@
 //! - `BackboneCrudHandler`: Generic Axum router builder for all 11 endpoints
 //! - Response types: `ApiResponse`, `PaginatedResponse`, `BulkResponse`
 
-use crate::extractors::JsonOrForm;
+use crate::extractors::{JsonOrForm, StrictJsonOrForm};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -98,50 +98,122 @@ impl<T> ApiResponse<T> {
     }
 }
 
-/// The response to a failed write: 422 listing the broken rules when the
-/// service refused it for named reasons, `fallback` with the sentence otherwise.
-fn write_error<T>(
+/// The sentence a 500 answers with. The real error is logged, never sent: it can carry SQL,
+/// table names and driver text a client has no use for and an attacker does.
+pub const INTERNAL_ERROR_MESSAGE: &str = "An internal error occurred. It has been logged.";
+
+/// The response to a failed call at `status`: 422 listing the broken rules when there are
+/// any, the error's sentence for any other client fault, and a generic sentence for a server
+/// fault, whose detail goes to the log instead.
+fn error_at<T>(
+    status: axum::http::StatusCode,
     violations: Option<Vec<crate::violation::Violation>>,
     err: &impl std::fmt::Display,
-    fallback: axum::http::StatusCode,
 ) -> (axum::http::StatusCode, axum::Json<ApiResponse<T>>) {
+    if status.is_server_error() {
+        tracing::error!(target: "backbone::http", status = status.as_u16(), error = %err, "request failed");
+        return (status, axum::Json(ApiResponse::error(INTERNAL_ERROR_MESSAGE)));
+    }
     match violations {
-        Some(v) => (axum::http::StatusCode::UNPROCESSABLE_ENTITY, axum::Json(ApiResponse::rejected(err.to_string(), v))),
-        None => (fallback, axum::Json(ApiResponse::error(err.to_string()))),
+        Some(v) if !v.is_empty() => (status, axum::Json(ApiResponse::rejected(err.to_string(), v))),
+        _ => (status, axum::Json(ApiResponse::error(err.to_string()))),
+    }
+}
+
+/// The status a [`ServiceError`](crate::service::ServiceError) answers with, by variant.
+///
+/// A refusal for named reasons — a protected field, a broken rule, a constraint the database
+/// refused — is the caller's to fix: 422. A plain validation error is 400, a missing record
+/// 404, a duplicate or conflict 409, and only what is left is a 500.
+pub fn service_error_status(err: &crate::service::ServiceError) -> axum::http::StatusCode {
+    use crate::persistence::traits::RepositoryError;
+    use crate::service::ServiceError;
+    use axum::http::StatusCode;
+    match err {
+        ServiceError::Violations(_) | ServiceError::Repository(RepositoryError::Violations(_)) => {
+            StatusCode::UNPROCESSABLE_ENTITY
+        }
+        ServiceError::Validation(_)
+        | ServiceError::Repository(RepositoryError::ValidationError(_)) => StatusCode::BAD_REQUEST,
+        ServiceError::NotFound | ServiceError::Repository(RepositoryError::NotFound) => {
+            StatusCode::NOT_FOUND
+        }
+        ServiceError::AlreadyExists(_)
+        | ServiceError::Repository(RepositoryError::AlreadyExists(_))
+        | ServiceError::Repository(RepositoryError::Conflict(_)) => StatusCode::CONFLICT,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
 
 /// The response for a failed [`ServiceError`](crate::service::ServiceError), for handlers outside
 /// the generic CRUD handler (a generated state-machine transition, a custom route) that call the
-/// service directly.
-///
-/// A refusal for named reasons — a protected field, a broken rule, a constraint the database
-/// refused — is the caller's to fix, so it answers 422 with the violations listed, exactly as the
-/// generic handler does; it must never surface as a 500. A plain validation error answers 400,
-/// a missing record 404, a duplicate or conflict 409, and only what is left is a 500.
+/// service directly — the same answer the generic handler gives (see [`service_error_status`]).
+/// A 500 carries [`INTERNAL_ERROR_MESSAGE`]; the error itself is logged.
 pub fn service_error_response<T>(
     err: &crate::service::ServiceError,
 ) -> (axum::http::StatusCode, axum::Json<ApiResponse<T>>) {
     use crate::persistence::traits::RepositoryError;
     use crate::service::ServiceError;
-    use axum::http::StatusCode;
-    let (violations, fallback) = match err {
+    let violations = match err {
         ServiceError::Violations(v) | ServiceError::Repository(RepositoryError::Violations(v)) => {
-            (Some(v.clone()), StatusCode::UNPROCESSABLE_ENTITY)
+            Some(v.clone())
         }
-        ServiceError::Validation(_)
-        | ServiceError::Repository(RepositoryError::ValidationError(_)) => {
-            (None, StatusCode::BAD_REQUEST)
-        }
-        ServiceError::NotFound | ServiceError::Repository(RepositoryError::NotFound) => {
-            (None, StatusCode::NOT_FOUND)
-        }
-        ServiceError::AlreadyExists(_)
-        | ServiceError::Repository(RepositoryError::AlreadyExists(_))
-        | ServiceError::Repository(RepositoryError::Conflict(_)) => (None, StatusCode::CONFLICT),
-        _ => (None, StatusCode::INTERNAL_SERVER_ERROR),
+        _ => None,
     };
-    write_error(violations, err, fallback)
+    error_at(service_error_status(err), violations, err)
+}
+
+/// The response to a failed write when the error's kind is unknown: 422 listing the broken
+/// rules when there are any, `fallback` otherwise (a server fault answers generically).
+#[cfg(test)]
+fn write_error<T>(
+    violations: Option<Vec<crate::violation::Violation>>,
+    err: &impl std::fmt::Display,
+    fallback: axum::http::StatusCode,
+) -> (axum::http::StatusCode, axum::Json<ApiResponse<T>>) {
+    let status = if violations.is_some() { axum::http::StatusCode::UNPROCESSABLE_ENTITY } else { fallback };
+    error_at(status, violations, err)
+}
+
+/// A path id that is not a UUID, refused before it reaches a query: 400 with an `invalid_id`
+/// violation on `path`. Every generic repository keys rows by UUID, so such an id can name no
+/// record — and passed through, it failed the `::uuid` cast as a 500 with the driver's text.
+fn invalid_id<T>(id: &str, path: &str) -> Option<(axum::http::StatusCode, axum::Json<ApiResponse<T>>)> {
+    if uuid::Uuid::parse_str(id).is_ok() {
+        return None;
+    }
+    let violation = crate::violation::Violation::new(
+        path,
+        "invalid_id",
+        format!("`{id}` is not a valid record id"),
+    );
+    Some((
+        axum::http::StatusCode::BAD_REQUEST,
+        axum::Json(ApiResponse::rejected(format!("invalid id: `{id}` is not a valid record id"), vec![violation])),
+    ))
+}
+
+/// [`invalid_id`] over a batch: every id that is not a UUID, each on `<prefix>/<index>` (or
+/// `<index>/<suffix>` when `suffix` is given).
+fn invalid_ids<'a, T>(
+    ids: impl IntoIterator<Item = &'a str>,
+    path_of: impl Fn(usize) -> String,
+) -> Option<(axum::http::StatusCode, axum::Json<ApiResponse<T>>)> {
+    let violations: Vec<crate::violation::Violation> = ids
+        .into_iter()
+        .enumerate()
+        .filter(|(_, id)| uuid::Uuid::parse_str(id).is_err())
+        .map(|(i, id)| {
+            crate::violation::Violation::new(path_of(i), "invalid_id", format!("`{id}` is not a valid record id"))
+        })
+        .collect();
+    if violations.is_empty() {
+        return None;
+    }
+    Some((
+        axum::http::StatusCode::BAD_REQUEST,
+        axum::Json(ApiResponse::rejected("invalid id in the batch", violations)),
+    ))
 }
 
 /// Generic list query parameters
@@ -1041,6 +1113,22 @@ where
         None
     }
 
+    /// The status a failed call answers with, decided by the error's kind rather than by
+    /// searching its message. `None` (the default) leaves each route its own fallback: 422 when
+    /// [`violations_of`](Self::violations_of) names rules, else the route's usual status.
+    /// `GenericCrudService` answers by variant (see [`service_error_status`]).
+    fn status_of(err: &Self::Error) -> Option<axum::http::StatusCode> {
+        let _ = err;
+        None
+    }
+
+    /// Whether this service has a real upsert. `true` by default, so a hand-written service
+    /// that implements one keeps its route; `GenericCrudService` answers `false`, and the
+    /// generic `POST {resource}/upsert` route then answers 501 rather than creating a duplicate.
+    fn supports_upsert() -> bool {
+        true
+    }
+
     /// Entity name for error messages (e.g., "User", "Role")
     fn entity_name() -> &'static str;
 
@@ -1460,21 +1548,21 @@ where
             // POST /collection - Create
             .route(base_path, post({
                 let h = handler.clone();
-                move |body: JsonOrForm<C>| async move {
+                move |body: StrictJsonOrForm<C>| async move {
                     Self::create_handler(h, body).await
                 }
             }))
             // POST /collection/bulk - Bulk create
             .route(&format!("{}/bulk", base_path), post({
                 let h = handler.clone();
-                move |body: JsonOrForm<Vec<C>>| async move {
+                move |body: StrictJsonOrForm<Vec<C>>| async move {
                     Self::bulk_create_handler(h, body).await
                 }
             }))
             // POST /collection/upsert - Upsert
             .route(&format!("{}/upsert", base_path), post({
                 let h = handler.clone();
-                move |body: JsonOrForm<C>| async move {
+                move |body: StrictJsonOrForm<C>| async move {
                     Self::upsert_handler(h, body).await
                 }
             }))
@@ -1510,7 +1598,7 @@ where
             // PUT /collection/bulk - Bulk full update
             .route(&format!("{}/bulk", base_path), put({
                 let h = handler.clone();
-                move |body: JsonOrForm<Vec<BulkUpdateItem<U>>>| async move {
+                move |body: JsonOrForm<Vec<serde_json::Map<String, serde_json::Value>>>| async move {
                     Self::bulk_update_handler(h, body).await
                 }
             }))
@@ -1545,7 +1633,7 @@ where
             // PUT /collection/:id - Full update
             .route(&format!("{}/:id", base_path), put({
                 let h = handler.clone();
-                move |path: Path<String>, body: JsonOrForm<U>| async move {
+                move |path: Path<String>, body: StrictJsonOrForm<U>| async move {
                     Self::update_handler(h, path, body).await
                 }
             }))
@@ -1575,6 +1663,34 @@ where
     // ============================================================
     // Handler Implementations
     // ============================================================
+
+    /// The response for a failed service call: the status the service gives the error's kind
+    /// ([`CrudService::status_of`]), else 422 when it names broken rules, else `fallback`. A
+    /// server fault answers with a generic sentence; its detail is logged.
+    fn failure<T>(err: &S::Error, fallback: axum::http::StatusCode) -> (axum::http::StatusCode, axum::Json<ApiResponse<T>>) {
+        let violations = S::violations_of(err);
+        let status = S::status_of(err).unwrap_or(if violations.is_some() {
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY
+        } else {
+            fallback
+        });
+        error_at(status, violations, err)
+    }
+
+    /// The response for a failed list-shaped call: a bad filter or sort key is the caller's
+    /// fault (400); anything else goes through [`Self::failure`].
+    fn list_failure(err: &S::Error) -> (axum::http::StatusCode, axum::Json<PaginatedApiResponse<serde_json::Value>>) {
+        use axum::{http::StatusCode, Json};
+        let msg = err.to_string();
+        if is_bad_query_error(&msg) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(PaginatedApiResponse::error(format!("Invalid query parameter or filter: {msg}"))),
+            );
+        }
+        let (status, Json(body)) = Self::failure::<()>(err, StatusCode::INTERNAL_SERVER_ERROR);
+        (status, Json(PaginatedApiResponse::error(body.error.unwrap_or_default())))
+    }
 
     async fn list_handler(
         handler: Arc<Self>,
@@ -1621,22 +1737,13 @@ where
                 let response = PaginatedApiResponse::ok_with_info(items, &info);
                 (StatusCode::OK, Json(response))
             }
-            Err(e) => {
-                let msg = e.to_string();
-                if is_bad_query_error(&msg) {
-                    (StatusCode::BAD_REQUEST, Json(PaginatedApiResponse::<serde_json::Value>::error(
-                        format!("Invalid query parameter or filter: {msg}"),
-                    )))
-                } else {
-                    (StatusCode::INTERNAL_SERVER_ERROR, Json(PaginatedApiResponse::<serde_json::Value>::error(msg)))
-                }
-            }
+            Err(e) => Self::list_failure(&e),
         }
     }
 
     async fn create_handler(
         handler: Arc<Self>,
-        JsonOrForm(dto): JsonOrForm<C>,
+        StrictJsonOrForm(dto): StrictJsonOrForm<C>,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
 
@@ -1645,15 +1752,7 @@ where
                 let response = secure::<E>(to_response_value(R::from(entity)), None);
                 (StatusCode::CREATED, Json(ApiResponse::ok(response)))
             }
-            Err(e) if S::violations_of(&e).is_some() => write_error(S::violations_of(&e), &e, StatusCode::BAD_REQUEST),
-            Err(e) => {
-                let error_str = e.to_string();
-                if error_str.contains("conflict") || error_str.contains("already exists") {
-                    (StatusCode::CONFLICT, Json(ApiResponse::<serde_json::Value>::error(error_str)))
-                } else {
-                    (StatusCode::BAD_REQUEST, Json(ApiResponse::<serde_json::Value>::error(error_str)))
-                }
-            }
+            Err(e) => Self::failure(&e, StatusCode::BAD_REQUEST),
         }
     }
 
@@ -1664,6 +1763,10 @@ where
         access: Option<axum::Extension<AccessScope>>,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
+
+        if let Some(refused) = invalid_id::<serde_json::Value>(&id, "id") {
+            return refused;
+        }
 
         let fields = sparse_fields(&params.filters);
         let includes = include_relations(&params.filters);
@@ -1682,7 +1785,7 @@ where
                 (StatusCode::NOT_FOUND, Json(ApiResponse::<serde_json::Value>::not_found(S::entity_name(), &id)))
             }
             Err(e) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<serde_json::Value>::error(e.to_string())))
+                Self::failure(&e, StatusCode::INTERNAL_SERVER_ERROR)
             }
         }
     }
@@ -1690,9 +1793,13 @@ where
     async fn update_handler(
         handler: Arc<Self>,
         axum::extract::Path(id): axum::extract::Path<String>,
-        JsonOrForm(dto): JsonOrForm<U>,
+        StrictJsonOrForm(dto): StrictJsonOrForm<U>,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
+
+        if let Some(refused) = invalid_id::<serde_json::Value>(&id, "id") {
+            return refused;
+        }
 
         match handler.service.update(&id, dto).await {
             Ok(Some(entity)) => {
@@ -1703,7 +1810,7 @@ where
                 (StatusCode::NOT_FOUND, Json(ApiResponse::<serde_json::Value>::not_found(S::entity_name(), &id)))
             }
             Err(e) => {
-                write_error(S::violations_of(&e), &e, StatusCode::BAD_REQUEST)
+                Self::failure(&e, StatusCode::BAD_REQUEST)
             }
         }
     }
@@ -1714,6 +1821,10 @@ where
         JsonOrForm(fields): JsonOrForm<HashMap<String, serde_json::Value>>,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
+
+        if let Some(refused) = invalid_id::<serde_json::Value>(&id, "id") {
+            return refused;
+        }
 
         // Normalize incoming JSON keys to snake_case before forwarding to the
         // service-layer merge. Entities serialize with Rust's snake_case field
@@ -1739,7 +1850,7 @@ where
                 (StatusCode::NOT_FOUND, Json(ApiResponse::<serde_json::Value>::not_found(S::entity_name(), &id)))
             }
             Err(e) => {
-                write_error(S::violations_of(&e), &e, StatusCode::BAD_REQUEST)
+                Self::failure(&e, StatusCode::BAD_REQUEST)
             }
         }
     }
@@ -1749,6 +1860,10 @@ where
         axum::extract::Path(id): axum::extract::Path<String>,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
+
+        if let Some(refused) = invalid_id::<()>(&id, "id") {
+            return refused;
+        }
 
         match handler.service.soft_delete(&id).await {
             Ok(true) => {
@@ -1760,17 +1875,20 @@ where
                 (StatusCode::NOT_FOUND, Json(ApiResponse::<()>::not_found(S::entity_name(), &id)))
             }
             Err(e) => {
-                write_error(S::violations_of(&e), &e, StatusCode::INTERNAL_SERVER_ERROR)
+                Self::failure(&e, StatusCode::INTERNAL_SERVER_ERROR)
             }
         }
     }
 
     async fn bulk_create_handler(
         handler: Arc<Self>,
-        JsonOrForm(items): JsonOrForm<Vec<C>>,
+        StrictJsonOrForm(items): StrictJsonOrForm<Vec<C>>,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
 
+        if let Some(err) = batch_size_error(items.len()) {
+            return (StatusCode::BAD_REQUEST, Json(ApiResponse::<BulkResponse<serde_json::Value>>::error(err)));
+        }
         match handler.service.bulk_create(items).await {
             Ok(entities) => {
                 let result_items: Vec<serde_json::Value> = entities
@@ -1787,7 +1905,7 @@ where
                 (StatusCode::CREATED, Json(ApiResponse::ok(response)))
             }
             Err(e) => {
-                write_error(S::violations_of(&e), &e, StatusCode::BAD_REQUEST)
+                Self::failure(&e, StatusCode::BAD_REQUEST)
             }
         }
     }
@@ -1803,12 +1921,15 @@ where
         if let Some(err) = batch_size_error(req.ids.len()) {
             return (StatusCode::BAD_REQUEST, Json(ApiResponse::<serde_json::Value>::error(err)));
         }
+        if let Some(refused) = invalid_ids::<serde_json::Value>(req.ids.iter().map(String::as_str), |i| format!("ids/{i}")) {
+            return refused;
+        }
         match handler.service.bulk_soft_delete(req.ids).await {
             Ok(count) => (StatusCode::OK, Json(ApiResponse::success_with_message(
                 serde_json::json!({ "soft_deleted": count }),
                 format!("Soft-deleted {count} item(s)"),
             ))),
-            Err(e) => write_error(S::violations_of(&e), &e, StatusCode::BAD_REQUEST),
+            Err(e) => Self::failure(&e, StatusCode::BAD_REQUEST),
         }
     }
 
@@ -1821,6 +1942,9 @@ where
         if let Some(err) = batch_size_error(req.ids.len()) {
             return (StatusCode::BAD_REQUEST, Json(ApiResponse::<BulkResponse<serde_json::Value>>::error(err)));
         }
+        if let Some(refused) = invalid_ids::<BulkResponse<serde_json::Value>>(req.ids.iter().map(String::as_str), |i| format!("ids/{i}")) {
+            return refused;
+        }
         match handler.service.bulk_restore(req.ids).await {
             Ok(entities) => {
                 let items: Vec<serde_json::Value> = entities
@@ -1830,7 +1954,7 @@ where
                 let total = items.len();
                 (StatusCode::OK, Json(ApiResponse::ok(BulkResponse { items, total, failed: 0, errors: vec![] })))
             }
-            Err(e) => write_error(S::violations_of(&e), &e, StatusCode::BAD_REQUEST),
+            Err(e) => Self::failure(&e, StatusCode::BAD_REQUEST),
         }
     }
 
@@ -1844,7 +1968,7 @@ where
                 serde_json::json!({ "restored": count }),
                 format!("Restored {count} item(s) from trash"),
             ))),
-            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<serde_json::Value>::error(e.to_string()))),
+            Err(e) => Self::failure(&e, StatusCode::INTERNAL_SERVER_ERROR),
         }
     }
 
@@ -1857,25 +1981,60 @@ where
         if let Some(err) = batch_size_error(req.ids.len()) {
             return (StatusCode::BAD_REQUEST, Json(ApiResponse::<serde_json::Value>::error(err)));
         }
+        if let Some(refused) = invalid_ids::<serde_json::Value>(req.ids.iter().map(String::as_str), |i| format!("ids/{i}")) {
+            return refused;
+        }
         match handler.service.bulk_permanent_delete(req.ids).await {
             Ok(count) => (StatusCode::OK, Json(ApiResponse::success_with_message(
                 serde_json::json!({ "permanently_deleted": count }),
                 format!("Permanently deleted {count} item(s)"),
             ))),
-            Err(e) => write_error(S::violations_of(&e), &e, StatusCode::BAD_REQUEST),
+            Err(e) => Self::failure(&e, StatusCode::BAD_REQUEST),
         }
     }
 
+    /// `PUT {resource}/bulk`: an array of `{ "id": .., <update fields> }`. Each item's fields
+    /// are read as the update DTO with the same unknown-key check a single PUT applies; the
+    /// `id` is taken out first, since the DTO itself has none.
     async fn bulk_update_handler(
         handler: Arc<Self>,
-        JsonOrForm(items): JsonOrForm<Vec<BulkUpdateItem<U>>>,
-    ) -> impl axum::response::IntoResponse {
-        use axum::{http::StatusCode, Json};
+        JsonOrForm(raw): JsonOrForm<Vec<serde_json::Map<String, serde_json::Value>>>,
+    ) -> axum::response::Response {
+        use axum::{http::StatusCode, response::IntoResponse, Json};
 
-        if let Some(err) = batch_size_error(items.len()) {
-            return (StatusCode::BAD_REQUEST, Json(ApiResponse::<BulkResponse<serde_json::Value>>::error(err)));
+        if let Some(err) = batch_size_error(raw.len()) {
+            return (StatusCode::BAD_REQUEST, Json(ApiResponse::<BulkResponse<serde_json::Value>>::error(err)))
+                .into_response();
         }
-        let items: Vec<(String, U)> = items.into_iter().map(|it| (it.id, it.data)).collect();
+        let mut items: Vec<(String, U)> = Vec::with_capacity(raw.len());
+        for (index, mut fields) in raw.into_iter().enumerate() {
+            let id = match fields.remove("id") {
+                Some(serde_json::Value::String(id)) => id,
+                _ => {
+                    let violation = crate::violation::Violation::new(
+                        crate::violation::batch_item_path(index, "id"),
+                        "required",
+                        "id is required",
+                    );
+                    return (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        Json(ApiResponse::<()>::rejected(format!("item {index}: id is required"), vec![violation])),
+                    )
+                        .into_response();
+                }
+            };
+            if let Some(refused) = invalid_id::<()>(&id, &crate::violation::batch_item_path(index, "id")) {
+                return refused.into_response();
+            }
+            let bytes = match serde_json::to_vec(&fields) {
+                Ok(bytes) => bytes,
+                Err(e) => return error_at::<()>(StatusCode::INTERNAL_SERVER_ERROR, None, &e).into_response(),
+            };
+            match crate::extractors::decode_json_or_refusal::<U>(&bytes, true) {
+                Ok(data) => items.push((id, data)),
+                Err(refusal) => return refusal.at_item(index).into_response(),
+            }
+        }
         match handler.service.bulk_update(items).await {
             Ok(entities) => {
                 let items: Vec<serde_json::Value> = entities
@@ -1884,8 +2043,9 @@ where
                     .collect();
                 let total = items.len();
                 (StatusCode::OK, Json(ApiResponse::ok(BulkResponse { items, total, failed: 0, errors: vec![] })))
+                    .into_response()
             }
-            Err(e) => write_error(S::violations_of(&e), &e, StatusCode::BAD_REQUEST),
+            Err(e) => Self::failure::<()>(&e, StatusCode::BAD_REQUEST).into_response(),
         }
     }
 
@@ -1898,6 +2058,9 @@ where
         let items = req.into_items();
         if let Some(err) = batch_size_error(items.len()) {
             return (StatusCode::BAD_REQUEST, Json(ApiResponse::<BulkResponse<serde_json::Value>>::error(err)));
+        }
+        if let Some(refused) = invalid_ids::<BulkResponse<serde_json::Value>>(items.iter().map(|(id, _)| id.as_str()), |i| format!("{i}/id")) {
+            return refused;
         }
         // Normalize patch keys to snake_case (mirrors partial_update_handler).
         let items: Vec<(String, HashMap<String, serde_json::Value>)> = items
@@ -1919,7 +2082,7 @@ where
                 let total = items.len();
                 (StatusCode::OK, Json(ApiResponse::ok(BulkResponse { items, total, failed: 0, errors: vec![] })))
             }
-            Err(e) => write_error(S::violations_of(&e), &e, StatusCode::BAD_REQUEST),
+            Err(e) => Self::failure(&e, StatusCode::BAD_REQUEST),
         }
     }
 
@@ -1937,6 +2100,9 @@ where
         let items = req.into_items();
         if let Some(err) = batch_size_error(items.len()) {
             return (StatusCode::BAD_REQUEST, Json(ApiResponse::<BulkPreview>::error(err)));
+        }
+        if let Some(refused) = invalid_ids::<BulkPreview>(items.iter().map(|(id, _)| id.as_str()), |i| format!("{i}/id")) {
+            return refused;
         }
         let items: Vec<(String, HashMap<String, serde_json::Value>)> = items
             .into_iter()
@@ -1978,23 +2144,31 @@ where
                 StatusCode::NOT_IMPLEMENTED,
                 Json(ApiResponse::error("this resource has no preview of a bulk change".to_string())),
             ),
-            Err(e) => write_error(S::violations_of(&e), &e, StatusCode::BAD_REQUEST),
+            Err(e) => Self::failure(&e, StatusCode::BAD_REQUEST),
         }
     }
 
     async fn upsert_handler(
         handler: Arc<Self>,
-        JsonOrForm(dto): JsonOrForm<C>,
+        StrictJsonOrForm(dto): StrictJsonOrForm<C>,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
 
+        // A create body names no record to match, so a service without a real upsert could
+        // only create — a duplicate on every retry. Say so instead.
+        if !S::supports_upsert() {
+            return (
+                StatusCode::NOT_IMPLEMENTED,
+                Json(ApiResponse::<serde_json::Value>::error(crate::service::UPSERT_UNSUPPORTED)),
+            );
+        }
         match handler.service.upsert(dto).await {
             Ok(entity) => {
                 let response = secure::<E>(to_response_value(R::from(entity)), None);
                 (StatusCode::OK, Json(ApiResponse::ok(response)))
             }
             Err(e) => {
-                write_error(S::violations_of(&e), &e, StatusCode::BAD_REQUEST)
+                Self::failure(&e, StatusCode::BAD_REQUEST)
             }
         }
     }
@@ -2020,7 +2194,8 @@ where
         let includes = include_relations(&params.filters);
         let scope = access.map(|axum::Extension(s)| s);
 
-        match handler.service.list_deleted(params.page, params.limit).await {
+        let filters = repository_filters(&params);
+        match handler.service.list_deleted_filtered(params.page, params.limit, filters).await {
             Ok((entities, total)) => {
                 // Mirror `list_handler`: field-security ceiling, then batched
                 // relation expansion (`?include=`), then sparse projection — so the
@@ -2037,16 +2212,7 @@ where
                 let response = PaginatedApiResponse::ok(items, total, params.page, params.limit);
                 (StatusCode::OK, Json(response))
             }
-            Err(e) => {
-                let msg = e.to_string();
-                if is_bad_query_error(&msg) {
-                    (StatusCode::BAD_REQUEST, Json(PaginatedApiResponse::<serde_json::Value>::error(
-                        format!("Invalid query parameter or filter: {msg}"),
-                    )))
-                } else {
-                    (StatusCode::INTERNAL_SERVER_ERROR, Json(PaginatedApiResponse::<serde_json::Value>::error(msg)))
-                }
-            }
+            Err(e) => Self::list_failure(&e),
         }
     }
 
@@ -2055,6 +2221,10 @@ where
         axum::extract::Path(id): axum::extract::Path<String>,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
+
+        if let Some(refused) = invalid_id::<serde_json::Value>(&id, "id") {
+            return refused;
+        }
 
         match handler.service.restore(&id).await {
             Ok(Some(entity)) => {
@@ -2065,7 +2235,7 @@ where
                 (StatusCode::NOT_FOUND, Json(ApiResponse::<serde_json::Value>::not_found(S::entity_name(), &id)))
             }
             Err(e) => {
-                write_error(S::violations_of(&e), &e, StatusCode::BAD_REQUEST)
+                Self::failure(&e, StatusCode::BAD_REQUEST)
             }
         }
     }
@@ -2083,7 +2253,7 @@ where
                 )))
             }
             Err(e) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<serde_json::Value>::error(e.to_string())))
+                Self::failure(&e, StatusCode::INTERNAL_SERVER_ERROR)
             }
         }
     }
@@ -2096,6 +2266,10 @@ where
         access: Option<axum::Extension<AccessScope>>,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
+
+        if let Some(refused) = invalid_id::<serde_json::Value>(&id, "id") {
+            return refused;
+        }
 
         let fields = sparse_fields(&params.filters);
         let scope = access.map(|axum::Extension(s)| s);
@@ -2110,7 +2284,7 @@ where
                 (StatusCode::NOT_FOUND, Json(ApiResponse::<serde_json::Value>::not_found(&format!("Deleted {}", S::entity_name()), &id)))
             }
             Err(e) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<serde_json::Value>::error(e.to_string())))
+                Self::failure(&e, StatusCode::INTERNAL_SERVER_ERROR)
             }
         }
     }
@@ -2121,6 +2295,10 @@ where
         axum::extract::Path(id): axum::extract::Path<String>,
     ) -> axum::response::Response {
         use axum::{http::StatusCode, Json, response::IntoResponse};
+
+        if let Some(refused) = invalid_id::<R>(&id, "id") {
+            return refused.into_response();
+        }
 
         // First check if the entity exists in trash
         match handler.service.get_deleted_by_id(&id).await {
@@ -2137,7 +2315,7 @@ where
                         ))).into_response()
                     }
                     Err(e) => {
-                        write_error::<R>(S::violations_of(&e), &e, StatusCode::INTERNAL_SERVER_ERROR).into_response()
+                        Self::failure::<R>(&e, StatusCode::INTERNAL_SERVER_ERROR).into_response()
                     }
                 }
             }
@@ -2147,7 +2325,7 @@ where
                 ))).into_response()
             }
             Err(e) => {
-                write_error::<R>(S::violations_of(&e), &e, StatusCode::INTERNAL_SERVER_ERROR).into_response()
+                Self::failure::<R>(&e, StatusCode::INTERNAL_SERVER_ERROR).into_response()
             }
         }
     }
@@ -2175,13 +2353,11 @@ where
             Err(e) => {
                 // Now that the filters are read, a malformed one is the
                 // caller's fault — the same classification the list path uses.
-                let msg = e.to_string();
-                let code = if is_bad_query_error(&msg) {
-                    StatusCode::BAD_REQUEST
+                if is_bad_query_error(&e.to_string()) {
+                    (StatusCode::BAD_REQUEST, Json(ApiResponse::<serde_json::Value>::error(e.to_string())))
                 } else {
-                    StatusCode::INTERNAL_SERVER_ERROR
-                };
-                (code, Json(ApiResponse::<serde_json::Value>::error(msg)))
+                    Self::failure(&e, StatusCode::INTERNAL_SERVER_ERROR)
+                }
             }
         }
     }
@@ -2249,13 +2425,11 @@ where
                 (StatusCode::OK, Json(ApiResponse::ok(body)))
             }
             Err(e) => {
-                let msg = e.to_string();
-                let code = if is_bad_query_error(&msg) {
-                    StatusCode::BAD_REQUEST
+                if is_bad_query_error(&e.to_string()) {
+                    (StatusCode::BAD_REQUEST, Json(ApiResponse::<serde_json::Value>::error(e.to_string())))
                 } else {
-                    StatusCode::INTERNAL_SERVER_ERROR
-                };
-                (code, Json(ApiResponse::<serde_json::Value>::error(msg)))
+                    Self::failure(&e, StatusCode::INTERNAL_SERVER_ERROR)
+                }
             }
         }
     }
@@ -2277,6 +2451,10 @@ where
         provider: Option<axum::Extension<std::sync::Arc<dyn HistoryProvider>>>,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
+
+        if let Some(refused) = invalid_id::<serde_json::Value>(&id, "id") {
+            return refused;
+        }
 
         let Some(axum::Extension(provider)) = provider else {
             return (
@@ -2319,10 +2497,7 @@ where
                     "entries": serde_json::Value::Null,
                 }))),
             ),
-            Err(e) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse::<serde_json::Value>::error(e)),
-            ),
+            Err(e) => error_at(StatusCode::INTERNAL_SERVER_ERROR, None, &e),
         }
     }
 
@@ -2337,7 +2512,7 @@ where
                 (StatusCode::OK, Json(ApiResponse::ok(serde_json::json!({ "count": count }))))
             }
             Err(e) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<serde_json::Value>::error(e.to_string())))
+                Self::failure(&e, StatusCode::INTERNAL_SERVER_ERROR)
             }
         }
     }

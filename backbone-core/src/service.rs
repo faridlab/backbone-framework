@@ -485,12 +485,56 @@ where
             .map_err(ServiceError::Repository)
     }
 
+    /// Permanently delete everything in the trash (atomic).
+    ///
+    /// The trashed rows are loaded first, at most [`MAX_BATCH_SIZE`] of them (a larger trash is
+    /// refused: empty it in batches by id), and the write guard and lifecycle are asked about
+    /// each one as a single permanent delete would. The delete then names exactly those ids and
+    /// rolls back unless every one is still in the trash, so a row trashed after the check is
+    /// never deleted unchecked.
     pub async fn empty_trash(&self) -> ServiceResult<u64> {
         self.lifecycle.before_empty_trash().await?;
-        self.repository
-            .empty_trash()
+        let trashed = self.whole_trash("emptied").await?;
+        if trashed.is_empty() {
+            return Ok(0);
+        }
+        for entity in &trashed {
+            self.consult(crate::write_guard::WriteKind::HardDelete, Some(entity), None).await?;
+            self.lifecycle.before_hard_delete(entity).await?;
+        }
+        let ids: Vec<String> = trashed.iter().map(|e| e.entity_id()).collect();
+        let affected = self
+            .repository
+            .bulk_hard_delete(&ids)
             .await
-            .map_err(ServiceError::Repository)
+            .map_err(ServiceError::Repository)?;
+        for id in &ids {
+            let meta = EventMetadata::new(id, std::any::type_name::<E>());
+            let _ = self
+                .event_publisher
+                .publish(CrudEvent::HardDeleted {
+                    entity_id: id.to_string(),
+                    metadata: meta,
+                })
+                .await;
+        }
+        Ok(affected)
+    }
+
+    /// Every row in the trash, refused when there are more than one batch may hold.
+    async fn whole_trash(&self, verb: &str) -> ServiceResult<Vec<E>> {
+        let (rows, total) = self
+            .repository
+            .list_deleted(1, MAX_BATCH_SIZE as u32)
+            .await
+            .map_err(ServiceError::Repository)?;
+        if total > MAX_BATCH_SIZE as u64 || rows.len() > MAX_BATCH_SIZE {
+            return Err(ServiceError::Validation(format!(
+                "The trash holds {total} items, more than the {MAX_BATCH_SIZE} that can be {verb} \
+                 at once. Select the items to act on instead."
+            )));
+        }
+        Ok(rows)
     }
 
     pub async fn count(&self) -> ServiceResult<u64> {
@@ -533,19 +577,29 @@ where
             .map_err(ServiceError::Repository)
     }
 
-    /// List deleted entities with filter support (filters currently ignored, delegates to list_deleted).
+    /// List deleted entities with the same filters and search the active list takes.
     pub async fn list_deleted_filtered(
         &self,
         page: u32,
         limit: u32,
-        _filters: HashMap<String, String>,
+        filters: HashMap<String, String>,
     ) -> ServiceResult<(Vec<E>, u64)> {
-        self.list_deleted(page, limit).await
+        self.repository
+            .list_deleted_filtered(page, limit, filters)
+            .await
+            .map_err(ServiceError::Repository)
     }
 
-    /// Upsert: create the entity if it doesn't exist (no ID-based lookup — always creates).
+    /// Upsert is not available on the generic service, and refuses rather than guessing.
+    ///
+    /// An upsert must match the record it would update, by id or by a natural key. A create
+    /// DTO carries no id and the framework knows no natural key for an entity, so the only thing
+    /// this could do is create — which is what it used to do, silently duplicating the record on
+    /// every retry. The generic HTTP route answers 501 for the same reason. An entity with a real
+    /// upsert implements it in its own service.
     pub async fn upsert(&self, dto: C) -> ServiceResult<E> {
-        self.create(dto).await
+        let _ = dto;
+        Err(ServiceError::Validation(UPSERT_UNSUPPORTED.to_string()))
     }
 
     /// Apply a partial update from a JSON map of field values.
@@ -592,16 +646,41 @@ where
         Ok(Some(saved))
     }
 
+    /// Create many entities, all or nothing.
+    ///
+    /// Each item goes through what a single create does — the DTO conversion, the write guard,
+    /// the `before_create` hook — before anything is written; then the repository inserts them
+    /// in one transaction. A failure anywhere fails the whole batch and names the item: a
+    /// violation's path starts with the item's index (`3/name`).
     pub async fn bulk_create(&self, dtos: Vec<C>) -> ServiceResult<Vec<E>>
     where
         E: FromCreateDto<C>,
     {
-        let mut results = Vec::with_capacity(dtos.len());
-        for dto in dtos {
-            let entity = self.create(dto).await?;
-            results.push(entity);
+        check_batch_size(dtos.len())?;
+        let mut prepared = Vec::with_capacity(dtos.len());
+        for (index, dto) in dtos.into_iter().enumerate() {
+            let at = |e: ServiceError| at_batch_index(e, index);
+            let mut entity = E::from_create_dto(dto).map_err(at)?;
+            self.consult(crate::write_guard::WriteKind::Create, None, Some(&entity))
+                .await
+                .map_err(at)?;
+            self.lifecycle.before_create(&mut entity).await.map_err(at)?;
+            prepared.push(entity);
         }
-        Ok(results)
+        let saved = self
+            .repository
+            .bulk_create(prepared)
+            .await
+            .map_err(ServiceError::Repository)?;
+        for entity in &saved {
+            self.lifecycle.after_create(entity).await?;
+            let meta = EventMetadata::new(entity.entity_id(), std::any::type_name::<E>());
+            let _ = self
+                .event_publisher
+                .publish(CrudEvent::Created { entity: entity.clone(), metadata: meta })
+                .await;
+        }
+        Ok(saved)
     }
 
     // ── Atomic batch operations ───────────────────────────────────────────────
@@ -680,11 +759,24 @@ where
 
     /// Restore every soft-deleted entity (atomic). Returns the number restored.
     /// Emits a `Restored` event per entity, mirroring [`bulk_restore`](Self::bulk_restore).
+    ///
+    /// Like [`empty_trash`](Self::empty_trash), the trashed rows are loaded first (at most
+    /// [`MAX_BATCH_SIZE`]), each is put to the write guard and lifecycle as a single restore
+    /// would be, and the restore names exactly those ids, all or nothing.
     pub async fn restore_all(&self) -> ServiceResult<u64> {
         self.lifecycle.before_restore_all().await?;
+        let trashed = self.whole_trash("restored").await?;
+        if trashed.is_empty() {
+            return Ok(0);
+        }
+        for entity in &trashed {
+            self.consult(crate::write_guard::WriteKind::Restore, Some(entity), None).await?;
+            self.lifecycle.before_restore(entity).await?;
+        }
+        let ids: Vec<String> = trashed.iter().map(|e| e.entity_id()).collect();
         let restored = self
             .repository
-            .restore_all()
+            .bulk_restore(&ids)
             .await
             .map_err(ServiceError::Repository)?;
         for entity in &restored {
@@ -753,12 +845,14 @@ where
             refuse_protected_changes::<E>(&as_object(&before)?, &as_object(&updated)?)?;
             self.consult(crate::write_guard::WriteKind::Update, Some(&before), Some(&updated)).await?;
             self.lifecycle.before_update(&mut updated).await?;
+            prepared.push((before.clone(), updated));
             befores.push(before);
-            prepared.push(updated);
         }
+        // Only the fields each item changed are written, as a single PUT does, so a column a
+        // concurrent verb moved is not written back with the value read before it.
         let saved = self
             .repository
-            .bulk_update(prepared)
+            .bulk_update_changed(prepared)
             .await
             .map_err(ServiceError::Repository)?;
         self.publish_bulk_updates(befores, &saved).await?;
@@ -812,12 +906,12 @@ where
             let mut patched = merge_patch(&before, fields)?;
             self.consult(crate::write_guard::WriteKind::Update, Some(&before), Some(&patched)).await?;
             self.lifecycle.before_update(&mut patched).await?;
+            prepared.push((before.clone(), patched));
             befores.push(before);
-            prepared.push(patched);
         }
         let saved = self
             .repository
-            .bulk_update(prepared)
+            .bulk_update_changed(prepared)
             .await
             .map_err(ServiceError::Repository)?;
         self.publish_bulk_updates(befores, &saved).await?;
@@ -986,6 +1080,33 @@ fn check_batch_size(count: usize) -> Result<(), ServiceError> {
     Ok(())
 }
 
+/// The refusal [`GenericCrudService::upsert`] answers with.
+pub const UPSERT_UNSUPPORTED: &str =
+    "upsert is not available for this resource: a create body names no record to match. \
+     Create the record, or update it by id.";
+
+/// Place a service error on item `index` of a batch (see
+/// [`RepositoryError::at_batch_index`]).
+fn at_batch_index(err: ServiceError, index: usize) -> ServiceError {
+    let item = |message: String| format!("item {index}: {message}");
+    match err {
+        ServiceError::Violations(violations) => ServiceError::Violations(
+            violations
+                .into_iter()
+                .map(|mut v| {
+                    v.path = crate::violation::batch_item_path(index, &v.path);
+                    v
+                })
+                .collect(),
+        ),
+        ServiceError::Repository(e) => ServiceError::Repository(e.at_batch_index(index)),
+        ServiceError::Validation(m) => ServiceError::Validation(item(m)),
+        ServiceError::AlreadyExists(m) => ServiceError::AlreadyExists(item(m)),
+        ServiceError::Internal(m) => ServiceError::Internal(item(m)),
+        ServiceError::NotFound => ServiceError::Validation(item("not found".to_string())),
+    }
+}
+
 /// Drop duplicate ids while preserving first-seen order. Id-list batch ops issue
 /// a SQL `IN (...)` whose distinct-row count would never match a list that
 /// repeats an id, so a stray duplicate would otherwise fail the whole batch.
@@ -1039,6 +1160,14 @@ where
             ServiceError::Violations(v) | ServiceError::Repository(RepositoryError::Violations(v)) => Some(v.clone()),
             _ => None,
         }
+    }
+
+    fn status_of(err: &ServiceError) -> Option<axum::http::StatusCode> {
+        Some(crate::http::service_error_status(err))
+    }
+
+    fn supports_upsert() -> bool {
+        false
     }
 
     fn entity_name() -> &'static str {
@@ -1257,13 +1386,27 @@ mod tests {
         }
     }
 
+    #[derive(Deserialize)]
     struct CreateWidgetDto {
         name: String,
     }
 
+    #[derive(Deserialize)]
     struct UpdateWidgetDto {
         name: String,
     }
+
+    impl backbone_orm::EntityRepoMeta for Widget {
+        fn column_types() -> HashMap<String, String> {
+            HashMap::new()
+        }
+        fn search_fields() -> &'static [&'static str] {
+            &["name"]
+        }
+    }
+
+    /// A row id whose lookup fails the way a broken database does.
+    const BROKEN_ID: &str = "00000000-0000-0000-0000-00000000dead";
 
     impl FromCreateDto<CreateWidgetDto> for Widget {
         fn from_create_dto(dto: CreateWidgetDto) -> ServiceResult<Self> {
@@ -1297,6 +1440,8 @@ mod tests {
         full_writes: std::sync::atomic::AtomicUsize,
         /// Make the next changed-columns write find the row gone (a concurrent delete).
         vanish_on_write: std::sync::atomic::AtomicBool,
+        /// Every `bulk_create` call.
+        bulk_creates: std::sync::atomic::AtomicUsize,
     }
 
     impl InMemoryWidgetRepo {
@@ -1306,6 +1451,7 @@ mod tests {
                 changed_writes: std::sync::Mutex::new(Vec::new()),
                 full_writes: std::sync::atomic::AtomicUsize::new(0),
                 vanish_on_write: std::sync::atomic::AtomicBool::new(false),
+                bulk_creates: std::sync::atomic::AtomicUsize::new(0),
             }
         }
     }
@@ -1318,6 +1464,11 @@ mod tests {
         }
 
         async fn find_by_id(&self, id: &str) -> Result<Option<Widget>, RepositoryError> {
+            if id == BROKEN_ID {
+                return Err(RepositoryError::DatabaseError(
+                    "relation \"secret_schema.widgets\" is broken".into(),
+                ));
+            }
             Ok(self
                 .data
                 .lock()
@@ -1350,6 +1501,11 @@ mod tests {
                 .load(std::sync::atomic::Ordering::SeqCst)
             {
                 return Ok(None);
+            }
+            if after.name == "taken" {
+                return Err(RepositoryError::AlreadyExists(
+                    "duplicate key value violates unique constraint \"widgets_name_key\"".into(),
+                ));
             }
             let mut data = self.data.lock().await;
             data.retain(|w| w.id != after.id);
@@ -1424,7 +1580,24 @@ mod tests {
             Ok(data.iter().filter(|w| w.deleted_at.is_some()).count() as u64)
         }
 
+        async fn list_deleted_filtered(
+            &self,
+            page: u32,
+            limit: u32,
+            filters: HashMap<String, String>,
+        ) -> Result<(Vec<Widget>, u64), RepositoryError> {
+            let (rows, _) = self.list_deleted(page, limit).await?;
+            let rows: Vec<Widget> = rows
+                .into_iter()
+                .filter(|w| filters.get("name").is_none_or(|n| *n == w.name))
+                .collect();
+            let total = rows.len() as u64;
+            Ok((rows, total))
+        }
+
         async fn bulk_create(&self, entities: Vec<Widget>) -> Result<Vec<Widget>, RepositoryError> {
+            self.bulk_creates
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let mut data = self.data.lock().await;
             data.extend(entities.clone());
             Ok(entities)
@@ -2127,5 +2300,267 @@ mod tests {
         // A constraint the database refused with reaches the HTTP layer as the same 422.
         let db = ServiceError::Repository(RepositoryError::Violations(v.clone()));
         assert_eq!(<S as CrudService<Widget, CreateWidgetDto, UpdateWidgetDto>>::violations_of(&db), Some(v));
+    }
+
+    // ── Trash-wide writes ask the guard about every row ───────────────────
+
+    /// Trash two widgets, one renamed behind the service's back to a name the guard refuses.
+    async fn trash_with_a_refused_row(
+        service: &GenericCrudService<Widget, CreateWidgetDto, UpdateWidgetDto, InMemoryWidgetRepo>,
+    ) -> (String, String) {
+        let a = service.create(CreateWidgetDto { name: "a".into() }).await.unwrap().id;
+        let b = service.create(CreateWidgetDto { name: "b".into() }).await.unwrap().id;
+        service.bulk_soft_delete(vec![a.clone(), b.clone()]).await.unwrap();
+        let mut data = service.repository().data.lock().await;
+        data.iter_mut().find(|w| w.id == b).unwrap().name = "forbidden".into();
+        (a, b)
+    }
+
+    #[tokio::test]
+    async fn restore_all_asks_the_guard_about_every_row_and_restores_none_when_one_is_refused() {
+        let guard = Arc::new(NameGuard::default());
+        let service = guarded(guard.clone());
+        trash_with_a_refused_row(&service).await;
+
+        let err = service.restore_all().await.unwrap_err();
+        assert!(matches!(&err, ServiceError::Violations(v) if v[0].code == "name_forbidden"), "{err:?}");
+        assert_eq!(service.count_deleted().await.unwrap(), 2, "nothing restored");
+        assert!(guard.seen.lock().unwrap().contains(&crate::write_guard::WriteKind::Restore));
+    }
+
+    #[tokio::test]
+    async fn empty_trash_asks_the_guard_about_every_row_and_deletes_none_when_one_is_refused() {
+        let guard = Arc::new(NameGuard::default());
+        let service = guarded(guard.clone());
+        trash_with_a_refused_row(&service).await;
+
+        let err = service.empty_trash().await.unwrap_err();
+        assert!(matches!(&err, ServiceError::Violations(v) if v[0].code == "name_forbidden"), "{err:?}");
+        assert_eq!(service.count_deleted().await.unwrap(), 2, "nothing deleted");
+        assert!(guard.seen.lock().unwrap().contains(&crate::write_guard::WriteKind::HardDelete));
+
+        // Without the refused row the trash empties.
+        let service = svc();
+        let a = service.create(CreateWidgetDto { name: "a".into() }).await.unwrap().id;
+        service.soft_delete(&a).await.unwrap();
+        assert_eq!(service.empty_trash().await.unwrap(), 1);
+        assert_eq!(service.count_deleted().await.unwrap(), 0);
+    }
+
+    // ── Upsert refuses instead of duplicating ──────────────────────────────
+
+    #[tokio::test]
+    async fn upsert_refuses_rather_than_creating_a_duplicate() {
+        use crate::http::CrudService;
+        type S = GenericCrudService<Widget, CreateWidgetDto, UpdateWidgetDto, InMemoryWidgetRepo>;
+        let service = svc();
+        assert!(service.upsert(CreateWidgetDto { name: "a".into() }).await.is_err());
+        assert!(service.upsert(CreateWidgetDto { name: "a".into() }).await.is_err());
+        assert_eq!(service.count().await.unwrap(), 0, "nothing created");
+        assert!(!<S as CrudService<Widget, CreateWidgetDto, UpdateWidgetDto>>::supports_upsert());
+    }
+
+    // ── Bulk create: capped, one repository call, the failed item named ───
+
+    #[tokio::test]
+    async fn bulk_create_is_one_repository_write_and_names_the_refused_item() {
+        let service = guarded(Arc::new(NameGuard::default()));
+        let names = ["a", "forbidden", "c"];
+        let err = service
+            .bulk_create(names.iter().map(|n| CreateWidgetDto { name: n.to_string() }).collect())
+            .await
+            .unwrap_err();
+        let ServiceError::Violations(v) = &err else { panic!("expected violations, got {err:?}") };
+        assert_eq!((v[0].path.as_str(), v[0].code.as_str()), ("1/name", "name_forbidden"));
+        assert_eq!(service.count().await.unwrap(), 0, "nothing created");
+
+        let created = service
+            .bulk_create(vec![CreateWidgetDto { name: "a".into() }, CreateWidgetDto { name: "b".into() }])
+            .await
+            .unwrap();
+        assert_eq!(created.len(), 2);
+        assert_eq!(
+            service.repository().bulk_creates.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the batch is written by one all-or-nothing repository call"
+        );
+    }
+
+    #[tokio::test]
+    async fn bulk_create_refuses_an_oversized_batch() {
+        let service = svc();
+        let dtos = (0..=MAX_BATCH_SIZE).map(|n| CreateWidgetDto { name: format!("w{n}") }).collect();
+        assert!(matches!(service.bulk_create(dtos).await, Err(ServiceError::Validation(_))));
+        assert_eq!(service.count().await.unwrap(), 0);
+    }
+
+    // ── Bulk updates write only the changed columns ────────────────────────
+
+    #[tokio::test]
+    async fn bulk_updates_write_through_the_changed_columns_path() {
+        let service = svc();
+        let a = service.create(CreateWidgetDto { name: "a".into() }).await.unwrap().id;
+        let b = service.create(CreateWidgetDto { name: "b".into() }).await.unwrap().id;
+        service
+            .bulk_update(vec![
+                (a.clone(), UpdateWidgetDto { name: "a2".into() }),
+                (b.clone(), UpdateWidgetDto { name: "b2".into() }),
+            ])
+            .await
+            .unwrap();
+        service
+            .bulk_partial_update(vec![(a.clone(), patch(&[("name", serde_json::json!("a3"))]))])
+            .await
+            .unwrap();
+        let repo = service.repository();
+        assert_eq!(repo.changed_writes.lock().unwrap().len(), 3);
+        assert_eq!(repo.full_writes.load(std::sync::atomic::Ordering::SeqCst), 0, "no full-row write");
+        assert_eq!(service.get_by_id(&a).await.unwrap().unwrap().name, "a3");
+    }
+
+    // ── The trash list takes the list's filters ────────────────────────────
+
+    #[tokio::test]
+    async fn the_trash_list_applies_filters() {
+        let service = svc();
+        let a = service.create(CreateWidgetDto { name: "a".into() }).await.unwrap().id;
+        let b = service.create(CreateWidgetDto { name: "b".into() }).await.unwrap().id;
+        service.bulk_soft_delete(vec![a, b]).await.unwrap();
+        let filters = HashMap::from([("name".to_string(), "b".to_string())]);
+        let (rows, total) = service.list_deleted_filtered(1, 20, filters).await.unwrap();
+        assert_eq!((rows.len(), total), (1, 1));
+        assert_eq!(rows[0].name, "b");
+    }
+
+    // ── The generic HTTP surface ───────────────────────────────────────────
+
+    mod http_surface {
+        use super::*;
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        type Svc = GenericCrudService<Widget, CreateWidgetDto, UpdateWidgetDto, InMemoryWidgetRepo>;
+
+        fn app() -> (axum::Router, Arc<Svc>) {
+            let service = Arc::new(svc());
+            let router = crate::http::BackboneCrudHandler::<Svc, Widget, CreateWidgetDto, UpdateWidgetDto, Widget>::routes(
+                service.clone(),
+                "/widgets",
+            );
+            (router, service)
+        }
+
+        async fn call(app: &axum::Router, method: &str, uri: &str, body: Option<&str>) -> (StatusCode, serde_json::Value) {
+            let mut req = Request::builder().method(method).uri(uri);
+            if body.is_some() {
+                req = req.header("content-type", "application/json");
+            }
+            let req = req.body(Body::from(body.unwrap_or("").to_string())).unwrap();
+            let res = app.clone().oneshot(req).await.unwrap();
+            let status = res.status();
+            let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+            let json = if bytes.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::from_slice(&bytes).unwrap_or_else(|_| {
+                    panic!("not a JSON body: {}", String::from_utf8_lossy(&bytes))
+                })
+            };
+            (status, json)
+        }
+
+        #[tokio::test]
+        async fn a_malformed_path_id_is_a_400_naming_the_id() {
+            let (app, _) = app();
+            for (method, uri) in [("GET", "/widgets/not-a-uuid"), ("DELETE", "/widgets/not-a-uuid")] {
+                let (status, body) = call(&app, method, uri, None).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{method} {uri}");
+                assert_eq!(body["violations"][0]["code"], "invalid_id");
+                assert_eq!(body["violations"][0]["path"], "id");
+            }
+        }
+
+        #[tokio::test]
+        async fn a_server_fault_answers_generically_and_keeps_the_detail_out() {
+            let (app, _) = app();
+            let (status, body) = call(&app, "GET", &format!("/widgets/{BROKEN_ID}"), None).await;
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(body["error"], crate::http::INTERNAL_ERROR_MESSAGE);
+            assert!(!body.to_string().contains("secret_schema"), "{body}");
+        }
+
+        #[tokio::test]
+        async fn a_duplicate_on_put_and_patch_is_a_409_like_on_create() {
+            let (app, service) = app();
+            let w = service.create(CreateWidgetDto { name: "a".into() }).await.unwrap();
+            let uri = format!("/widgets/{}", w.id);
+            let (status, _) = call(&app, "PUT", &uri, Some(r#"{"name":"taken"}"#)).await;
+            assert_eq!(status, StatusCode::CONFLICT);
+            let (status, _) = call(&app, "PATCH", &uri, Some(r#"{"name":"taken"}"#)).await;
+            assert_eq!(status, StatusCode::CONFLICT);
+        }
+
+        #[tokio::test]
+        async fn an_unknown_key_is_refused_on_create_put_and_bulk() {
+            let (app, service) = app();
+            let (status, body) = call(&app, "POST", "/widgets", Some(r#"{"name":"a","colour":"red"}"#)).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+            assert_eq!(body["violations"][0]["code"], "unknown_field");
+            assert_eq!(body["violations"][0]["path"], "colour");
+            assert_eq!(service.count().await.unwrap(), 0, "nothing created");
+
+            // What the record's own response carries is tolerated.
+            let (status, _) = call(&app, "POST", "/widgets", Some(r#"{"name":"a","id":"x","metadata":{}}"#)).await;
+            assert_eq!(status, StatusCode::CREATED);
+
+            let w = service.list(1, 1, HashMap::new()).await.unwrap().0.remove(0);
+            let (status, body) = call(&app, "PUT", &format!("/widgets/{}", w.id), Some(r#"{"name":"b","colour":"red"}"#)).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(body["violations"][0]["path"], "colour");
+
+            let (status, body) = call(&app, "POST", "/widgets/bulk", Some(r#"[{"name":"x"},{"name":"y","colour":"red"}]"#)).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(body["violations"][0]["path"], "1/colour");
+
+            let bulk = format!(r#"[{{"id":"{}","name":"z","colour":"red"}}]"#, w.id);
+            let (status, body) = call(&app, "PUT", "/widgets/bulk", Some(&bulk)).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+            assert_eq!(body["violations"][0]["path"], "0/colour");
+            assert_eq!(service.get_by_id(&w.id).await.unwrap().unwrap().name, "a", "nothing written");
+        }
+
+        #[tokio::test]
+        async fn a_body_that_cannot_be_read_answers_in_the_json_envelope() {
+            let (app, _) = app();
+            let (status, body) = call(&app, "POST", "/widgets", Some(r#"{"name": "#)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(body["success"], false);
+            assert_eq!(body["violations"][0]["code"], "malformed_body");
+
+            let (status, body) = call(&app, "POST", "/widgets", Some(r#"{"name": 5}"#)).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(body["violations"][0]["path"], "name");
+        }
+
+        #[tokio::test]
+        async fn the_generic_upsert_route_answers_501() {
+            let (app, service) = app();
+            let (status, _) = call(&app, "POST", "/widgets/upsert", Some(r#"{"name":"a"}"#)).await;
+            assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+            assert_eq!(service.count().await.unwrap(), 0);
+        }
+
+        #[tokio::test]
+        async fn the_trash_route_reads_the_filters() {
+            let (app, service) = app();
+            let a = service.create(CreateWidgetDto { name: "a".into() }).await.unwrap().id;
+            let b = service.create(CreateWidgetDto { name: "b".into() }).await.unwrap().id;
+            service.bulk_soft_delete(vec![a, b]).await.unwrap();
+            let (status, body) = call(&app, "GET", "/widgets/trash?name=b", None).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["data"].as_array().unwrap().len(), 1);
+            assert_eq!(body["data"][0]["name"], "b");
+        }
     }
 }

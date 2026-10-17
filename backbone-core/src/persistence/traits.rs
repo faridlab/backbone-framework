@@ -58,6 +58,44 @@ impl RepositoryError {
         };
         RepositoryError::DatabaseError(e.to_string())
     }
+
+    /// [`from_source`](Self::from_source) for a batch write: when the failure is a
+    /// [`backbone_orm::BatchItemError`], the error is placed on the item that failed (see
+    /// [`at_batch_index`](Self::at_batch_index)).
+    pub fn from_batch_source(e: impl Into<anyhow::Error>) -> Self {
+        let e: anyhow::Error = e.into();
+        match e.downcast::<backbone_orm::BatchItemError>() {
+            Ok(item) => Self::from_source(item.error).at_batch_index(item.index),
+            Err(e) => Self::from_source(e),
+        }
+    }
+
+    /// Place this error on item `index` of a batch: a violation's path gains the index as its
+    /// first segment (`3/name`, or `3` for a whole-record rule), and any other error's sentence
+    /// names the item.
+    pub fn at_batch_index(self, index: usize) -> Self {
+        let item = |message: String| format!("item {index}: {message}");
+        match self {
+            RepositoryError::Violations(violations) => RepositoryError::Violations(
+                violations
+                    .into_iter()
+                    .map(|mut v| {
+                        v.path = crate::violation::batch_item_path(index, &v.path);
+                        v
+                    })
+                    .collect(),
+            ),
+            RepositoryError::NotFound => RepositoryError::ValidationError(item(
+                "the record no longer exists or was deleted".to_string(),
+            )),
+            RepositoryError::AlreadyExists(m) => RepositoryError::AlreadyExists(item(m)),
+            RepositoryError::ValidationError(m) => RepositoryError::ValidationError(item(m)),
+            RepositoryError::DatabaseError(m) => RepositoryError::DatabaseError(item(m)),
+            RepositoryError::SerializationError(m) => RepositoryError::SerializationError(item(m)),
+            RepositoryError::Conflict(m) => RepositoryError::Conflict(item(m)),
+            RepositoryError::InternalError(m) => RepositoryError::InternalError(item(m)),
+        }
+    }
 }
 
 impl From<serde_json::Error> for RepositoryError {
@@ -616,6 +654,21 @@ where
     /// List soft-deleted entities with pagination
     async fn list_deleted(&self, page: u32, limit: u32) -> Result<(Vec<E>, u64), RepositoryError>;
 
+    /// List soft-deleted entities with pagination, filters and search — the trash twin of
+    /// [`list_filtered`](Self::list_filtered).
+    ///
+    /// Default implementation ignores filters and delegates to `list_deleted()`. The generated
+    /// repositories override it with the same filter pushdown the active list uses.
+    async fn list_deleted_filtered(
+        &self,
+        page: u32,
+        limit: u32,
+        filters: HashMap<String, String>,
+    ) -> Result<(Vec<E>, u64), RepositoryError> {
+        let _ = filters;
+        self.list_deleted(page, limit).await
+    }
+
     /// Count all entities (excluding soft-deleted)
     async fn count(&self) -> Result<u64, RepositoryError>;
 
@@ -767,6 +820,25 @@ where
         let mut out = Vec::with_capacity(entities.len());
         for entity in entities {
             out.push(self.update(entity).await?);
+        }
+        Ok(out)
+    }
+
+    /// Update many entities from `(before, after)` pairs, writing for each only the fields that
+    /// changed — the batch twin of [`update_changed`](Self::update_changed), and the path the
+    /// generic bulk PUT and bulk PATCH take. A row missing or deleted since it was read fails
+    /// the batch, with the error placed on that item.
+    ///
+    /// The generated Postgres repositories override this with one transaction. The default
+    /// loops over `update_changed` and is not transactional.
+    async fn bulk_update_changed(&self, pairs: Vec<(E, E)>) -> Result<Vec<E>, RepositoryError> {
+        let mut out = Vec::with_capacity(pairs.len());
+        for (index, (before, after)) in pairs.into_iter().enumerate() {
+            match self.update_changed(&before, after).await {
+                Ok(Some(saved)) => out.push(saved),
+                Ok(None) => return Err(RepositoryError::NotFound.at_batch_index(index)),
+                Err(e) => return Err(e.at_batch_index(index)),
+            }
         }
         Ok(out)
     }

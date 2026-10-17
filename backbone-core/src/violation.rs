@@ -44,6 +44,16 @@ impl Violation {
     }
 }
 
+/// The path of a violation on item `index` of a batch: the index becomes the first segment, so
+/// `name` on the fourth item reads `3/name` and a whole-record rule reads `3`.
+pub fn batch_item_path(index: usize, path: &str) -> String {
+    if path.is_empty() {
+        index.to_string()
+    } else {
+        format!("{index}/{path}")
+    }
+}
+
 /// The rule code a database constraint stands for.
 ///
 /// Generated constraints are named `ck_<table>__<code>` (CHECK),

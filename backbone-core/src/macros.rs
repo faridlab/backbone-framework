@@ -48,9 +48,11 @@ pub fn log_include_hydration_failure(table: &str, error: &str) {
 /// | `hard_delete`                 | `permanent_delete(id)`              |
 /// | `list`                        | `list_paginated(pagination)`        |
 /// | `list_deleted`                | `list_deleted(pagination)`          |
+/// | `list_deleted_filtered`       | `list_deleted_filtered(pagination, filters)` |
 /// | `count`                       | `count_active()`                    |
 /// | `count_deleted`               | `count_deleted()`                   |
-/// | `bulk_create`                 | `create(&entity)` (loop)            |
+/// | `bulk_create`                 | `bulk_create(&entities)` (one transaction) |
+/// | `bulk_update_changed`         | `bulk_update_changed(&pairs)` (one transaction) |
 /// | `empty_trash`                 | `empty_trash()`                     |
 ///
 /// # Method mapping — `no_soft_delete` variant
@@ -252,6 +254,20 @@ macro_rules! impl_crud_repository {
                     .map_err(backbone_core::RepositoryError::from_source)
             }
 
+            async fn list_deleted_filtered(
+                &self,
+                page: u32,
+                limit: u32,
+                filters: std::collections::HashMap<String, String>,
+            ) -> Result<(Vec<$entity>, u64), backbone_core::RepositoryError> {
+                let pagination =
+                    backbone_orm::repository::PaginationParams { page, per_page: limit };
+                (&**self).list_deleted_filtered(pagination, Some(&filters))
+                    .await
+                    .map(|r| (r.data, r.pagination.total))
+                    .map_err(backbone_core::RepositoryError::from_source)
+            }
+
             async fn count(&self) -> Result<u64, backbone_core::RepositoryError> {
                 (&**self).count_active()
                     .await
@@ -268,15 +284,10 @@ macro_rules! impl_crud_repository {
                 &self,
                 entities: Vec<$entity>,
             ) -> Result<Vec<$entity>, backbone_core::RepositoryError> {
-                let mut results = Vec::with_capacity(entities.len());
-                for entity in entities {
-                    let created = (&**self)
-                        .create(&entity)
-                        .await
-                        .map_err(backbone_core::RepositoryError::from_source)?;
-                    results.push(created);
-                }
-                Ok(results)
+                // One transaction: every row or none, the failed row named by its index.
+                (&**self).bulk_create(&entities)
+                    .await
+                    .map_err(backbone_core::RepositoryError::from_batch_source)
             }
 
             async fn empty_trash(&self) -> Result<u64, backbone_core::RepositoryError> {
@@ -327,6 +338,15 @@ macro_rules! impl_crud_repository {
                 (&**self).bulk_update(&entities)
                     .await
                     .map_err(backbone_core::RepositoryError::from_source)
+            }
+
+            async fn bulk_update_changed(
+                &self,
+                pairs: Vec<($entity, $entity)>,
+            ) -> Result<Vec<$entity>, backbone_core::RepositoryError> {
+                (&**self).bulk_update_changed(&pairs)
+                    .await
+                    .map_err(backbone_core::RepositoryError::from_batch_source)
             }
         }
     };
@@ -507,6 +527,16 @@ macro_rules! impl_crud_repository {
                 Ok((vec![], 0))
             }
 
+            async fn list_deleted_filtered(
+                &self,
+                _page: u32,
+                _limit: u32,
+                _filters: std::collections::HashMap<String, String>,
+            ) -> Result<(Vec<$entity>, u64), backbone_core::RepositoryError> {
+                // No soft delete: trash is always empty
+                Ok((vec![], 0))
+            }
+
             async fn count(&self) -> Result<u64, backbone_core::RepositoryError> {
                 (&**self).count()
                     .await
@@ -521,15 +551,10 @@ macro_rules! impl_crud_repository {
                 &self,
                 entities: Vec<$entity>,
             ) -> Result<Vec<$entity>, backbone_core::RepositoryError> {
-                let mut results = Vec::with_capacity(entities.len());
-                for entity in entities {
-                    let created = (&**self)
-                        .create(&entity)
-                        .await
-                        .map_err(backbone_core::RepositoryError::from_source)?;
-                    results.push(created);
-                }
-                Ok(results)
+                // One transaction: every row or none, the failed row named by its index.
+                (&**self).bulk_create(&entities)
+                    .await
+                    .map_err(backbone_core::RepositoryError::from_batch_source)
             }
 
             async fn empty_trash(&self) -> Result<u64, backbone_core::RepositoryError> {
@@ -577,6 +602,15 @@ macro_rules! impl_crud_repository {
                 (&**self).bulk_update(&entities)
                     .await
                     .map_err(backbone_core::RepositoryError::from_source)
+            }
+
+            async fn bulk_update_changed(
+                &self,
+                pairs: Vec<($entity, $entity)>,
+            ) -> Result<Vec<$entity>, backbone_core::RepositoryError> {
+                (&**self).bulk_update_changed(&pairs)
+                    .await
+                    .map_err(backbone_core::RepositoryError::from_batch_source)
             }
         }
     };

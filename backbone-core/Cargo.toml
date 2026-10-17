@@ -41,6 +41,10 @@ prost-types = { version = "0.13", optional = true }
 
 # Web Framework (Axum for generic CRUD handlers)
 axum = { version = "0.7", features = ["macros"] }
+# Request bodies: the field a decode failed at, the keys a DTO would drop, and form decoding.
+serde_path_to_error = "0.1"
+serde_ignored = "0.1"
+serde_urlencoded = "0.7"
 tower = "0.4"
 tower-http = { version = "0.5", features = ["cors", "trace"] }
 
