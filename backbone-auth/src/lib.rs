@@ -34,6 +34,7 @@
 
 pub mod audit;
 pub mod auth_service;
+pub mod grants;
 pub mod jwt;
 pub mod password;
 pub mod permissions;
@@ -49,6 +50,8 @@ pub mod company;
 pub mod idempotency;
 #[cfg(feature = "axum")]
 pub mod org;
+#[cfg(feature = "axum")]
+pub mod resolver;
 
 // Re-export commonly used types
 pub use audit::AuditEvent;
@@ -61,6 +64,18 @@ pub use password::*;
 // resolves to exactly one type at this crate's root.
 pub use middleware::{AuthMiddleware, AuthExtractor, AuthContext};
 pub use token_generator::TokenGenerator;
+
+/// Permissions as data: canonical names, matching, the grants a person holds and where they are read
+/// from (`grants`); the request layer that fills `AuthContext.permissions` from a source (feature
+/// `axum`, `resolver`).
+pub use grants::{
+    GrantError, GrantSource, Grants, LegacySpelling, PermissionRequired, PermissionWaiver,
+    GOD_PERMISSION, PERMISSION_REQUIRED,
+};
+#[cfg(feature = "axum")]
+pub use resolver::{resolve_grants, GrantResolver};
+#[cfg(feature = "identity-grants")]
+pub use resolver::IdentityGrantSource;
 
 /// The HTTP company guard (feature `axum`): derive `company_id` from a signed token, never a request body.
 #[cfg(feature = "axum")]

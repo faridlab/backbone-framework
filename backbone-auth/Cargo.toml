@@ -56,6 +56,10 @@ default = []
 # The HTTP tenant guard: `TenantContext` / `TenantVerifier` / `tenant_auth`.
 # Off by default — only a crate that serves HTTP needs axum.
 axum = ["dep:axum", "dep:backbone-orm", "dep:sqlx"]
+# `IdentityGrantSource`: the grants of a person read from the identity module's tables
+# (`public.user_roles`, `public.roles`, `public.role_permissions`, `public.permissions`,
+# `public.user_permissions`, `sapiens.organization_users`, `sapiens.direct_permission_grants`).
+identity-grants = ["axum"]
 
 [dev-dependencies]
 # `ServiceExt::oneshot` — drives the real router in-process in tests/tenant_guard.rs.
