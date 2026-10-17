@@ -208,6 +208,14 @@ pub fn payload_from_row<T: serde::de::DeserializeOwned>(
     })
 }
 
+/// Create the outbox and inbox tables of `schema` (idempotent), where the events its hooks stage
+/// are written. The composing service runs it at startup, with a role that may create tables;
+/// the generated module offers it for each schema it stages in (`declared::migrate_outbox`).
+pub async fn migrate_outbox(pool: &backbone_orm::PgPool, schema: &str) -> anyhow::Result<()> {
+    backbone_outbox::outbox::migrate(pool, schema).await?;
+    Ok(())
+}
+
 /// The kind of a [`Change`], without its rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChangeKind {
