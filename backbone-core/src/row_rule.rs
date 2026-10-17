@@ -18,6 +18,11 @@
 //! - A comparison between a number and a text parses the text, the way a
 //!   decimal column serialized as `"12.50"` compares to `0`; a comparison
 //!   between a time and a text parses the text as a timestamp or a date.
+//! - Two texts that both read as decimals compare as numbers, exactly: a
+//!   decimal column serializes as a string, so `amount <= budget_cap` reads two
+//!   texts, and as text `"50" <= "100"` is false. A decimal here is written as a
+//!   decimal serializes (an optional `-`, digits without a leading zero, an
+//!   optional fraction), so a code such as `"007"` still compares as text.
 //!
 //! A rule may also read the row before the write (`$old.x`, through [`field`]
 //! on that row), the writer ([`actor`]) and the time of the write ([`at`]).
@@ -195,11 +200,33 @@ pub fn cond(c: Val, t: Val, e: Val) -> Val {
 fn order(a: &Val, b: &Val) -> Option<std::cmp::Ordering> {
     match (a, b) {
         (Val::Null, _) | (_, Val::Null) => None,
-        (Val::Text(x), Val::Text(y)) => Some(x.cmp(y)),
+        (Val::Text(x), Val::Text(y)) => match (decimal(x), decimal(y)) {
+            (Some(x), Some(y)) => Some(x.cmp(&y)),
+            _ => Some(x.cmp(y)),
+        },
         (Val::Bool(x), Val::Bool(y)) => Some(x.cmp(y)),
         (Val::Time(_), _) | (_, Val::Time(_)) => Some(a.time()?.cmp(&b.time()?)),
         _ => a.num()?.partial_cmp(&b.num()?),
     }
+}
+
+/// `s` as an exact decimal, when it is written the way a decimal serializes: an optional
+/// `-`, an integer part with no leading zero (or `0` alone), and an optional fraction. Text
+/// that only looks numeric — `"007"`, `"+1"`, `"1e3"`, `" 1"` — stays text.
+fn decimal(s: &str) -> Option<rust_decimal::Decimal> {
+    let digits = s.strip_prefix('-').unwrap_or(s);
+    let (int, frac) = match digits.split_once('.') {
+        Some((i, f)) => (i, Some(f)),
+        None => (digits, None),
+    };
+    let int_ok = !int.is_empty()
+        && int.bytes().all(|b| b.is_ascii_digit())
+        && (int == "0" || !int.starts_with('0'));
+    let frac_ok = frac.is_none_or(|f| !f.is_empty() && f.bytes().all(|b| b.is_ascii_digit()));
+    if !(int_ok && frac_ok) {
+        return None;
+    }
+    s.parse().ok()
 }
 
 fn compare(a: Val, b: Val, test: fn(std::cmp::Ordering) -> bool) -> Val {
@@ -389,6 +416,28 @@ pub fn ends_with(a: Val, b: Val) -> Val {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn two_decimal_columns_compare_as_numbers_not_as_text() {
+        // rust_decimal serializes as a JSON string, so a rule over two decimals reads two texts.
+        let row = json!({ "amount": "50", "budget_cap": "100" });
+        assert_eq!(le(field(&row, "amount"), field(&row, "budget_cap")), Val::Bool(true));
+        assert_eq!(gt(text("50"), text("100")), Val::Bool(false));
+        assert_eq!(lt(text("9.5"), text("10")), Val::Bool(true));
+        assert_eq!(lt(text("-20"), text("-3")), Val::Bool(true));
+        assert_eq!(gt(text("-0.5"), text("-1")), Val::Bool(true));
+        // Scale does not change the value.
+        assert_eq!(eq(text("1.10"), text("1.1")), Val::Bool(true));
+        assert_eq!(ge(text("100.00"), text("100")), Val::Bool(true));
+    }
+
+    #[test]
+    fn text_that_only_looks_numeric_still_compares_as_text() {
+        assert_eq!(eq(text("007"), text("7")), Val::Bool(false));
+        assert_eq!(lt(text("abc"), text("abd")), Val::Bool(true));
+        assert_eq!(lt(text("10"), text("9a")), Val::Bool(true), "one side is not a decimal");
+        assert_eq!(eq(text("1e3"), text("1000")), Val::Bool(false));
+    }
 
     #[test]
     fn a_rule_over_a_null_field_holds_as_a_check_constraint_does() {
