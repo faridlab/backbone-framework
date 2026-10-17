@@ -257,6 +257,8 @@ async fn two_tenants_one_app_the_fence_holds() {
             // proof carries (a present non-access typ is refused by the unit contract
             // in backbone-auth; here the minted pairs behave like pre-typ tokens).
             typ: None,
+            // Unbound verifier: a token naming no tenant is what this proof needs.
+            aud: Vec::new(),
         })
     };
 
