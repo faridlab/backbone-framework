@@ -271,6 +271,51 @@ where
         }
     }
 
+    /// Refuse a write that points one of the entity's references
+    /// ([`PersistentEntity::references`]) at a row the caller cannot see.
+    ///
+    /// Each reference the write sets — every one on a create, those whose value changes on
+    /// an update — is looked up through the repository on the request's own scope
+    /// ([`CrudRepository::reference_visible`]). A row that is missing or hidden by row-level
+    /// security answers `reference_missing` on the field, worded as the database's own
+    /// missing-reference answer is, so the refusal never tells that the row exists
+    /// elsewhere. A null reference and a repository that cannot tell are let through to the
+    /// database's key.
+    async fn check_references(&self, before: Option<&E>, after: &E) -> ServiceResult<()> {
+        let references = E::references();
+        if references.is_empty() {
+            return Ok(());
+        }
+        let after_obj = as_object(after)?;
+        let before_obj = before.map(as_object).transpose()?;
+        let mut refused = Vec::new();
+        for reference in references {
+            let Some(value) = after_obj.get(reference.field).filter(|v| !v.is_null()) else {
+                continue;
+            };
+            if before_obj.as_ref().is_some_and(|b| b.get(reference.field) == Some(value)) {
+                continue;
+            }
+            let visible = self
+                .repository
+                .reference_visible(reference.table, reference.column, value)
+                .await
+                .map_err(ServiceError::Repository)?;
+            if visible == Some(false) {
+                refused.push(crate::violation::Violation::new(
+                    reference.field,
+                    "reference_missing",
+                    format!("{} refers to a record that does not exist", reference.field),
+                ));
+            }
+        }
+        if refused.is_empty() {
+            Ok(())
+        } else {
+            Err(ServiceError::Violations(refused))
+        }
+    }
+
     /// Create with a custom lifecycle and the no-op event publisher.
     pub fn with_lifecycle(repository: Arc<R>, lifecycle: Arc<dyn ServiceLifecycle<E>>) -> Self {
         Self::new(repository, lifecycle, NoOpCrudEventPublisher::arc())
@@ -340,6 +385,7 @@ where
         let mut entity = E::from_create_dto(dto)?;
         self.consult(crate::write_guard::WriteKind::Create, None, Some(&entity)).await?;
         self.lifecycle.before_create(&mut entity).await?;
+        self.check_references(None, &entity).await?;
         let saved = self
             .repository
             .create(entity)
@@ -376,6 +422,7 @@ where
         refuse_protected_changes::<E>(&as_object(&before)?, &as_object(&updated)?)?;
         self.consult(crate::write_guard::WriteKind::Update, Some(&before), Some(&updated)).await?;
         self.lifecycle.before_update(&mut updated).await?;
+        self.check_references(Some(&before), &updated).await?;
         // The same changed-fields, live-row-only save as `partial_update`.
         let Some(saved) = self
             .repository
@@ -522,17 +569,38 @@ where
     }
 
     /// Every row in the trash, refused when there are more than one batch may hold.
+    ///
+    /// Read page by page: a repository caps the rows one page may hold
+    /// ([`backbone_orm::repository::PaginationParams::MAX_PER_PAGE`]), so a single page
+    /// of [`MAX_BATCH_SIZE`] would quietly hold only the first hundred.
     async fn whole_trash(&self, verb: &str) -> ServiceResult<Vec<E>> {
-        let (rows, total) = self
-            .repository
-            .list_deleted(1, MAX_BATCH_SIZE as u32)
-            .await
-            .map_err(ServiceError::Repository)?;
-        if total > MAX_BATCH_SIZE as u64 || rows.len() > MAX_BATCH_SIZE {
-            return Err(ServiceError::Validation(format!(
+        let too_many = |total: u64| {
+            ServiceError::Validation(format!(
                 "The trash holds {total} items, more than the {MAX_BATCH_SIZE} that can be {verb} \
                  at once. Select the items to act on instead."
-            )));
+            ))
+        };
+        let per_page = backbone_orm::repository::PaginationParams::MAX_PER_PAGE;
+        let mut rows: Vec<E> = Vec::new();
+        let mut page = 1u32;
+        loop {
+            let (batch, total) = self
+                .repository
+                .list_deleted(page, per_page)
+                .await
+                .map_err(ServiceError::Repository)?;
+            if total > MAX_BATCH_SIZE as u64 {
+                return Err(too_many(total));
+            }
+            let fetched = batch.len();
+            rows.extend(batch);
+            if rows.len() > MAX_BATCH_SIZE {
+                return Err(too_many(rows.len() as u64));
+            }
+            if fetched == 0 || rows.len() as u64 >= total || fetched < per_page as usize {
+                break;
+            }
+            page += 1;
         }
         Ok(rows)
     }
@@ -625,6 +693,7 @@ where
         let mut patched = merge_patch(&before, fields)?;
         self.consult(crate::write_guard::WriteKind::Update, Some(&before), Some(&patched)).await?;
         self.lifecycle.before_update(&mut patched).await?;
+        self.check_references(Some(&before), &patched).await?;
         // Only the fields this write changed are saved, and only while the row is still live:
         // see `CrudRepository::update_changed`. A row deleted since the read answers not found.
         let Some(saved) = self
@@ -665,6 +734,7 @@ where
                 .await
                 .map_err(at)?;
             self.lifecycle.before_create(&mut entity).await.map_err(at)?;
+            self.check_references(None, &entity).await.map_err(at)?;
             prepared.push(entity);
         }
         let saved = self
@@ -832,7 +902,7 @@ where
         }
         let mut befores = Vec::with_capacity(items.len());
         let mut prepared = Vec::with_capacity(items.len());
-        for (id, dto) in items {
+        for (index, (id, dto)) in items.into_iter().enumerate() {
             let Some(before) = self
                 .repository
                 .find_by_id(&id)
@@ -845,6 +915,9 @@ where
             refuse_protected_changes::<E>(&as_object(&before)?, &as_object(&updated)?)?;
             self.consult(crate::write_guard::WriteKind::Update, Some(&before), Some(&updated)).await?;
             self.lifecycle.before_update(&mut updated).await?;
+            self.check_references(Some(&before), &updated)
+                .await
+                .map_err(|e| at_batch_index(e, index))?;
             prepared.push((before.clone(), updated));
             befores.push(before);
         }
@@ -894,7 +967,7 @@ where
         }
         let mut befores = Vec::with_capacity(items.len());
         let mut prepared = Vec::with_capacity(items.len());
-        for (id, fields) in items {
+        for (index, (id, fields)) in items.into_iter().enumerate() {
             let Some(before) = self
                 .repository
                 .find_by_id(&id)
@@ -906,6 +979,9 @@ where
             let mut patched = merge_patch(&before, fields)?;
             self.consult(crate::write_guard::WriteKind::Update, Some(&before), Some(&patched)).await?;
             self.lifecycle.before_update(&mut patched).await?;
+            self.check_references(Some(&before), &patched)
+                .await
+                .map_err(|e| at_batch_index(e, index))?;
             prepared.push((before.clone(), patched));
             befores.push(before);
         }
@@ -967,6 +1043,7 @@ where
         self.consult_quietly(crate::write_guard::WriteKind::Update, Some(&before), Some(&patched))
             .await?;
         self.lifecycle.before_update(&mut patched).await?;
+        self.check_references(Some(&before), &patched).await?;
         Ok((before, patched))
     }
 }
@@ -1044,8 +1121,8 @@ fn merge_patch<E: PersistentEntity>(
         }
         merged.insert(key, value);
     }
-    let patched: E = serde_json::from_value(serde_json::Value::Object(merged))
-        .map_err(|e| ServiceError::Validation(e.to_string()))?;
+    let patched: E = serde_path_to_error::deserialize(serde_json::Value::Object(merged))
+        .map_err(|e| patch_type_refusal(&e))?;
     let after_obj = as_object(&patched)?;
 
     let mut unknown: Vec<String> = given.into_iter().filter(|k| !after_obj.contains_key(k)).collect();
@@ -1063,6 +1140,42 @@ fn merge_patch<E: PersistentEntity>(
     }
     refuse_protected_changes::<E>(&before_obj, &after_obj)?;
     Ok(patched)
+}
+
+/// The refusal for a patch value the entity cannot hold: `required` on a field set to null
+/// that may not be empty, `invalid_value` on a field given a value of the wrong kind — the
+/// codes a create body's decoding answers with for the same mistakes — on the field's path.
+fn patch_type_refusal(err: &serde_path_to_error::Error<serde_json::Error>) -> ServiceError {
+    let path = err
+        .path()
+        .iter()
+        .filter_map(|segment| match segment {
+            serde_path_to_error::Segment::Seq { index } => Some(index.to_string()),
+            serde_path_to_error::Segment::Map { key } => Some(key.clone()),
+            serde_path_to_error::Segment::Enum { variant } => Some(variant.clone()),
+            serde_path_to_error::Segment::Unknown => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/");
+    let message = err.inner().to_string();
+    let message = match message.rfind(" at line ") {
+        Some(at) => message[..at].to_string(),
+        None => message,
+    };
+    let violation = if let Some(field) = message
+        .strip_prefix("missing field `")
+        .and_then(|rest| rest.split('`').next())
+    {
+        let field_path = if path.is_empty() { field.to_string() } else { format!("{path}/{field}") };
+        crate::violation::Violation::new(field_path.clone(), "required", format!("{field_path} is required"))
+    } else if message.starts_with("invalid type: null") {
+        let subject = if path.is_empty() { "A value".to_string() } else { path.clone() };
+        crate::violation::Violation::new(path, "required", format!("{subject} is required"))
+    } else {
+        let text = if path.is_empty() { message } else { format!("{path}: {message}") };
+        crate::violation::Violation::new(path, "invalid_value", text)
+    };
+    ServiceError::Violations(vec![violation])
 }
 
 /// Maximum number of ids / items a single batch operation may contain. Enforced
@@ -1171,7 +1284,10 @@ where
     }
 
     fn entity_name() -> &'static str {
-        std::any::type_name::<E>()
+        // The type's own name, never its module path: it reaches log lines and must not
+        // describe the crate layout to anyone reading a response built from it.
+        let full = std::any::type_name::<E>();
+        full.rsplit("::").next().unwrap_or(full)
     }
 
     async fn fetch_related_json(&self, table: &str, ids: &[String]) -> Vec<serde_json::Value> {
@@ -1347,6 +1463,9 @@ mod tests {
         /// A state-machine field: protected from generic writes, moved by verbs.
         #[serde(default)]
         state: String,
+        /// A reference to an owner row, checked for visibility before a write sets it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         deleted_at: Option<DateTime<Utc>>,
         created_at: DateTime<Utc>,
@@ -1359,6 +1478,13 @@ mod tests {
         }
         fn state_fields() -> &'static [&'static str] {
             &["state"]
+        }
+        fn references() -> &'static [crate::persistence::traits::Reference] {
+            // The shape the schema generator emits: a `const`, since a `const fn` call is not
+            // promoted to a `'static` borrow on its own.
+            const REFERENCES: &[crate::persistence::traits::Reference] =
+                &[crate::persistence::traits::Reference::new("owner_id", "owners", "id")];
+            REFERENCES
         }
         fn entity_id(&self) -> String {
             self.id.clone()
@@ -1410,12 +1536,15 @@ mod tests {
 
     impl FromCreateDto<CreateWidgetDto> for Widget {
         fn from_create_dto(dto: CreateWidgetDto) -> ServiceResult<Self> {
+            // A create names its owner as `owned-by:<id>`, so the create DTO stays one field.
+            let owner_id = dto.name.strip_prefix("owned-by:").map(str::to_string);
             Ok(Widget {
                 id: uuid::Uuid::new_v4().to_string(),
                 name: dto.name,
                 note: None,
                 secret_hash: "h0".into(),
                 state: "draft".into(),
+                owner_id,
                 deleted_at: None,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
@@ -1442,6 +1571,8 @@ mod tests {
         vanish_on_write: std::sync::atomic::AtomicBool,
         /// Every `bulk_create` call.
         bulk_creates: std::sync::atomic::AtomicUsize,
+        /// The owner ids the caller can see; every other owner reads as hidden.
+        visible_owners: std::sync::Mutex<Vec<String>>,
     }
 
     impl InMemoryWidgetRepo {
@@ -1452,12 +1583,24 @@ mod tests {
                 full_writes: std::sync::atomic::AtomicUsize::new(0),
                 vanish_on_write: std::sync::atomic::AtomicBool::new(false),
                 bulk_creates: std::sync::atomic::AtomicUsize::new(0),
+                visible_owners: std::sync::Mutex::new(vec!["mine".to_string()]),
             }
         }
     }
 
     #[async_trait]
     impl crate::persistence::traits::CrudRepository<Widget> for InMemoryWidgetRepo {
+        async fn reference_visible(
+            &self,
+            table: &str,
+            column: &str,
+            value: &serde_json::Value,
+        ) -> Result<Option<bool>, RepositoryError> {
+            assert_eq!((table, column), ("owners", "id"));
+            let visible = self.visible_owners.lock().unwrap();
+            Ok(Some(value.as_str().is_some_and(|v| visible.iter().any(|o| o == v))))
+        }
+
         async fn create(&self, entity: Widget) -> Result<Widget, RepositoryError> {
             self.data.lock().await.push(entity.clone());
             Ok(entity)
@@ -1564,8 +1707,9 @@ mod tests {
             let data = self.data.lock().await;
             let deleted: Vec<_> = data.iter().filter(|w| w.deleted_at.is_some()).cloned().collect();
             let total = deleted.len() as u64;
-            let offset = ((page.saturating_sub(1)) as usize) * (limit as usize);
-            let limit = limit as usize;
+            // Capped as the generated repositories cap a page.
+            let limit = (limit as usize).min(100);
+            let offset = (page.saturating_sub(1) as usize) * limit;
             let page = deleted.into_iter().skip(offset).take(limit).collect();
             Ok((page, total))
         }
@@ -2302,6 +2446,99 @@ mod tests {
         assert_eq!(<S as CrudService<Widget, CreateWidgetDto, UpdateWidgetDto>>::violations_of(&db), Some(v));
     }
 
+    // ── References point only at rows the caller can see ─────────────────
+
+    fn only_violation(res: ServiceResult<impl std::fmt::Debug>) -> crate::violation::Violation {
+        match res {
+            Err(ServiceError::Violations(mut v)) if v.len() == 1 => v.remove(0),
+            other => panic!("expected one violation, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_reference_to_a_hidden_row_is_refused_on_every_write_kind() {
+        let service = svc();
+        // Create: a hidden owner is refused as missing, and nothing is written.
+        let v = only_violation(service.create(CreateWidgetDto { name: "owned-by:theirs".into() }).await);
+        assert_eq!((v.path.as_str(), v.code.as_str()), ("owner_id", "reference_missing"));
+        assert!(!v.message.contains("owners"), "{}", v.message);
+        assert_eq!(service.count().await.unwrap(), 0);
+        // A visible owner and no owner are let through.
+        let w = service.create(CreateWidgetDto { name: "owned-by:mine".into() }).await.unwrap();
+        service.create(CreateWidgetDto { name: "plain".into() }).await.unwrap();
+
+        // PATCH that moves the reference to a hidden row.
+        let v = only_violation(service.partial_update(&w.id, patch(&[("owner_id", serde_json::json!("theirs"))])).await);
+        assert_eq!((v.path.as_str(), v.code.as_str()), ("owner_id", "reference_missing"));
+        assert_eq!(service.get_by_id(&w.id).await.unwrap().unwrap().owner_id.as_deref(), Some("mine"));
+        // Bulk create and bulk PATCH name the item.
+        let v = only_violation(
+            service
+                .bulk_create(vec![CreateWidgetDto { name: "x".into() }, CreateWidgetDto { name: "owned-by:theirs".into() }])
+                .await,
+        );
+        assert_eq!((v.path.as_str(), v.code.as_str()), ("1/owner_id", "reference_missing"));
+        let v = only_violation(
+            service.bulk_partial_update(vec![(w.id.clone(), patch(&[("owner_id", serde_json::json!("theirs"))]))]).await,
+        );
+        assert_eq!(v.path, "0/owner_id");
+    }
+
+    #[tokio::test]
+    async fn an_unchanged_reference_is_not_checked_again() {
+        let service = svc();
+        let w = service.create(CreateWidgetDto { name: "owned-by:mine".into() }).await.unwrap();
+        // The owner becomes invisible; an edit that leaves it alone still goes through.
+        service.repository().visible_owners.lock().unwrap().clear();
+        let saved = service.partial_update(&w.id, patch(&[("note", serde_json::json!("x"))])).await.unwrap().unwrap();
+        assert_eq!(saved.owner_id.as_deref(), Some("mine"));
+        let saved = service.update(&w.id, UpdateWidgetDto { name: "renamed".into() }).await.unwrap().unwrap();
+        assert_eq!(saved.name, "renamed");
+    }
+
+    // ── A patch value the entity cannot hold names its field ─────────────
+
+    #[tokio::test]
+    async fn a_patch_of_the_wrong_type_or_a_null_required_field_is_a_violation_on_its_path() {
+        let service = svc();
+        let w = service.create(CreateWidgetDto { name: "a".into() }).await.unwrap();
+        let v = only_violation(service.partial_update(&w.id, patch(&[("name", serde_json::json!(5))])).await);
+        assert_eq!((v.path.as_str(), v.code.as_str()), ("name", "invalid_value"));
+        let v = only_violation(service.partial_update(&w.id, patch(&[("name", serde_json::Value::Null)])).await);
+        assert_eq!((v.path.as_str(), v.code.as_str()), ("name", "required"));
+        assert_eq!(service.get_by_id(&w.id).await.unwrap().unwrap().name, "a");
+    }
+
+    #[tokio::test]
+    async fn a_patch_setting_an_empty_protected_field_is_refused() {
+        // An `@exclude_from_dto` field reaches the generic service as a protected one.
+        let service = svc();
+        let w = service.create(CreateWidgetDto { name: "a".into() }).await.unwrap();
+        let v = only_violation(service.partial_update(&w.id, patch(&[("secret_hash", serde_json::json!("set"))])).await);
+        assert_eq!((v.path.as_str(), v.code.as_str()), ("secret_hash", "field_not_writable"));
+    }
+
+    #[tokio::test]
+    async fn emptying_a_trash_larger_than_one_page_reaches_every_row() {
+        let service = svc();
+        let mut ids = Vec::new();
+        for i in 0..150 {
+            ids.push(service.create(CreateWidgetDto { name: format!("w{i}") }).await.unwrap().id);
+        }
+        service.bulk_soft_delete(ids).await.unwrap();
+        // The in-memory repository caps a page at 100 as the generated ones do, so this proves
+        // the trash is walked page by page rather than read as one oversized page.
+        assert_eq!(service.empty_trash().await.unwrap(), 150);
+        assert_eq!(service.count_deleted().await.unwrap(), 0);
+    }
+
+    #[test]
+    fn the_entity_name_never_carries_the_module_path() {
+        use crate::http::CrudService;
+        type S = GenericCrudService<Widget, CreateWidgetDto, UpdateWidgetDto, InMemoryWidgetRepo>;
+        assert_eq!(<S as CrudService<Widget, CreateWidgetDto, UpdateWidgetDto>>::entity_name(), "Widget");
+    }
+
     // ── Trash-wide writes ask the guard about every row ───────────────────
 
     /// Trash two widgets, one renamed behind the service's back to a name the guard refuses.
@@ -2479,6 +2716,54 @@ mod tests {
                 assert_eq!(body["violations"][0]["code"], "invalid_id");
                 assert_eq!(body["violations"][0]["path"], "id");
             }
+        }
+
+        #[tokio::test]
+        async fn a_missing_record_answers_a_coded_404_without_the_type_path() {
+            let (app, _) = app();
+            let missing = uuid::Uuid::new_v4();
+            for (method, uri) in [
+                ("GET", format!("/widgets/{missing}")),
+                ("GET", format!("/widgets/{missing}/deleted")),
+                ("DELETE", format!("/widgets/trash/{missing}")),
+            ] {
+                let (status, body) = call(&app, method, &uri, None).await;
+                assert_eq!(status, StatusCode::NOT_FOUND, "{method} {uri}");
+                assert_eq!(body["violations"][0]["code"], "not_found", "{body}");
+                assert_eq!(body["error"], crate::http::NOT_FOUND_MESSAGE);
+                assert!(!body.to_string().contains("::"), "{body}");
+            }
+        }
+
+        #[tokio::test]
+        async fn a_list_page_is_clamped_and_page_zero_reads_as_the_first() {
+            let (app, service) = app();
+            service.create(CreateWidgetDto { name: "a".into() }).await.unwrap();
+            let (status, body) = call(&app, "GET", "/widgets?limit=1000&page=0", None).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["meta"]["limit"], crate::http::MAX_PER_PAGE);
+            assert_eq!(body["meta"]["page"], 1);
+            let (status, body) = call(&app, "GET", "/widgets/trash?limit=1000&page=0", None).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["meta"]["limit"], crate::http::MAX_PER_PAGE);
+            // A page too deep is refused, coded.
+            let (status, body) = call(&app, "GET", "/widgets?limit=100&page=1000", None).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(body["violations"][0]["code"], "invalid_request");
+        }
+
+        #[tokio::test]
+        async fn a_refusal_that_names_no_rule_still_carries_a_code() {
+            let (app, service) = app();
+            let w = service.create(CreateWidgetDto { name: "a".into() }).await.unwrap();
+            // A duplicate the service reports as such: 409, coded.
+            let (status, body) = call(&app, "PATCH", &format!("/widgets/{}", w.id), Some(r#"{"name":"taken"}"#)).await;
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert_eq!(body["violations"][0]["code"], "conflict", "{body}");
+            // A patch of the wrong type: 422 on the field.
+            let (status, body) = call(&app, "PATCH", &format!("/widgets/{}", w.id), Some(r#"{"name":7}"#)).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+            assert_eq!(body["violations"][0]["path"], "name");
         }
 
         #[tokio::test]

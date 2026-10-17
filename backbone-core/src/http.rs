@@ -87,15 +87,34 @@ impl<T> ApiResponse<T> {
         }
     }
 
+    /// A missing record: [`NOT_FOUND_MESSAGE`] and a `not_found` violation, the same body for
+    /// every resource. `entity` and `id` go to the debug log only — a type name can carry the
+    /// crate's module path, and the body has no use for either.
     pub fn not_found(entity: &str, id: &str) -> Self {
-        Self {
-            success: false,
-            data: None,
-            message: None,
-            error: Some(format!("{} with id '{}' not found", entity, id)),
-            violations: None,
-        }
+        tracing::debug!(target: "backbone::http", entity, id, "record not found");
+        Self::rejected(NOT_FOUND_MESSAGE, vec![not_found_violation()])
     }
+}
+
+/// The sentence a 404 answers with.
+pub const NOT_FOUND_MESSAGE: &str = "Not found";
+
+fn not_found_violation() -> crate::violation::Violation {
+    crate::violation::Violation::new("", "not_found", NOT_FOUND_MESSAGE)
+}
+
+/// The code a client refusal that names no rule answers with, by status: every 4xx body
+/// carries a machine-readable code, whatever layer refused.
+fn status_code_violation(status: axum::http::StatusCode, message: &str) -> Option<crate::violation::Violation> {
+    use axum::http::StatusCode;
+    let code = match status {
+        StatusCode::NOT_FOUND => return Some(not_found_violation()),
+        StatusCode::CONFLICT => "conflict",
+        StatusCode::BAD_REQUEST => "invalid_request",
+        StatusCode::UNPROCESSABLE_ENTITY => "invalid_value",
+        _ => return None,
+    };
+    Some(crate::violation::Violation::new("", code, message))
 }
 
 /// The sentence a 500 answers with. The real error is logged, never sent: it can carry SQL,
@@ -116,7 +135,17 @@ fn error_at<T>(
     }
     match violations {
         Some(v) if !v.is_empty() => (status, axum::Json(ApiResponse::rejected(err.to_string(), v))),
-        _ => (status, axum::Json(ApiResponse::error(err.to_string()))),
+        _ if status == axum::http::StatusCode::NOT_FOUND => {
+            tracing::debug!(target: "backbone::http", error = %err, "not found");
+            (status, axum::Json(ApiResponse::rejected(NOT_FOUND_MESSAGE, vec![not_found_violation()])))
+        }
+        _ => {
+            let message = err.to_string();
+            match status_code_violation(status, &message) {
+                Some(v) => (status, axum::Json(ApiResponse::rejected(message, vec![v]))),
+                None => (status, axum::Json(ApiResponse::error(message))),
+            }
+        }
     }
 }
 
@@ -238,6 +267,18 @@ pub struct ListQueryParams {
 
 fn default_page() -> u32 { 1 }
 fn default_limit() -> u32 { 20 }
+
+impl ListQueryParams {
+    /// The page request every list route serves: page 0 reads as page 1, and the page size
+    /// is held to `1..=`[`MAX_PER_PAGE`], as the repositories hold it, so the `meta` a
+    /// response reports is the page actually read.
+    pub fn normalized(mut self) -> Self {
+        let page = backbone_orm::repository::PaginationParams::new(self.page, self.limit);
+        self.page = page.page;
+        self.limit = page.per_page;
+        self
+    }
+}
 
 /// Reserved response-shaping query keys (carved out of the filter grammar).
 const RESERVED_QUERY_KEYS: [&str; 3] = ["fields", "include", "with"];
@@ -403,6 +444,22 @@ fn repository_filters(params: &ListQueryParams) -> HashMap<String, String> {
     }
     if let Some(status) = params.status.clone() {
         filters.insert("status".to_string(), status);
+    }
+    // The typed `sort_by`/`sort_order` pair is the documented sort; it rides into the
+    // filter grammar as `orderby=<field>:<dir>`, so the same field sanitizer and allow-list
+    // the filters take validate it. A sort the filter grammar already names wins.
+    let sorted = filters.keys().any(|k| {
+        let base = k.split('[').next().unwrap_or(k);
+        base.eq_ignore_ascii_case("orderby") || base.eq_ignore_ascii_case("sort")
+    });
+    if let Some(field) = params.sort_by.as_deref().map(str::trim).filter(|f| !f.is_empty()) {
+        if !sorted {
+            let dir = match params.sort_order.as_deref().map(str::trim) {
+                Some(d) if d.eq_ignore_ascii_case("desc") => "desc",
+                _ => "asc",
+            };
+            filters.insert("orderby".to_string(), format!("{field}:{dir}"));
+        }
     }
     filters
 }
@@ -742,6 +799,13 @@ fn is_bad_query_error(msg: &str) -> bool {
         || m.contains("needs a numeric column")
 }
 
+/// A list request refused before it reached the repository: 400's `invalid_request` code
+/// beside the sentence.
+fn bad_list_request(message: String) -> PaginatedApiResponse<serde_json::Value> {
+    let violation = crate::violation::Violation::new("", "invalid_request", message.clone());
+    PaginatedApiResponse::rejected(message, vec![violation])
+}
+
 /// Pagination response metadata
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -803,6 +867,9 @@ pub struct PaginatedApiResponse<T> {
     pub meta: PaginationResponse,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The coded reasons for a refused list request, beside `error`; absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub violations: Option<Vec<crate::violation::Violation>>,
 }
 
 impl<T> PaginatedApiResponse<T> {
@@ -814,6 +881,7 @@ impl<T> PaginatedApiResponse<T> {
             data,
             meta: PaginationResponse::from_info(info),
             error: None,
+            violations: None,
         }
     }
 
@@ -824,6 +892,7 @@ impl<T> PaginatedApiResponse<T> {
             data,
             meta: PaginationResponse::new(total, page, limit),
             error: None,
+            violations: None,
         }
     }
 
@@ -834,6 +903,7 @@ impl<T> PaginatedApiResponse<T> {
             data: resp.data,
             meta: resp.meta,
             error: None,
+            violations: None,
         }
     }
 
@@ -844,6 +914,15 @@ impl<T> PaginatedApiResponse<T> {
             data: Vec::new(),
             meta: PaginationResponse::new(0, 0, 0),
             error: Some(error.into()),
+            violations: None,
+        }
+    }
+
+    /// A refused list request: the sentence and its coded reasons.
+    pub fn rejected(error: impl Into<String>, violations: Vec<crate::violation::Violation>) -> Self {
+        Self {
+            violations: (!violations.is_empty()).then_some(violations),
+            ..Self::error(error)
         }
     }
 }
@@ -1683,13 +1762,21 @@ where
         use axum::{http::StatusCode, Json};
         let msg = err.to_string();
         if is_bad_query_error(&msg) {
+            // The detail is the database's sentence (SQL, column and table names): logged,
+            // never sent.
+            tracing::debug!(target: "backbone::http", error = %msg, "list query refused");
+            let message = "Invalid query parameter or filter";
             return (
                 StatusCode::BAD_REQUEST,
-                Json(PaginatedApiResponse::error(format!("Invalid query parameter or filter: {msg}"))),
+                Json(PaginatedApiResponse::rejected(
+                    message,
+                    vec![crate::violation::Violation::new("", "invalid_query", message)],
+                )),
             );
         }
         let (status, Json(body)) = Self::failure::<()>(err, StatusCode::INTERNAL_SERVER_ERROR);
-        (status, Json(PaginatedApiResponse::error(body.error.unwrap_or_default())))
+        let error = body.error.unwrap_or_default();
+        (status, Json(PaginatedApiResponse::rejected(error, body.violations.unwrap_or_default())))
     }
 
     async fn list_handler(
@@ -1699,13 +1786,14 @@ where
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
 
+        let params = params.normalized();
         if let Some(err) = pagination_depth_error(params.page, params.limit) {
-            return (StatusCode::BAD_REQUEST, Json(PaginatedApiResponse::<serde_json::Value>::error(err)));
+            return (StatusCode::BAD_REQUEST, Json(bad_list_request(err)));
         }
         if let Some(field) = named_secret(&params, E::secret_fields()) {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(PaginatedApiResponse::<serde_json::Value>::error(secret_named_message(&field))),
+                Json(bad_list_request(secret_named_message(&field))),
             );
         }
 
@@ -2180,13 +2268,14 @@ where
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
 
+        let params = params.normalized();
         if let Some(err) = pagination_depth_error(params.page, params.limit) {
-            return (StatusCode::BAD_REQUEST, Json(PaginatedApiResponse::<serde_json::Value>::error(err)));
+            return (StatusCode::BAD_REQUEST, Json(bad_list_request(err)));
         }
         if let Some(field) = named_secret(&params, E::secret_fields()) {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(PaginatedApiResponse::<serde_json::Value>::error(secret_named_message(&field))),
+                Json(bad_list_request(secret_named_message(&field))),
             );
         }
 
@@ -2310,9 +2399,8 @@ where
                         StatusCode::NO_CONTENT.into_response()
                     }
                     Ok(false) => {
-                        (StatusCode::NOT_FOUND, Json(ApiResponse::<R>::error(
-                            format!("Failed to permanently delete {}", S::entity_name())
-                        ))).into_response()
+                        (StatusCode::NOT_FOUND, Json(ApiResponse::<R>::not_found(S::entity_name(), &id)))
+                            .into_response()
                     }
                     Err(e) => {
                         Self::failure::<R>(&e, StatusCode::INTERNAL_SERVER_ERROR).into_response()
@@ -2916,6 +3004,39 @@ mod tests {
     }
 
     #[test]
+    fn the_typed_sort_pair_reaches_the_repository_as_the_filter_sort() {
+        let params = |pairs: &[(&str, &str)], by: Option<&str>, order: Option<&str>| ListQueryParams {
+            filters: pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            sort_by: by.map(str::to_string),
+            sort_order: order.map(str::to_string),
+            ..Default::default()
+        };
+        let f = repository_filters(&params(&[], Some("priority"), Some("DESC")));
+        assert_eq!(f.get("orderby").map(String::as_str), Some("priority:desc"));
+        let f = repository_filters(&params(&[], Some("createdAt"), None));
+        assert_eq!(f.get("orderby").map(String::as_str), Some("createdAt:asc"));
+        // A sort the filter grammar names wins over the typed pair.
+        let f = repository_filters(&params(&[("orderby[name]", "asc")], Some("priority"), Some("desc")));
+        assert!(!f.contains_key("orderby"), "{f:?}");
+        // It goes through the same sanitizer as any filter sort: an injection is dropped there.
+        let parsed = backbone_orm::filter::parse_filters(
+            &repository_filters(&params(&[], Some("name; drop table x"), None)),
+            &HashMap::new(),
+            None,
+        )
+        .unwrap();
+        assert!(parsed.sorts.is_empty(), "{:?}", parsed.sorts);
+    }
+
+    #[test]
+    fn list_params_normalize_page_zero_and_an_oversized_limit() {
+        let p = ListQueryParams { page: 0, limit: 1000, ..Default::default() }.normalized();
+        assert_eq!((p.page, p.limit), (1, MAX_PER_PAGE));
+        let p = ListQueryParams { page: 3, limit: 0, ..Default::default() }.normalized();
+        assert_eq!((p.page, p.limit), (3, 1));
+    }
+
+    #[test]
     fn a_request_that_names_a_secret_as_a_column_is_caught_in_every_grammar() {
         let ask = |pairs: &[(&str, &str)], sort_by: Option<&str>| {
             let params = ListQueryParams {
@@ -3055,9 +3176,15 @@ mod tests {
         assert_eq!(json["violations"][0]["path"], "status");
         assert_eq!(json["violations"][0]["code"], "field_not_writable");
 
-        // Any other failure keeps its status and body: no `violations` key at all.
+        // Any other client failure keeps its status and sentence, coded by its status.
         let (status, axum::Json(body)) = write_error::<()>(None, &"boom", axum::http::StatusCode::BAD_REQUEST);
         assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        let json = serde_json::to_value(&body).unwrap();
+        assert_eq!(json["error"], "boom");
+        assert_eq!(json["violations"][0]["code"], "invalid_request");
+        assert_eq!(json["violations"][0]["path"], "");
+        // A server fault stays uncoded and generic.
+        let (_, axum::Json(body)) = write_error::<()>(None, &"boom", axum::http::StatusCode::INTERNAL_SERVER_ERROR);
         assert!(serde_json::to_value(&body).unwrap().get("violations").is_none());
     }
 }
