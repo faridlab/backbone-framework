@@ -16,6 +16,8 @@ back to the `## [Unreleased]` section.
 
 ## [Unreleased]
 
+## [3.12.0] - 2026-10-17
+
 ### Security
 
 - **backbone-auth** — a session token named no tenant, and every tenant verifies with the same
