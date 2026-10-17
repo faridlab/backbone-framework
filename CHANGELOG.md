@@ -38,16 +38,21 @@ back to the `## [Unreleased]` section.
 ### Fixed
 
 - **backbone-core** — **breaking (behaviour):** every unique violation is now 422 with a
-  violation: the code a generated name carries (`uq_<table>…__<code>`), else `taken`. A unique
+  violation: the code a generated name carries (`uq_<table>…__<code>`, `unique` for a
+  `@unique` field), else `taken` — a name without `__`, such as a service-owned tenancy index,
+  included. A unique
   index with another name used to answer 409 with the raw Postgres sentence, which named the
   index. The path comes from the `Key (…)` detail, or — on a table with row-level security,
   where Postgres leaves the detail out — from the constraint name (see below).
 - **backbone-core** — a constraint refusal on a table with row-level security came back with an
   empty path. The path is now read out of the generated constraint name when Postgres reports
-  none: a foreign key `fk_<table>_<column>` (or `…_fk` on a link table), a field check
-  `ck_<table>_<field>_<code>__<code>`, and the new `<prefix>_<table>_on_<field>__<code>` shape
-  for a rule or unique key about one field (`ck_`, `uq_`, `ex_`, `tg_`). A rule about the whole
-  record (`<prefix>_<table>_<rule>__<code>`) keeps an empty path.
+  none, following the schema generator's naming: a foreign key `fk_<table>_<column>` (or
+  `…_fk` on a link table), a field check `ck_<table>_<field>_<code>__<code>`, a row rule
+  `ck_<table>_<field>__<code>`, and a unique index `uq_<table>_[<tenant keys>_]<field>__<code>`
+  (leading `company_id`, `tenant_id`, `org_unit_id`, `organization_id` dropped). A name the
+  generator shortened to a digest (`…_<8 hex>__<code>`) keeps an empty path. A rule constraint
+  from an older generator, named after the rule's id, reads that id as its path until the
+  module is regenerated.
 - **backbone-core** — a row rule compared two decimals as text, since a decimal serializes as
   a string: `"50" <= "100"` was false and refused a valid row. Two texts that are both written
   as decimals now compare exactly as numbers (`"1.10" == "1.1"`); text that only looks numeric

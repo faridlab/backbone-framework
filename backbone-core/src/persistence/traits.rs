@@ -288,19 +288,27 @@ fn generated_code(constraint: &str) -> Option<String> {
     (code != constraint).then_some(code)
 }
 
+/// Tenant keys a generated unique index names before its field, in key order.
+#[cfg(feature = "postgres")]
+const TENANT_KEYS: &[&str] = &["company_id", "tenant_id", "org_unit_id", "organization_id"];
+
 /// The field a generated constraint concerns, read out of its name; `table` is the bare
-/// table Postgres reports. The schema generator writes three shapes that carry one:
+/// table Postgres reports. The schema generator names a constraint
+/// `<prefix>_<table>_<segment>__<code>` (`constraint_name` in metaphor-plugin-schema's
+/// `generators/sql.rs`), and the segment names the field:
 ///
 /// - a field check, `ck_<table>_<field>_<code>__<code>`
 ///   (`ck_tickets_title_max_length__max_length` → `title`);
-/// - a rule or key about a field, `<prefix>_<table>_on_<field>__<code>` for any of the
-///   `ck`, `uq`, `ex` and `tg` prefixes (`ck_projects_on_kind__website_required` → `kind`,
-///   `uq_projects_on_code__code_taken` → `code`): a row rule names the field its guard
-///   reports, a unique key the last column of the key that is not a scope column;
+/// - a row rule, `ck_<table>_<field>__<code>`, on the field its guard reports
+///   (`ck_projects_kind__website_required_for_client` → `kind`);
+/// - a unique index, `uq_<table>_[<tenant keys>_]<field>__<code>`
+///   (`uq_projects_contact_email__unique` → `contact_email`,
+///   `uq_projects_company_id_code__code_taken` → `code`);
 /// - a foreign key, `fk_<table>_<column>` (or `fk_<table>_<column>_fk` on a link table).
 ///
-/// A rule about the whole record is named `<prefix>_<table>_<rule>__<code>` and yields
-/// nothing, as does a name too long for Postgres, which the generator ends in a digest.
+/// Read back: the part between the prefix and the first `__`, less `<table>_`; a name too
+/// long for Postgres, whose head the generator ends in `_<8 hex digits>`, names no field;
+/// then a trailing `_<code>` is dropped, and leading tenant keys while something remains.
 #[cfg(feature = "postgres")]
 fn constraint_column(constraint: &str, table: &str, code: &str) -> Option<String> {
     let ident = |s: &str| {
@@ -316,15 +324,33 @@ fn constraint_column(constraint: &str, table: &str, code: &str) -> Option<String
         .find_map(|p| constraint.strip_prefix(p))?
         .split_once("__")?
         .0;
-    let rest = head.strip_prefix(table)?.strip_prefix('_')?;
-    if constraint.starts_with("ck_") && !code.is_empty() {
+    if ends_in_digest(head) {
+        return None;
+    }
+    let mut rest = head.strip_prefix(table)?.strip_prefix('_')?;
+    if !code.is_empty() {
         if let Some(field) = rest.strip_suffix(code).and_then(|f| f.strip_suffix('_')) {
             if !field.is_empty() {
-                return ident(field);
+                rest = field;
             }
         }
     }
-    ident(rest.strip_prefix("on_")?)
+    while let Some(next) = TENANT_KEYS.iter().find_map(|key| {
+        rest.strip_prefix(key)?.strip_prefix('_').filter(|r| !r.is_empty())
+    }) {
+        rest = next;
+    }
+    ident(rest)
+}
+
+/// Whether a constraint name's head ends in the `_<8 hex digits>` digest the generator puts on
+/// a name too long for Postgres.
+#[cfg(feature = "postgres")]
+fn ends_in_digest(head: &str) -> bool {
+    let bytes = head.as_bytes();
+    bytes.len() > 9
+        && bytes[bytes.len() - 9] == b'_'
+        && bytes[bytes.len() - 8..].iter().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
 }
 
 /// Columns a unique key carries for scoping, not as the value a person chose.
@@ -492,11 +518,12 @@ mod constraint_violation_tests {
             v.message
         );
         assert!(v.message.starts_with("title "), "{}", v.message);
-        // A row rule names no single column: a whole-record sentence, still without identifiers.
+        // A rule whose name was shortened to a digest names no column: a whole-record
+        // sentence, still without identifiers.
         let row = constraint_violation(
             ErrorKind::CheckViolation,
             Some("23514"),
-            Some("ck_journals_g_jrn_1__unbalanced"),
+            Some("ck_journals_lines_must_balance_1f2e3d4c__unbalanced"),
             "",
             None,
             Some("journals"),
@@ -548,14 +575,27 @@ mod constraint_violation_tests {
         let v = constraint_violation(ErrorKind::UniqueViolation, Some("23505"), Some("idx_projects_contact_email"), "", None, Some("projects")).unwrap();
         assert_eq!((v.path.as_str(), v.code.as_str()), ("", "taken"));
         assert!(!v.message.contains("idx_"), "{}", v.message);
-        // The `on_<field>` name carries the path when the detail is absent.
-        let v = constraint_violation(ErrorKind::UniqueViolation, Some("23505"), Some("uq_projects_on_contact_email__taken"), "", None, Some("projects")).unwrap();
-        assert_eq!((v.path.as_str(), v.code.as_str()), ("contact_email", "taken"));
-        let v = constraint_violation(ErrorKind::UniqueViolation, Some("23505"), Some("uq_projects_on_code__code_taken"), "", None, Some("projects")).unwrap();
+        // The generated name carries the path when the detail is absent: `@unique` …
+        let v = constraint_violation(ErrorKind::UniqueViolation, Some("23505"), Some("uq_projects_contact_email__unique"), "", None, Some("projects")).unwrap();
+        assert_eq!((v.path.as_str(), v.code.as_str()), ("contact_email", "unique"));
+        assert!(!v.message.contains("uq_"), "{}", v.message);
+        let v = constraint_violation(ErrorKind::UniqueViolation, Some("23505"), Some("uq_tickets_title__unique"), "", None, Some("tickets")).unwrap();
+        assert_eq!((v.path.as_str(), v.code.as_str()), ("title", "unique"));
+        // … a declared uniqueness rule, its tenant key dropped …
+        let v = constraint_violation(ErrorKind::UniqueViolation, Some("23505"), Some("uq_projects_company_id_code__code_taken"), "", None, Some("projects")).unwrap();
         assert_eq!((v.path.as_str(), v.code.as_str()), ("code", "code_taken"));
-        // A declared uniqueness rule named after the rule: its code, no path.
-        let v = constraint_violation(ErrorKind::UniqueViolation, Some("23505"), Some("uq_projects_u_code_1__code_taken"), "", None, Some("projects")).unwrap();
+        let v = constraint_violation(ErrorKind::UniqueViolation, Some("23505"), Some("uq_items_company_id_org_unit_id_sku__unique"), "", None, Some("items")).unwrap();
+        assert_eq!(v.path, "sku");
+        // … a field that is itself a tenant key stays when nothing else remains.
+        let v = constraint_violation(ErrorKind::UniqueViolation, Some("23505"), Some("uq_members_org_unit_id__unique"), "", None, Some("members")).unwrap();
+        assert_eq!(v.path, "org_unit_id");
+        // A digest-shortened name names no field.
+        let v = constraint_violation(ErrorKind::UniqueViolation, Some("23505"), Some("uq_projects_company_id_some_long_fiel_0a1b2c3d__code_taken"), "", None, Some("projects")).unwrap();
         assert_eq!((v.path.as_str(), v.code.as_str()), ("", "code_taken"));
+        // The service-owned tenancy index, named without `__`: `taken`, never its name.
+        let v = constraint_violation(ErrorKind::UniqueViolation, Some("23505"), Some("uq_tickets_org_unit_id_reference"), "", None, Some("tickets")).unwrap();
+        assert_eq!((v.path.as_str(), v.code.as_str()), ("", "taken"));
+        assert!(!v.message.contains("uq_"), "{}", v.message);
     }
 
     #[test]
@@ -573,13 +613,14 @@ mod constraint_violation_tests {
 
     #[test]
     fn a_rule_check_about_a_field_answers_on_that_field() {
-        let v = constraint_violation(ErrorKind::CheckViolation, Some("23514"), Some("ck_projects_on_kind__website_required_for_client"), "", None, Some("projects")).unwrap();
+        let v = constraint_violation(ErrorKind::CheckViolation, Some("23514"), Some("ck_projects_kind__website_required_for_client"), "", None, Some("projects")).unwrap();
         assert_eq!((v.path.as_str(), v.code.as_str()), ("kind", "website_required_for_client"));
-        // A field check keeps reading as one, a field starting with `on_` included.
-        let v = constraint_violation(ErrorKind::CheckViolation, Some("23514"), Some("ck_shifts_on_call_note_max_length__max_length"), "", None, Some("shifts")).unwrap();
-        assert_eq!(v.path, "on_call_note");
-        // A whole-record rule keeps no path.
-        let v = constraint_violation(ErrorKind::CheckViolation, Some("23514"), Some("ck_projects_r_1__website_required_for_client"), "", None, Some("projects")).unwrap();
+        assert!(!v.message.contains("ck_") && !v.message.contains("website_required"), "{}", v.message);
+        // A field check keeps reading as one.
+        let v = constraint_violation(ErrorKind::CheckViolation, Some("23514"), Some("ck_shifts_call_note_max_length__max_length"), "", None, Some("shifts")).unwrap();
+        assert_eq!(v.path, "call_note");
+        // A digest-shortened rule name keeps no path.
+        let v = constraint_violation(ErrorKind::CheckViolation, Some("23514"), Some("ck_projects_a_very_long_field_name_dead00ff__website_required_for_client"), "", None, Some("projects")).unwrap();
         assert_eq!((v.path.as_str(), v.code.as_str()), ("", "website_required_for_client"));
     }
 
