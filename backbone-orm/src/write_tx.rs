@@ -179,6 +179,31 @@ where
     unit.finish(result).await
 }
 
+/// Why a write transaction run through [`in_write_tx_result`] failed: the work's own error, or
+/// the database while beginning, binding the scope or committing.
+#[derive(Debug)]
+pub enum WriteTxFailure<E> {
+    /// The work returned this error; the transaction was rolled back.
+    Inner(E),
+    /// The database refused to begin, bind the scope or commit.
+    Db(sqlx::Error),
+}
+
+impl<E> From<sqlx::Error> for WriteTxFailure<E> {
+    fn from(e: sqlx::Error) -> Self {
+        Self::Db(e)
+    }
+}
+
+/// [`in_write_tx`] for work whose error type cannot absorb a `sqlx::Error`: the two kinds of
+/// failure stay apart in [`WriteTxFailure`], so a caller maps each as it must.
+pub async fn in_write_tx_result<F, T, E>(pool: &PgPool, f: F) -> Result<T, WriteTxFailure<E>>
+where
+    F: Future<Output = Result<T, E>>,
+{
+    in_write_tx(pool, async { f.await.map_err(WriteTxFailure::Inner) }).await
+}
+
 /// Bind the company or org scope of the current task, and its audit attribution, onto a
 /// connection that is inside a transaction.
 async fn bind_task_scope(conn: &mut PgConnection) -> Result<(), sqlx::Error> {
