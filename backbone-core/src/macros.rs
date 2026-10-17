@@ -98,6 +98,23 @@ macro_rules! impl_crud_repository {
                 }
             }
 
+            async fn reference_visible(
+                &self,
+                table: &str,
+                column: &str,
+                value: &serde_json::Value,
+            ) -> Result<Option<bool>, backbone_core::RepositoryError> {
+                backbone_orm::reference_visible(
+                    (&**self).pool(),
+                    (&**self).table_name(),
+                    table,
+                    column,
+                    value,
+                )
+                .await
+                .map_err(backbone_core::RepositoryError::from_source)
+            }
+
             // ── NOTE on method resolution ─────────────────────────────────────
             // This repo is a newtype wrapping `GenericCrudRepository<E, SoftDelete>`
             // and implements `Deref` to it.  Inside a trait impl, unqualified `self.foo()`
@@ -188,7 +205,7 @@ macro_rules! impl_crud_repository {
                 limit: u32,
             ) -> Result<(Vec<$entity>, u64), backbone_core::RepositoryError> {
                 let pagination =
-                    backbone_orm::repository::PaginationParams { page, per_page: limit };
+                    backbone_orm::repository::PaginationParams::new(page, limit);
                 (&**self).list_paginated(pagination)
                     .await
                     .map(|r| (r.data, r.pagination.total))
@@ -202,7 +219,7 @@ macro_rules! impl_crud_repository {
                 filters: std::collections::HashMap<String, String>,
             ) -> Result<(Vec<$entity>, u64), backbone_core::RepositoryError> {
                 let pagination =
-                    backbone_orm::repository::PaginationParams { page, per_page: limit };
+                    backbone_orm::repository::PaginationParams::new(page, limit);
                 (&**self).list_paginated_filtered(pagination, Some(&filters))
                     .await
                     .map(|r| (r.data, r.pagination.total))
@@ -219,7 +236,7 @@ macro_rules! impl_crud_repository {
                 backbone_core::RepositoryError,
             > {
                 let pagination =
-                    backbone_orm::repository::PaginationParams { page, per_page: limit };
+                    backbone_orm::repository::PaginationParams::new(page, limit);
                 (&**self)
                     .list_paginated_filtered(pagination, Some(&filters))
                     .await
@@ -247,7 +264,7 @@ macro_rules! impl_crud_repository {
                 limit: u32,
             ) -> Result<(Vec<$entity>, u64), backbone_core::RepositoryError> {
                 let pagination =
-                    backbone_orm::repository::PaginationParams { page, per_page: limit };
+                    backbone_orm::repository::PaginationParams::new(page, limit);
                 (&**self).list_deleted(pagination)
                     .await
                     .map(|r| (r.data, r.pagination.total))
@@ -261,7 +278,7 @@ macro_rules! impl_crud_repository {
                 filters: std::collections::HashMap<String, String>,
             ) -> Result<(Vec<$entity>, u64), backbone_core::RepositoryError> {
                 let pagination =
-                    backbone_orm::repository::PaginationParams { page, per_page: limit };
+                    backbone_orm::repository::PaginationParams::new(page, limit);
                 (&**self).list_deleted_filtered(pagination, Some(&filters))
                     .await
                     .map(|r| (r.data, r.pagination.total))
@@ -379,6 +396,23 @@ macro_rules! impl_crud_repository {
                 }
             }
 
+            async fn reference_visible(
+                &self,
+                table: &str,
+                column: &str,
+                value: &serde_json::Value,
+            ) -> Result<Option<bool>, backbone_core::RepositoryError> {
+                backbone_orm::reference_visible(
+                    (&**self).pool(),
+                    (&**self).table_name(),
+                    table,
+                    column,
+                    value,
+                )
+                .await
+                .map_err(backbone_core::RepositoryError::from_source)
+            }
+
             async fn create(
                 &self,
                 entity: $entity,
@@ -465,7 +499,7 @@ macro_rules! impl_crud_repository {
                 limit: u32,
             ) -> Result<(Vec<$entity>, u64), backbone_core::RepositoryError> {
                 let pagination =
-                    backbone_orm::repository::PaginationParams { page, per_page: limit };
+                    backbone_orm::repository::PaginationParams::new(page, limit);
                 (&**self).list_paginated(pagination)
                     .await
                     .map(|r| (r.data, r.pagination.total))
@@ -479,7 +513,7 @@ macro_rules! impl_crud_repository {
                 filters: std::collections::HashMap<String, String>,
             ) -> Result<(Vec<$entity>, u64), backbone_core::RepositoryError> {
                 let pagination =
-                    backbone_orm::repository::PaginationParams { page, per_page: limit };
+                    backbone_orm::repository::PaginationParams::new(page, limit);
                 (&**self).list_paginated_filtered(pagination, Some(&filters))
                     .await
                     .map(|r| (r.data, r.pagination.total))
@@ -496,7 +530,7 @@ macro_rules! impl_crud_repository {
                 backbone_core::RepositoryError,
             > {
                 let pagination =
-                    backbone_orm::repository::PaginationParams { page, per_page: limit };
+                    backbone_orm::repository::PaginationParams::new(page, limit);
                 (&**self)
                     .list_paginated_filtered(pagination, Some(&filters))
                     .await

@@ -110,6 +110,9 @@ impl From<sqlx::Error> for RepositoryError {
         match e {
             sqlx::Error::RowNotFound => RepositoryError::NotFound,
             sqlx::Error::Database(db_err) => {
+                if let Some(v) = scope_refusal(db_err.code().as_deref(), db_err.message()) {
+                    return RepositoryError::Violations(vec![v]);
+                }
                 let pg = db_err.try_downcast_ref::<sqlx::postgres::PgDatabaseError>();
                 if let Some(v) = constraint_violation(
                     db_err.kind(),
@@ -123,7 +126,8 @@ impl From<sqlx::Error> for RepositoryError {
                 }
                 let msg = db_err.message().to_string();
                 if msg.contains("duplicate key") || msg.contains("unique constraint") {
-                    RepositoryError::AlreadyExists(msg)
+                    // Never the raw message: it names the index.
+                    RepositoryError::Violations(vec![taken_violation("", "taken")])
                 } else {
                     RepositoryError::DatabaseError(msg)
                 }
@@ -133,19 +137,48 @@ impl From<sqlx::Error> for RepositoryError {
     }
 }
 
+/// The violation a row-level security refusal stands for: a write whose new row the
+/// table's policy does not admit (`42501` with the policy sentence), which is how a
+/// forged `company_id` or `org_unit_id` is refused. It answers `scope_refused` with no
+/// path, since Postgres names neither the policy's column nor the value, and a sentence
+/// that names no table or policy. Any other `42501` (a missing grant) is a server fault
+/// and stays one.
+#[cfg(feature = "postgres")]
+fn scope_refusal(sqlstate: Option<&str>, message: &str) -> Option<crate::violation::Violation> {
+    (sqlstate == Some("42501") && message.contains("row-level security policy")).then(|| {
+        crate::violation::Violation::new(
+            "",
+            "scope_refused",
+            "The record is outside the company or unit this request may write to",
+        )
+    })
+}
+
+/// The `taken` answer for a unique key, on `path` when it is known.
+#[cfg(feature = "postgres")]
+fn taken_violation(path: &str, code: &str) -> crate::violation::Violation {
+    let message = match path {
+        "" => "This value is already taken by another record".to_string(),
+        p => format!("{p} is already taken by another record"),
+    };
+    crate::violation::Violation::new(path, code, message)
+}
+
 /// The violation a database constraint error stands for, or `None` for an error
 /// that names no rule. A foreign key answers `reference_missing` on the column
 /// that names a missing record, or `still_referenced` when a removed record is
 /// still pointed at. A NOT NULL answers `required` on its column, worded as the
-/// application-side required check is. A CHECK, a generated unique index (`uq_…`)
-/// and an exclusion answer the code their constraint name carries (see
-/// [`crate::violation::code_from_constraint`]). Another unique index keeps its
-/// `AlreadyExists` answer.
+/// application-side required check is. A CHECK and an exclusion answer the code
+/// their constraint name carries (see [`crate::violation::code_from_constraint`]).
+/// Every unique key answers too: the code its generated name carries
+/// (`uq_…__<code>`), or `taken` for any other name, which is never repeated.
 ///
 /// The `code` stays machine-readable for clients to translate; the sentence is
 /// for a person, so it never names a table, a constraint or a rule identifier.
 /// `table` is the table Postgres reports, used to read the column out of a
-/// generated CHECK's name, since Postgres reports no column for a CHECK.
+/// generated constraint's name (see [`constraint_column`]) when Postgres reports
+/// none: a CHECK never carries one, and on a table with row-level security
+/// Postgres leaves the `Key (…)` detail out of unique and foreign-key errors too.
 #[cfg(feature = "postgres")]
 fn constraint_violation(
     kind: sqlx::error::ErrorKind,
@@ -166,13 +199,26 @@ fn constraint_violation(
             format!("{column} is required"),
         ));
     }
+    if kind == ErrorKind::UniqueViolation || sqlstate == Some("23505") {
+        let generated = constraint.and_then(generated_code);
+        let path = column
+            .filter(|c| !c.is_empty())
+            .map(str::to_string)
+            .or_else(|| key_column(detail))
+            .or_else(|| {
+                let (c, t) = (constraint?, table?);
+                constraint_column(c, t, generated.as_deref().unwrap_or(""))
+            })
+            .unwrap_or_default();
+        return Some(taken_violation(&path, generated.as_deref().unwrap_or("taken")));
+    }
     let constraint = constraint?;
     let code = code_from_constraint(constraint);
     let path = column
         .filter(|c| !c.is_empty())
         .map(str::to_string)
         .or_else(|| key_column(detail))
-        .or_else(|| table.and_then(|t| check_column(constraint, t, &code)))
+        .or_else(|| table.and_then(|t| constraint_column(constraint, t, &code)))
         .unwrap_or_default();
     Some(match kind {
         ErrorKind::ForeignKeyViolation if detail.contains("still referenced") => Violation::new(
@@ -189,13 +235,6 @@ fn constraint_violation(
         }
         ErrorKind::CheckViolation => {
             let message = check_sentence(&path, &code);
-            Violation::new(path, code, message)
-        }
-        ErrorKind::UniqueViolation if constraint.starts_with("uq_") => {
-            let message = match path.as_str() {
-                "" => "This value is already taken by another record".to_string(),
-                p => format!("{p} is already taken by another record"),
-            };
             Violation::new(path, code, message)
         }
         _ if sqlstate == Some("23P01") => Violation::new(
@@ -241,17 +280,51 @@ fn check_sentence(path: &str, code: &str) -> String {
     format!("{field} {predicate}")
 }
 
-/// The column a generated field CHECK guards, read out of its name.
-///
-/// The schema generator names a field check `ck_<table>_<field>_<code>__<code>`
-/// (e.g. `ck_tickets_title_max_length__max_length`); a row rule's name carries no
-/// field and a name too long for Postgres ends in a hash, and neither yields one.
+/// The code a generated constraint name carries after its `__`, or `None` for a name
+/// the generator did not write (which must never reach a client as a code).
 #[cfg(feature = "postgres")]
-fn check_column(constraint: &str, table: &str, code: &str) -> Option<String> {
-    let head = constraint.strip_prefix("ck_")?.split_once("__")?.0;
+fn generated_code(constraint: &str) -> Option<String> {
+    let code = crate::violation::code_from_constraint(constraint);
+    (code != constraint).then_some(code)
+}
+
+/// The field a generated constraint concerns, read out of its name; `table` is the bare
+/// table Postgres reports. The schema generator writes three shapes that carry one:
+///
+/// - a field check, `ck_<table>_<field>_<code>__<code>`
+///   (`ck_tickets_title_max_length__max_length` → `title`);
+/// - a rule or key about a field, `<prefix>_<table>_on_<field>__<code>` for any of the
+///   `ck`, `uq`, `ex` and `tg` prefixes (`ck_projects_on_kind__website_required` → `kind`,
+///   `uq_projects_on_code__code_taken` → `code`): a row rule names the field its guard
+///   reports, a unique key the last column of the key that is not a scope column;
+/// - a foreign key, `fk_<table>_<column>` (or `fk_<table>_<column>_fk` on a link table).
+///
+/// A rule about the whole record is named `<prefix>_<table>_<rule>__<code>` and yields
+/// nothing, as does a name too long for Postgres, which the generator ends in a digest.
+#[cfg(feature = "postgres")]
+fn constraint_column(constraint: &str, table: &str, code: &str) -> Option<String> {
+    let ident = |s: &str| {
+        (!s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+            .then(|| s.to_string())
+    };
+    if let Some(rest) = constraint.strip_prefix("fk_") {
+        let column = rest.strip_prefix(table)?.strip_prefix('_')?;
+        return ident(column.strip_suffix("_fk").unwrap_or(column));
+    }
+    let head = ["ck_", "uq_", "ex_", "tg_"]
+        .iter()
+        .find_map(|p| constraint.strip_prefix(p))?
+        .split_once("__")?
+        .0;
     let rest = head.strip_prefix(table)?.strip_prefix('_')?;
-    let field = rest.strip_suffix(code)?.strip_suffix('_')?;
-    (!field.is_empty()).then(|| field.to_string())
+    if constraint.starts_with("ck_") && !code.is_empty() {
+        if let Some(field) = rest.strip_suffix(code).and_then(|f| f.strip_suffix('_')) {
+            if !field.is_empty() {
+                return ident(field);
+            }
+        }
+    }
+    ident(rest.strip_prefix("on_")?)
 }
 
 /// Columns a unique key carries for scoping, not as the value a person chose.
@@ -466,16 +539,61 @@ mod constraint_violation_tests {
     }
 
     #[test]
+    fn every_unique_key_answers_taken_and_never_names_its_index() {
+        // A name the generator did not write: `taken`, the path from the detail when given.
+        let v = constraint_violation(ErrorKind::UniqueViolation, Some("23505"), Some("users_email_key"), "Key (email)=(a@b.c) already exists.", None, Some("users")).unwrap();
+        assert_eq!((v.path.as_str(), v.code.as_str()), ("email", "taken"));
+        assert!(!v.message.contains("users_email_key"), "{}", v.message);
+        // RLS tables leave the detail out: a legacy `idx_` name yields no path, still coded.
+        let v = constraint_violation(ErrorKind::UniqueViolation, Some("23505"), Some("idx_projects_contact_email"), "", None, Some("projects")).unwrap();
+        assert_eq!((v.path.as_str(), v.code.as_str()), ("", "taken"));
+        assert!(!v.message.contains("idx_"), "{}", v.message);
+        // The `on_<field>` name carries the path when the detail is absent.
+        let v = constraint_violation(ErrorKind::UniqueViolation, Some("23505"), Some("uq_projects_on_contact_email__taken"), "", None, Some("projects")).unwrap();
+        assert_eq!((v.path.as_str(), v.code.as_str()), ("contact_email", "taken"));
+        let v = constraint_violation(ErrorKind::UniqueViolation, Some("23505"), Some("uq_projects_on_code__code_taken"), "", None, Some("projects")).unwrap();
+        assert_eq!((v.path.as_str(), v.code.as_str()), ("code", "code_taken"));
+        // A declared uniqueness rule named after the rule: its code, no path.
+        let v = constraint_violation(ErrorKind::UniqueViolation, Some("23505"), Some("uq_projects_u_code_1__code_taken"), "", None, Some("projects")).unwrap();
+        assert_eq!((v.path.as_str(), v.code.as_str()), ("", "code_taken"));
+    }
+
+    #[test]
+    fn a_foreign_key_on_a_table_with_rls_names_its_column_from_the_constraint() {
+        // Postgres omits `Key (…)` when the table has row-level security.
+        let v = constraint_violation(ErrorKind::ForeignKeyViolation, Some("23503"), Some("fk_tickets_project_id"), "", None, Some("tickets")).unwrap();
+        assert_eq!((v.path.as_str(), v.code.as_str()), ("project_id", "reference_missing"));
+        assert!(!v.message.contains("fk_"), "{}", v.message);
+        let link = constraint_violation(ErrorKind::ForeignKeyViolation, Some("23503"), Some("fk_user_roles_role_id_fk"), "", None, Some("user_roles")).unwrap();
+        assert_eq!(link.path, "role_id");
+        // Another table's key does not parse as this table's.
+        let other = constraint_violation(ErrorKind::ForeignKeyViolation, Some("23503"), Some("fk_other_project_id"), "", None, Some("tickets")).unwrap();
+        assert_eq!(other.path, "");
+    }
+
+    #[test]
+    fn a_rule_check_about_a_field_answers_on_that_field() {
+        let v = constraint_violation(ErrorKind::CheckViolation, Some("23514"), Some("ck_projects_on_kind__website_required_for_client"), "", None, Some("projects")).unwrap();
+        assert_eq!((v.path.as_str(), v.code.as_str()), ("kind", "website_required_for_client"));
+        // A field check keeps reading as one, a field starting with `on_` included.
+        let v = constraint_violation(ErrorKind::CheckViolation, Some("23514"), Some("ck_shifts_on_call_note_max_length__max_length"), "", None, Some("shifts")).unwrap();
+        assert_eq!(v.path, "on_call_note");
+        // A whole-record rule keeps no path.
+        let v = constraint_violation(ErrorKind::CheckViolation, Some("23514"), Some("ck_projects_r_1__website_required_for_client"), "", None, Some("projects")).unwrap();
+        assert_eq!((v.path.as_str(), v.code.as_str()), ("", "website_required_for_client"));
+    }
+
+    #[test]
+    fn a_row_security_refusal_is_scope_refused_and_a_missing_grant_is_not() {
+        let v = scope_refusal(Some("42501"), "new row violates row-level security policy for table \"projects\"").unwrap();
+        assert_eq!((v.path.as_str(), v.code.as_str()), ("", "scope_refused"));
+        assert!(!v.message.contains("projects") && !v.message.contains("policy"), "{}", v.message);
+        assert!(scope_refusal(Some("42501"), "permission denied for table projects").is_none());
+        assert!(scope_refusal(Some("23505"), "row-level security policy").is_none());
+    }
+
+    #[test]
     fn an_error_that_names_no_rule_keeps_its_old_answer() {
-        assert!(constraint_violation(
-            ErrorKind::UniqueViolation,
-            Some("23505"),
-            Some("users_email_key"),
-            "",
-            None,
-            None
-        )
-        .is_none());
         assert!(
             constraint_violation(ErrorKind::Other, Some("42P01"), None, "", None, None).is_none()
         );
@@ -495,6 +613,31 @@ mod constraint_violation_tests {
 // ============================================================
 // Entity Traits
 // ============================================================
+
+/// A foreign key one of an entity's fields holds: `field` (the entity's serialized
+/// field, which is also its column) names a row of `table` by its `column`.
+///
+/// The generic service checks, before a write that sets the field, that the row it
+/// names is one the caller can see (see [`PersistentEntity::references`]): Postgres
+/// checks a foreign key without row-level security, so without this a request scoped
+/// to one company could point a record at another company's row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Reference {
+    /// The referencing field, by its serialized (snake_case) name; also the column.
+    pub field: &'static str,
+    /// The referenced table, bare (resolved in the referencing table's schema first)
+    /// or schema-qualified.
+    pub table: &'static str,
+    /// The referenced column, usually `id`.
+    pub column: &'static str,
+}
+
+impl Reference {
+    /// A reference from `field` to `table`.`column`.
+    pub const fn new(field: &'static str, table: &'static str, column: &'static str) -> Self {
+        Self { field, table, column }
+    }
+}
 
 /// Trait for entities that can be persisted.
 ///
@@ -576,6 +719,21 @@ pub trait PersistentEntity: Clone + Send + Sync + Debug + Serialize + Deserializ
     /// schema generator fills it from the entity's state machines; the default is none, which
     /// leaves a protected state field refused to verbs as well.
     fn state_fields() -> &'static [&'static str] {
+        &[]
+    }
+
+    /// The foreign keys this entity's fields hold.
+    ///
+    /// Before a generic create, PUT, PATCH or bulk write stores a value in one of these
+    /// fields (a create, or a write that changes it), the generic service asks the
+    /// repository whether the row it names is visible to the caller, on the request's own
+    /// connection and scope ([`CrudRepository::reference_visible`]). A row the caller
+    /// cannot see — missing, or fenced off by row-level security — refuses the write with
+    /// a `reference_missing` violation on the field, the same answer a missing row gets, so
+    /// the refusal never tells that the row exists elsewhere. The schema generator fills it
+    /// from the entity's relations as a `const` slice; the default checks nothing beyond
+    /// the database's key.
+    fn references() -> &'static [Reference] {
         &[]
     }
 }
@@ -748,6 +906,24 @@ where
         _ids: &[String],
     ) -> Vec<serde_json::Value> {
         Vec::new()
+    }
+
+    /// Whether the row of `table` whose `column` holds `value` is visible to the caller:
+    /// read on the request's own connection and scope, so a row row-level security hides
+    /// counts as absent. `table` comes from [`PersistentEntity::references`]
+    /// (generator-emitted), never from client input.
+    ///
+    /// `Ok(None)` means this repository cannot tell; the write is then left to the
+    /// database's own key. That is the default. The Postgres-backed generated repositories
+    /// override it via `impl_crud_repository!`.
+    async fn reference_visible(
+        &self,
+        table: &str,
+        column: &str,
+        value: &serde_json::Value,
+    ) -> Result<Option<bool>, RepositoryError> {
+        let _ = (table, column, value);
+        Ok(None)
     }
 
     /// Check if an entity exists by ID

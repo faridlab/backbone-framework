@@ -76,8 +76,8 @@ pub mod postgres;
 
 // Re-exports from traits
 pub use traits::{
-    CrudRepository, PartialUpdatable, PersistentEntity, RepositoryError, SearchableRepository,
-    Versioned,
+    CrudRepository, PartialUpdatable, PersistentEntity, Reference, RepositoryError,
+    SearchableRepository, Versioned,
 };
 
 // Re-export InMemoryRepository

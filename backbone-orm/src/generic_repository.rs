@@ -1375,6 +1375,67 @@ pub async fn fetch_by_ids_as_json(
     }
 }
 
+/// Whether the row of `table` whose `column` holds `value` is visible on the caller's
+/// scope: one `SELECT EXISTS` run as every read is (on the request's connection when one
+/// is bound, else under the task's company scope), so a row row-level security hides
+/// reads as absent. Postgres checks a foreign key without row-level security; this is
+/// the check that does not.
+///
+/// `value` is a JSON scalar, cast to the column's own type by `jsonb_populate_record`, so
+/// the lookup keeps the column's index whatever its type. `table` and `column` are
+/// generator-emitted (`PersistentEntity::references`), never client input, and are refused
+/// unless they are plain identifiers. A bare `table` resolves as
+/// [`fetch_by_ids_as_json`]'s does: the caller's schema first, then the search path.
+/// `Ok(None)` when the table does not exist in either spelling (its module is not
+/// installed, and the database has no key to it either).
+pub async fn reference_visible(
+    pool: &PgPool,
+    caller_table: &str,
+    table: &str,
+    column: &str,
+    value: &serde_json::Value,
+) -> Result<Option<bool>> {
+    let plain = |s: &str, dot: bool| {
+        !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || (dot && c == '.'))
+    };
+    if !plain(table, true) || !plain(column, false) {
+        anyhow::bail!("reference target `{table}`.`{column}` is not a plain identifier");
+    }
+    let qualified = qualify_relation_table(caller_table, table);
+    match row_visible(pool, &qualified, column, value).await {
+        Ok(seen) => Ok(Some(seen)),
+        Err(err) if is_undefined_table(&err) => {
+            if qualified == table {
+                return Ok(None);
+            }
+            match row_visible(pool, table, column, value).await {
+                Ok(seen) => Ok(Some(seen)),
+                Err(err) if is_undefined_table(&err) => Ok(None),
+                Err(err) => Err(err),
+            }
+        }
+        Err(err) => Err(err),
+    }
+}
+
+async fn row_visible(
+    pool: &PgPool,
+    table: &str,
+    column: &str,
+    value: &serde_json::Value,
+) -> Result<bool> {
+    let query = format!(
+        "SELECT EXISTS (SELECT 1 FROM {table} t \
+         WHERE t.{column} = (jsonb_populate_record(NULL::{table}, $1::jsonb)).{column})"
+    );
+    let probe = serde_json::json!({ column: value });
+    Ok(crate::company_scope::fetch_one_scalar_scoped(
+        pool,
+        sqlx::query_scalar::<_, bool>(&query).bind(probe),
+    )
+    .await?)
+}
+
 /// The scoped fetch behind [`fetch_by_ids_as_json`] — one relation, one table
 /// spelling. Scoped because an `?include=` hydration of a company-fenced
 /// relation must obey the same fence, so a cross-company related row is never

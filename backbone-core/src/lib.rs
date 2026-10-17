@@ -182,7 +182,7 @@ pub use utils::{
 // Persistence layer exports - Generic repositories
 pub use persistence::{
     // Core traits
-    CrudRepository, PersistentEntity, RepositoryError, PartialUpdatable, SearchableRepository, Versioned,
+    CrudRepository, PersistentEntity, Reference, RepositoryError, PartialUpdatable, SearchableRepository, Versioned,
     // In-memory repository (always available)
     InMemoryRepository,
     // Adapters for bridging Repository to CrudService
