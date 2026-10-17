@@ -14,6 +14,76 @@ The release workflow reads the section matching the git tag's version and
 uses it as the GitHub Release body. If no matching section is found it falls
 back to the `## [Unreleased]` section.
 
+## [Unreleased]
+
+### Security
+
+- **backbone-auth** — a session token named no tenant, and every tenant verifies with the same
+  key, so a token minted in one tenant opened a session in another whose org tree holds the same
+  node ids (databases seeded from the same fixtures do). `OrgIssuer::for_audience(slug)` seals
+  the tenant into the standard `aud` claim, and `OrgVerifier::bind_audience(source)` /
+  `CompanyVerifier::bind_audience(source)` make `org_auth` / `company_auth` refuse (401) a token
+  whose `aud` does not name the request's tenant; a surface that resolves no tenant accepts only
+  tokens that name none. Opt-in: an unbound verifier behaves as before. Tokens minted without a
+  tenant are refused on a tenant's surface; the client's refresh mints a bound pair, so sessions
+  survive a deploy. `accept_unbound_tokens(true)` (deprecated, off by default) accepts them for
+  clients that cannot refresh. `OrgClaims` and `CompanyClaims` gain an `aud` field —
+  **breaking** for code that builds them with a struct literal.
+- **backbone-tenant** — `tenant_route` now inserts the resolved `TenantId` into the request
+  extensions, and `axum_router::tenant_audience` reads it as the audience source for the guards
+  above.
+- **backbone-tenant** — a valid slug whose database does not exist left a registry entry behind
+  on every failed build, and enough of them evicted real tenants' pools at the next successful
+  request. A failed build is now removed, and only built tenants count against `max_tenants` or
+  can be evicted, least recently resolved successfully first.
+- **backbone-rate-limit** — **breaking:** the limiter keyed on a client-supplied
+  `x-rate-limit-key` header (one shared bucket without it) and let every request through when
+  the counter store failed. It now keys on the connection's peer address (`ConnectInfo`), reads
+  `X-Forwarded-For` / `X-Real-IP` only from peers declared with
+  `with_trusted_proxies(TrustedProxies::parse(..))` (rightmost untrusted entry), takes an
+  explicit key with `with_key_extractor` (e.g. the authenticated user id), and refuses with 503
+  when the store fails unless built `with_fail_mode(FailMode::Open)`. The in-memory store drops
+  expired entries once it holds 10,000 keys.
+- **backbone-core** — a 500 answered with the error's own text (SQL, table names, driver
+  messages). Every generic handler and `service_error_response` now answers a server fault with
+  a fixed sentence (`INTERNAL_ERROR_MESSAGE`) and logs the detail.
+
+### Fixed
+
+- **backbone-core** — restore-all and empty-trash skipped the write guard. They now load the
+  trash (at most `MAX_BATCH_SIZE` rows; a larger trash is refused with 400), ask the guard and
+  the lifecycle about every row as a single restore or permanent delete would, and write exactly
+  those ids, all or nothing.
+- **backbone-core** — **breaking (behaviour):** the generic upsert always inserted, so a retry
+  duplicated the record. A create body names no record and the framework knows no natural key,
+  so `POST {resource}/upsert` now answers 501 and `GenericCrudService::upsert` refuses.
+  `CrudService::supports_upsert()` (default `true`) lets a hand-written service keep its own.
+- **backbone-core** / **backbone-orm** — bulk create had no size cap and was not atomic: the
+  repository opened a transaction and inserted outside it. It now refuses more than
+  `MAX_BATCH_SIZE` items, runs the guard and hooks per item before writing, and inserts in one
+  transaction on the request's own connection; a refused item rolls the batch back and is named
+  (`backbone_orm::BatchItemError`, a violation path like `3/name`).
+- **backbone-core** — **breaking (behaviour):** a key the DTO does not take was dropped
+  silently on create, PUT, upsert, bulk create and bulk PUT. Those routes now answer 422 with an
+  `unknown_field` violation per key (`StrictJsonOrForm`). The keys a record's response carries
+  but no write takes (`id`, `metadata`, the timestamps) are tolerated; form bodies stay lenient.
+- **backbone-core** — statuses were picked by searching error text: a duplicate answered 409 on
+  create but 400 on PUT and PATCH. `CrudService::status_of` (default `None`) lets a service
+  answer by error kind; `GenericCrudService` uses `service_error_status`, so every route maps
+  violations to 422, validation to 400, not found to 404 and a duplicate to 409.
+- **backbone-core** — a path id that is not a UUID reached the `::uuid` cast and answered 500.
+  Path ids and batch ids are now checked first: 400 with an `invalid_id` violation.
+- **backbone-core** — a body that could not be read answered axum's plain-text rejection.
+  `JsonOrForm` now answers in the JSON envelope: malformed JSON is 400 (`malformed_body`), a
+  wrong or missing value 422 with the field's path (`lines/3/amount`, `required`).
+- **backbone-core** / **backbone-orm** — the trash list ignored filters and search.
+  `CrudRepository::list_deleted_filtered` (generated repositories override it) carries them,
+  and the ORM's trash queries search the entity's search fields.
+- **backbone-core** / **backbone-orm** — bulk PUT and bulk PATCH wrote every column of the row
+  they read. They now go through `CrudRepository::bulk_update_changed` (ORM
+  `bulk_update_changed`), which writes only the changed columns in one transaction and fails on
+  a row deleted since the read.
+
 ## [3.11.0] - 2026-10-17
 
 ### Security
