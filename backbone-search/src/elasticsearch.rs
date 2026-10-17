@@ -225,7 +225,7 @@ impl ElasticsearchSearch {
         }
 
         // Pagination
-        let from = (query.pagination.page - 1) * query.pagination.size;
+        let from = query.pagination.page.saturating_sub(1) * query.pagination.size;
         es_query["from"] = json!(from);
         es_query["size"] = json!(query.pagination.size);
 

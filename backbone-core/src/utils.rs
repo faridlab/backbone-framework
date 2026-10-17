@@ -108,7 +108,7 @@ impl PaginationParams {
     pub fn new(page: u32, limit: u32) -> Self {
         let page = if page == 0 { 1 } else { page };
         let limit = limit.clamp(1, 100); // Max 100 per page
-        let offset = (page - 1) * limit;
+        let offset = (page - 1).saturating_mul(limit);
 
         Self { page, limit, offset }
     }

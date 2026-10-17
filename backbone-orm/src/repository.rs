@@ -38,15 +38,24 @@ pub struct PaginationParams {
 }
 
 impl PaginationParams {
+    /// The most rows one page may hold. Every list the generic repositories serve is capped
+    /// here, whatever page size the caller asked for.
+    pub const MAX_PER_PAGE: u32 = 100;
+
+    /// A page request, normalized: page 0 reads as page 1, and the page size is held to
+    /// `1..=`[`MAX_PER_PAGE`](Self::MAX_PER_PAGE). Build pagination through this rather than
+    /// a struct literal, which skips both.
     pub fn new(page: u32, per_page: u32) -> Self {
         Self {
             page: page.max(1),
-            per_page: per_page.clamp(1, 100), // Limit to 1-100 per page
+            per_page: per_page.clamp(1, Self::MAX_PER_PAGE),
         }
     }
 
+    /// The rows to skip. Page 0 counts as page 1, so a literal that skipped [`Self::new`]
+    /// still never underflows.
     pub fn offset(&self) -> u32 {
-        (self.page - 1) * self.per_page
+        self.page.saturating_sub(1).saturating_mul(self.per_page)
     }
 
     pub fn limit(&self) -> u32 {

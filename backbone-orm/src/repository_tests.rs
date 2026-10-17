@@ -81,6 +81,16 @@ mod tests {
     }
 
     #[test]
+    fn page_zero_never_underflows_the_offset() {
+        // A struct literal skips `new`'s normalization; the offset still saturates.
+        let literal = PaginationParams { page: 0, per_page: 20 };
+        assert_eq!(literal.offset(), 0);
+        let normalized = PaginationParams::new(0, 1000);
+        assert_eq!((normalized.page, normalized.per_page), (1, PaginationParams::MAX_PER_PAGE));
+        assert_eq!(PaginationParams { page: u32::MAX, per_page: u32::MAX }.offset(), u32::MAX);
+    }
+
+    #[test]
     fn test_pagination_params_limit() {
         let pagination = PaginationParams::new(1, 15);
         assert_eq!(pagination.limit(), 15);
