@@ -181,6 +181,9 @@ pub enum StepKind {
         /// Run compensation after ending as failed.
         #[serde(default)]
         compensate: bool,
+        /// A value stored as `context.result` when the instance ends.
+        #[serde(default)]
+        result: Option<Tpl>,
     },
 }
 
@@ -222,6 +225,9 @@ pub struct CompStep {
     /// The parameters.
     #[serde(default)]
     pub params: Vec<(String, Tpl)>,
+    /// The state-machine verb, when the action is `transition`.
+    #[serde(default)]
+    pub verb: Option<String>,
 }
 
 /// The compiled workflow.

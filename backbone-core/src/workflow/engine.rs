@@ -934,6 +934,7 @@ impl WorkflowEngine {
                         action,
                         entity.as_deref(),
                         record_id,
+                        None,
                         &rendered,
                         &inst,
                         on_timeout.is_some(),
@@ -1078,7 +1079,17 @@ impl WorkflowEngine {
                 reason,
                 emit,
                 compensate,
+                result,
             } => {
+                let mut context = inst.context.clone();
+                if let Some(tpl) = result {
+                    let value = expr::render(tpl, &scope, &funcs).await.map_err(|m| {
+                        fail(&step_name, FailKind::Business, format!("result: {m}"))
+                    })?;
+                    if let Some(map) = context.as_object_mut() {
+                        map.insert("result".into(), value);
+                    }
+                }
                 if let Some(e) = emit {
                     let data = expr::render(&e.data, &scope, &funcs)
                         .await
@@ -1122,7 +1133,7 @@ impl WorkflowEngine {
                 sqlx::query(&format!(
                     "UPDATE {}.bb_workflow_instances
                         SET status = $2, current_step = $3, wait_event = NULL, wait_key = NULL, wait_due_at = NULL,
-                            last_error = COALESCE($4, last_error), updated_at = now()
+                            last_error = COALESCE($4, last_error), context = $5, updated_at = now()
                       WHERE id = $1",
                     self.schema
                 ))
@@ -1130,6 +1141,7 @@ impl WorkflowEngine {
                 .bind(final_status)
                 .bind(&step_name)
                 .bind(reason_text.filter(|_| *status == Terminal::Failed))
+                .bind(context)
                 .execute(&mut *conn)
                 .await?;
                 Ok(if compensating {
@@ -1217,6 +1229,7 @@ impl WorkflowEngine {
         action: &str,
         entity: Option<&str>,
         record_id: Option<String>,
+        verb: Option<&str>,
         params: &Value,
         inst: &InstanceRow,
         has_on_timeout: bool,
@@ -1300,7 +1313,7 @@ impl WorkflowEngine {
                     action: other,
                     entity,
                     id: record_id,
-                    verb: None,
+                    verb,
                     params,
                     context: &inst.context,
                 };
@@ -1727,6 +1740,7 @@ impl WorkflowEngine {
             &comp.action,
             comp.entity.as_deref(),
             record_id,
+            comp.verb.as_deref(),
             &params,
             &inst,
             false,
@@ -2064,4 +2078,70 @@ fn write_tx() -> Result<Arc<WriteTx>, RunError> {
             "the engine ran outside a write transaction".into(),
         ))
     })
+}
+
+/// What a composing service wires for a module's engine workflows: the relay's sink and the
+/// scheduled sweep. The module builder only hands this over (`background_tasks()`); registering
+/// the relay and the job is the composing service's, as for every other background task.
+///
+/// ```ignore
+/// let tasks = module.background_tasks();
+/// // the relay: deliver every staged event the engine cares about
+/// runner::supervise(pool, RelayConfig::new("hr"), move |rec| tasks.deliver(rec), shutdown);
+/// // the scheduler: BackgroundTasks::TIMER_SWEEP_JOB, every BackgroundTasks::TIMER_SWEEP_SCHEDULE
+/// scheduler.every_minute(BackgroundTasks::TIMER_SWEEP_JOB, move || tasks.timer_sweep());
+/// ```
+pub struct BackgroundTasks {
+    engine: Arc<WorkflowEngine>,
+}
+
+impl BackgroundTasks {
+    /// The name of the scheduled job that runs [`timer_sweep`](Self::timer_sweep).
+    pub const TIMER_SWEEP_JOB: &'static str = "workflow_timer_sweep";
+    /// When it runs: every minute. A concurrent run is safe (instances are claimed with
+    /// `FOR UPDATE SKIP LOCKED`), so the interval is a floor on how late a timeout may fire, not a
+    /// contract.
+    pub const TIMER_SWEEP_SCHEDULE: &'static str = "* * * * *";
+
+    /// Wrap `engine`.
+    pub fn new(engine: Arc<WorkflowEngine>) -> Self {
+        Self { engine }
+    }
+
+    /// The engine itself, for operating on instances.
+    pub fn engine(&self) -> &Arc<WorkflowEngine> {
+        &self.engine
+    }
+
+    /// The event types the engine reacts to.
+    pub fn subscribed_events(&self) -> Vec<String> {
+        self.engine.subscribed_events()
+    }
+
+    /// The relay's sink: hand an outbox record to the engine. A record of no subscribed type is
+    /// accepted and ignored, so the sink can be shared with other consumers; a failure is a
+    /// publish error, which leaves the row for the relay's next pass.
+    pub async fn deliver(&self, record: OutboxRecord) -> Result<(), backbone_outbox::OutboxError> {
+        if !self
+            .engine
+            .subscribed_events()
+            .iter()
+            .any(|e| *e == record.event_type)
+        {
+            return Ok(());
+        }
+        self.engine
+            .on_event(&record)
+            .await
+            .map(|_| ())
+            .map_err(|e| backbone_outbox::OutboxError::Publish(e.to_string()))
+    }
+
+    /// The scheduled job: move on whatever is due.
+    ///
+    /// # Errors
+    /// See [`WorkflowEngine::sweep`].
+    pub async fn timer_sweep(&self) -> Result<SweepReport, WorkflowError> {
+        self.engine.sweep().await
+    }
 }

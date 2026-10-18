@@ -91,6 +91,7 @@ fn terminal(name: &str, status: Terminal) -> StepSpec {
             reason: None,
             emit: None,
             compensate: false,
+            result: None,
         },
         on_failure: None,
         timeout: None,
@@ -184,6 +185,7 @@ fn escalation() -> WorkflowSpec {
             .into_iter()
             .map(|(k, v)| (k.to_string(), v))
             .collect(),
+        verb: None,
     }];
     s
 }
@@ -228,6 +230,7 @@ fn failing(verb: &str, retry: Option<RetrySpec>) -> WorkflowSpec {
         entity: None,
         id: None,
         params: vec![("ticket".into(), hole(ctx(&["ticket_id"])))],
+        verb: None,
     }];
     s
 }
@@ -242,6 +245,8 @@ struct Knobs {
     flaky_calls: AtomicI32,
     /// Calls of `delete_notes`.
     deletes: AtomicI32,
+    /// Signalled by `hang` once it is inside the step's transaction.
+    hung: tokio::sync::Notify,
 }
 
 struct Flow {
@@ -323,6 +328,7 @@ impl WorkflowDefinition for Flow {
             "refuse" => Err(ServiceError::Validation("not allowed".into())),
             "hang" => {
                 write_note("hung".into()).await?;
+                self.knobs.hung.notify_one();
                 tokio::time::sleep(Duration::from_secs(3600)).await;
                 Ok(Value::Null)
             }
@@ -855,16 +861,13 @@ async fn a_step_cut_short_leaves_the_instance_on_it_and_the_sweep_resumes_withou
     let company = Uuid::new_v4();
     // The `hang` verb writes a note and then never returns: cancel the whole run while it is inside
     // the step's transaction, as a crash or a dropped task would.
-    let cut = tokio::time::timeout(
-        Duration::from_millis(800),
-        engine.on_event(&event(
-            "TicketFailing",
-            company,
-            json!({ "ticket_id": "T-9" }),
-        )),
-    )
-    .await;
-    assert!(cut.is_err(), "the run was cut short");
+    let started = event("TicketFailing", company, json!({ "ticket_id": "T-9" }));
+    let run = engine.on_event(&started);
+    tokio::select! {
+        _ = run => panic!("the hanging verb returned"),
+        _ = h.knobs.hung.notified() => {}
+    }
+    // The run was dropped inside the step's transaction.
     // Let the cancelled transaction's rollback settle.
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(
@@ -1100,6 +1103,7 @@ async fn a_terminal_step_stages_its_event_with_the_instance_correlation_and_the_
                         data: Tpl::Map(vec![("ticket".into(), hole(ctx(&["ticket_id"])))]),
                     }),
                     compensate: false,
+                    result: None,
                 },
                 on_failure: None,
                 timeout: None,
@@ -1185,5 +1189,41 @@ async fn a_condition_with_no_matching_branch_and_no_else_fails_the_instance_by_n
         "{:?}",
         inst.last_error
     );
+    h.teardown().await;
+}
+
+#[tokio::test]
+async fn the_background_tasks_deliver_subscribed_events_and_ignore_the_rest() {
+    let h = harness!();
+    let tasks =
+        backbone_core::workflow::BackgroundTasks::new(Arc::new(h.engine(vec![escalation()])));
+    assert_eq!(
+        tasks.subscribed_events(),
+        vec!["TicketRaised", "TicketAcked"]
+    );
+    let company = Uuid::new_v4();
+    tasks
+        .deliver(event(
+            "SomethingElse",
+            company,
+            json!({ "ticket_id": "T-B" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        h.instances().await,
+        0,
+        "an event nobody subscribed to starts nothing"
+    );
+    tasks
+        .deliver(event(
+            "TicketRaised",
+            company,
+            json!({ "ticket_id": "T-B" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(h.instances().await, 1);
+    assert_eq!(tasks.timer_sweep().await.unwrap().total(), 0);
     h.teardown().await;
 }

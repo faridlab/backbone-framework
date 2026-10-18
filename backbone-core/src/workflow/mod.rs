@@ -25,5 +25,6 @@ pub use spec::{Call, StepKind, StepSpec, WorkflowDefinition, WorkflowSpec};
 
 #[cfg(feature = "postgres")]
 pub use engine::{
-    EngineConfig, EventReport, InstanceRow, StepRow, SweepReport, WorkflowEngine, WorkflowError,
+    BackgroundTasks, EngineConfig, EventReport, InstanceRow, StepRow, SweepReport, WorkflowEngine,
+    WorkflowError,
 };
