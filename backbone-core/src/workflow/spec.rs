@@ -127,7 +127,7 @@ pub enum StepKind {
         params: Vec<(String, Tpl)>,
         /// What a success does.
         on_success: Outcome,
-        /// What a hand call that outlasts the step's `timeout` does, instead of failing.
+        /// What a hand call that outlasts the step's `call_timeout` does, instead of failing.
         #[serde(default)]
         on_timeout: Option<Outcome>,
     },
@@ -201,9 +201,9 @@ pub struct StepSpec {
     /// What a failure does.
     #[serde(default)]
     pub on_failure: Option<FailureSpec>,
-    /// Seconds a hand call may take.
+    /// Seconds a hand call may take (not the wait step's own `timeout`, which is part of its kind).
     #[serde(default)]
-    pub timeout: Option<i64>,
+    pub call_timeout: Option<i64>,
 }
 
 /// One compensation step.
@@ -329,5 +329,38 @@ pub trait WorkflowDefinition: Send + Sync {
         Err(crate::service::ServiceError::Internal(format!(
             "function `{name}` is not implemented"
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A wait's own `timeout` and a step's `call_timeout` live side by side in one JSON object: the
+    /// kind is flattened into the step, so the two must not share a name.
+    #[test]
+    fn a_wait_keeps_its_timeout_apart_from_the_steps_call_timeout() {
+        let spec = WorkflowSpec::from_json(
+            &json!({
+                "name": "W", "version": 1, "trigger_event": "E", "persistence": true,
+                "steps": [
+                    { "name": "w", "kind": "wait", "event": "X", "key": [], "timeout": { "secs": 900 },
+                      "on_event": { "next": "d" }, "on_timeout": { "next": "d" }, "call_timeout": 30 },
+                    { "name": "d", "kind": "terminal", "status": "completed" }
+                ]
+            })
+            .to_string(),
+        );
+        let wait = spec.step("w").unwrap();
+        assert_eq!(wait.call_timeout, Some(30));
+        assert!(matches!(
+            &wait.kind,
+            StepKind::Wait {
+                timeout: Some(Dur::Secs(900)),
+                ..
+            }
+        ));
+        assert_eq!(spec.events(), vec!["E", "X"]);
     }
 }

@@ -1332,7 +1332,7 @@ impl WorkflowEngine {
         _has_on_timeout: bool,
     ) -> Result<Value, RunError> {
         let run = def.perform(ctx, call);
-        let answer = match step.timeout {
+        let answer = match step.call_timeout {
             Some(secs) => {
                 match tokio::time::timeout(Duration::from_secs(secs.max(0) as u64), run).await {
                     Ok(a) => a,
@@ -1731,7 +1731,7 @@ impl WorkflowEngine {
                 on_timeout: None,
             },
             on_failure: None,
-            timeout: None,
+            call_timeout: None,
         };
         self.perform_action(
             def,

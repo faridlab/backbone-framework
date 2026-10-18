@@ -78,7 +78,7 @@ fn action(name: &str, verb: &str, params: Vec<(&str, Tpl)>, on_success: Outcome)
             on_timeout: None,
         },
         on_failure: None,
-        timeout: None,
+        call_timeout: None,
     }
 }
 
@@ -94,7 +94,7 @@ fn terminal(name: &str, status: Terminal) -> StepSpec {
             result: None,
         },
         on_failure: None,
-        timeout: None,
+        call_timeout: None,
     }
 }
 
@@ -151,7 +151,7 @@ fn escalation() -> WorkflowSpec {
                     on_timeout: Some(next("escalate")),
                 },
                 on_failure: None,
-                timeout: None,
+                call_timeout: None,
             },
             action(
                 "note_ack",
@@ -1106,7 +1106,7 @@ async fn a_terminal_step_stages_its_event_with_the_instance_correlation_and_the_
                     result: None,
                 },
                 on_failure: None,
-                timeout: None,
+                call_timeout: None,
             },
         ],
     );
@@ -1165,7 +1165,7 @@ async fn a_condition_with_no_matching_branch_and_no_else_fails_the_instance_by_n
                     }],
                 },
                 on_failure: None,
-                timeout: None,
+                call_timeout: None,
             },
             terminal("done", Terminal::Completed),
         ],
