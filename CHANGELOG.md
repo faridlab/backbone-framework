@@ -16,6 +16,8 @@ back to the `## [Unreleased]` section.
 
 ## [Unreleased]
 
+## [3.16.0] - 2026-10-18
+
 ### Added
 
 - **backbone-core** — `workflow`: the engine of the schema's `schema/workflows` with `config.executor: engine`
