@@ -2978,10 +2978,51 @@ mod tests {
             let (status, body) = call(&app, "GET", "/widgets/trash?limit=1000&page=0", None).await;
             assert_eq!(status, StatusCode::OK, "{body}");
             assert_eq!(body["meta"]["limit"], crate::http::MAX_PER_PAGE);
-            // A page too deep is refused, coded.
+            // A page too deep is refused, coded and named.
             let (status, body) = call(&app, "GET", "/widgets?limit=100&page=1000", None).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-            assert_eq!(body["violations"][0]["code"], "invalid_request");
+            assert_eq!(body["violations"][0]["code"], "invalid_query");
+            assert_eq!(body["violations"][0]["path"], "page");
+            assert_eq!(body["violations"][0]["params"]["reason"], "too_deep");
+        }
+
+        #[tokio::test]
+        async fn a_list_parameter_the_request_got_wrong_is_refused_by_name() {
+            let (app, service) = app();
+            service.create(CreateWidgetDto { name: "a".into() }).await.unwrap();
+            for (uri, parameter, reason) in [
+                ("/widgets?page=abc", "page", "not_a_number"),
+                ("/widgets?limit=-1", "limit", "not_a_number"),
+                ("/widgets/trash?page=x", "page", "not_a_number"),
+                ("/widgets/count?limit=x", "limit", "not_a_number"),
+                ("/widgets/aggregate?page=x", "page", "not_a_number"),
+                ("/widgets?sort_order=sideways", "sort_order", "invalid_value"),
+                ("/widgets/trash?sort_order=up", "sort_order", "invalid_value"),
+                ("/widgets?include=nothing", "include", "unknown_relation"),
+                ("/widgets?with=nothing", "with", "unknown_relation"),
+                ("/widgets/trash?include=nothing", "include", "unknown_relation"),
+                ("/widgets?fields=id,na%20me", "fields", "invalid_field_name"),
+            ] {
+                let (status, body) = call(&app, "GET", uri, None).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {body}");
+                let v = &body["violations"][0];
+                assert_eq!(v["code"], "invalid_query", "{uri}: {body}");
+                assert_eq!(v["path"], parameter, "{uri}: {body}");
+                assert_eq!(v["params"]["parameter"], parameter, "{uri}: {body}");
+                assert_eq!(v["params"]["reason"], reason, "{uri}: {body}");
+                assert!(v["message"].as_str().unwrap().contains(parameter), "{uri}: {body}");
+                assert_eq!(body["error"], v["message"], "{uri}: {body}");
+            }
+            // The same parameters, well formed, are served.
+            for uri in ["/widgets?page=1&limit=5&sort_order=DESC", "/widgets?fields=id,name", "/widgets/count"] {
+                let (status, body) = call(&app, "GET", uri, None).await;
+                assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+            }
+            // A single record's `include` is read the same way.
+            let w = service.create(CreateWidgetDto { name: "b".into() }).await.unwrap();
+            let (status, body) = call(&app, "GET", &format!("/widgets/{}?include=nothing", w.id), None).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(body["violations"][0]["path"], "include");
         }
 
         #[tokio::test]

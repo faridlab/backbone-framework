@@ -51,6 +51,17 @@ impl RepositoryError {
     /// keeps its sentence as a database error.
     pub fn from_source(e: impl Into<anyhow::Error>) -> Self {
         let e: anyhow::Error = e.into();
+        // A query parameter the request got wrong is the caller's to fix, named.
+        let e = match e.downcast::<backbone_orm::QueryParamError>() {
+            Ok(refused) => {
+                return RepositoryError::Violations(vec![crate::violation::Violation::invalid_query(
+                    &refused.parameter,
+                    refused.reason.as_str(),
+                    refused.message,
+                )])
+            }
+            Err(e) => e,
+        };
         #[cfg(feature = "postgres")]
         let e = match e.downcast::<sqlx::Error>() {
             Ok(db) => return RepositoryError::from(db),

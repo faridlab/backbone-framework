@@ -186,13 +186,20 @@ pub async fn correlation_middleware(
 /// The status a [`ServiceError`](crate::service::ServiceError) answers with, by variant.
 ///
 /// A refusal for named reasons — a protected field, a broken rule, a constraint the database
-/// refused — is the caller's to fix: 422. A plain validation error is 400, a missing record
+/// refused — is the caller's to fix: 422, except a refused query parameter (`invalid_query`),
+/// which is 400 like any malformed request. A plain validation error is 400, a missing record
 /// 404, a duplicate or conflict 409, and only what is left is a 500.
 pub fn service_error_status(err: &crate::service::ServiceError) -> axum::http::StatusCode {
     use crate::persistence::traits::RepositoryError;
     use crate::service::ServiceError;
     use axum::http::StatusCode;
     match err {
+        // A refused query parameter is a malformed request, not a broken rule: 400.
+        ServiceError::Violations(v) | ServiceError::Repository(RepositoryError::Violations(v))
+            if is_query_refusal(v) =>
+        {
+            StatusCode::BAD_REQUEST
+        }
         ServiceError::Violations(_) | ServiceError::Repository(RepositoryError::Violations(_)) => {
             StatusCode::UNPROCESSABLE_ENTITY
         }
@@ -314,6 +321,116 @@ impl ListQueryParams {
     }
 }
 
+/// The list query extractor every generic list-shaped route takes: [`ListQueryParams`] read off
+/// the query string, where a paging value that is not a number is refused by NAME, as an
+/// `invalid_query` violation on the parameter (`page`, `limit`), instead of axum's bare
+/// "Failed to deserialize query string".
+pub struct ListQuery(pub ListQueryParams);
+
+#[axum::async_trait]
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for ListQuery {
+    type Rejection = axum::response::Response;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        use axum::response::IntoResponse;
+        let raw = parts.uri.query().unwrap_or("");
+        match serde_urlencoded::from_str::<ListQueryParams>(raw) {
+            Ok(params) => Ok(ListQuery(params)),
+            Err(e) => {
+                let violation = list_query_violation(raw, &e.to_string());
+                Err((
+                    axum::http::StatusCode::BAD_REQUEST,
+                    axum::Json(PaginatedApiResponse::<serde_json::Value>::rejected(
+                        violation.message.clone(),
+                        vec![violation],
+                    )),
+                )
+                    .into_response())
+            }
+        }
+    }
+}
+
+/// Name the typed parameter (`page`, `limit`, `sort_by`, `sort_order`, `search`, `status`)
+/// a query string failed to read as, or say that the string as a whole is unreadable.
+fn list_query_violation(raw: &str, decode_error: &str) -> crate::violation::Violation {
+    use backbone_orm::QueryParamReason;
+    let pairs: Vec<(String, String)> = serde_urlencoded::from_str(raw).unwrap_or_default();
+    for key in ["page", "limit"] {
+        for (k, v) in pairs.iter().filter(|(k, _)| k == key) {
+            if v.trim().parse::<u32>().is_err() {
+                let e = backbone_orm::QueryParamError::not_a_number(k, v);
+                return query_violation(&e.parameter, e.reason, e.message);
+            }
+        }
+    }
+    for key in ["page", "limit", "sort_by", "sort_order", "search", "status"] {
+        if pairs.iter().filter(|(k, _)| k == key).count() > 1 {
+            return query_violation(
+                key,
+                QueryParamReason::InvalidValue,
+                format!("`{key}` was sent more than once; send it once"),
+            );
+        }
+    }
+    tracing::debug!(target: "backbone::http", error = decode_error, "list query refused");
+    crate::violation::Violation::new("", "invalid_query", "The query string could not be read")
+}
+
+/// One refused query parameter as a violation: the code `invalid_query` on the parameter's
+/// path, `params` carrying the parameter and the stable reason, and a sentence that names both.
+fn query_violation(
+    parameter: &str,
+    reason: backbone_orm::QueryParamReason,
+    message: impl Into<String>,
+) -> crate::violation::Violation {
+    crate::violation::Violation::invalid_query(parameter, reason.as_str(), message)
+}
+
+/// Whether every violation is a refused query parameter (and there is at least one).
+fn is_query_refusal(violations: &[crate::violation::Violation]) -> bool {
+    !violations.is_empty() && violations.iter().all(|v| v.code == crate::violation::INVALID_QUERY)
+}
+
+/// The sentence for a set of refused parameters: their messages, in order.
+fn refusal_sentence(violations: &[crate::violation::Violation]) -> String {
+    violations.iter().map(|v| v.message.as_str()).collect::<Vec<_>>().join("; ")
+}
+
+/// Whether the typed `sort_by` is what sorts this request (no `orderby`/`sort` key in the
+/// filter grammar already does).
+fn typed_sort_applies(params: &ListQueryParams) -> bool {
+    let sorted = params.filters.keys().any(|k| {
+        let base = k.split('[').next().unwrap_or(k);
+        base.eq_ignore_ascii_case("orderby") || base.eq_ignore_ascii_case("sort")
+    });
+    !sorted && params.sort_by.as_deref().map(str::trim).is_some_and(|f| !f.is_empty())
+}
+
+/// A refusal the repository worded for the `orderby` key the typed `sort_by` rides in on,
+/// said for the parameter the client actually sent.
+fn rename_typed_sort(
+    mut violations: Vec<crate::violation::Violation>,
+    params: &ListQueryParams,
+) -> Vec<crate::violation::Violation> {
+    if !typed_sort_applies(params) {
+        return violations;
+    }
+    for v in &mut violations {
+        if v.path == "orderby" {
+            v.path = "sort_by".to_string();
+            v.message = v.message.replace("`orderby`", "`sort_by`");
+            if v.params.contains_key("parameter") {
+                v.params.insert("parameter".into(), "sort_by".into());
+            }
+        }
+    }
+    violations
+}
+
 /// Reserved response-shaping query keys (carved out of the filter grammar).
 const RESERVED_QUERY_KEYS: [&str; 3] = ["fields", "include", "with"];
 
@@ -421,8 +538,9 @@ fn aggregate_spec(params: &ListQueryParams) -> backbone_orm::repository::Aggrega
 /// `sort`, `sort_by`, `orderby[…]`), a search column (`searchFields`), or an aggregate's
 /// group or reduction. Each answers a question about the secret's value — a prefix match
 /// recovers a digest one character at a time, and `min=` returns one outright — so the
-/// request is refused rather than the column quietly dropped.
-fn named_secret(params: &ListQueryParams, secret_fields: &[&str]) -> Option<String> {
+/// request is refused rather than the column quietly dropped. Answers the parameter that
+/// names it beside the field, as the client spelled them.
+fn named_secret_at(params: &ListQueryParams, secret_fields: &[&str]) -> Option<(String, String)> {
     if secret_fields.is_empty() {
         return None;
     }
@@ -430,28 +548,119 @@ fn named_secret(params: &ListQueryParams, secret_fields: &[&str]) -> Option<Stri
     const COLUMN_LISTS: [&str; 10] = [
         "orderby", "sort", "searchfields", "search_fields", "group_by", "sum", "avg", "min", "max", "group_label",
     ];
-    let mut names: Vec<String> = Vec::new();
-    for (key, value) in &params.filters {
+    // (parameter, name it carries), in a stable order so a request always names the same one.
+    let mut names: Vec<(String, String)> = Vec::new();
+    let mut keys: Vec<&String> = params.filters.keys().collect();
+    keys.sort();
+    for key in keys {
+        let value = &params.filters[key];
         match key.find('[') {
             Some(open) => {
-                names.push(key[..open].to_string());
-                names.push(key[open + 1..].trim_end_matches(']').to_string());
+                names.push((key.clone(), key[..open].to_string()));
+                names.push((key.clone(), key[open + 1..].trim_end_matches(']').to_string()));
             }
-            None => names.push(key.clone()),
+            None => names.push((key.clone(), key.clone())),
         }
         if COLUMN_LISTS.contains(&key.to_ascii_lowercase().as_str()) {
-            names.extend(value.split(',').map(|v| v.trim().trim_start_matches('-').to_string()));
+            names.extend(
+                value
+                    .split(',')
+                    .map(|v| (key.clone(), v.trim().trim_start_matches('-').to_string())),
+            );
         }
     }
-    names.extend(params.sort_by.iter().cloned());
+    names.extend(params.sort_by.iter().map(|n| ("sort_by".to_string(), n.clone())));
     names
         .into_iter()
-        .find(|n| secrets.contains(&camel_to_snake_case(n.trim())))
+        .find(|(_, n)| secrets.contains(&camel_to_snake_case(n.trim())))
 }
 
 /// The answer to a request that names a secret field (see [`named_secret`]).
 fn secret_named_message(field: &str) -> String {
     format!("'{field}' is a secret field: it cannot be filtered, sorted, searched or aggregated")
+}
+
+/// The refusal of a request that names a secret field as a column, on the parameter that does.
+fn secret_violation(parameter: &str, field: &str) -> crate::violation::Violation {
+    query_violation(
+        parameter,
+        backbone_orm::QueryParamReason::InvalidValue,
+        format!("`{parameter}`: {}", secret_named_message(field)),
+    )
+    .with_param("field", field)
+}
+
+/// What a list-shaped request must satisfy before it reaches the service, beyond what the
+/// service itself checks: each refused parameter named on its own path.
+///
+/// `paged` adds the offset-depth bound (the count and aggregate routes do not page); the
+/// response-shaping keys (`fields`, `include`/`with`) are read against the entity.
+fn query_refusals<E: backbone_orm::EntityRepoMeta>(
+    params: &ListQueryParams,
+    paged: bool,
+) -> Vec<crate::violation::Violation> {
+    use backbone_orm::QueryParamReason;
+    let mut refused = Vec::new();
+    if paged {
+        if let Some(message) = pagination_depth_error(params.page, params.limit) {
+            refused.push(query_violation("page", QueryParamReason::TooDeep, format!("`page`: {message}")));
+        }
+    }
+    if let Some(order) = params.sort_order.as_deref().map(str::trim).filter(|o| !o.is_empty()) {
+        if !order.eq_ignore_ascii_case("asc") && !order.eq_ignore_ascii_case("desc") {
+            refused.push(query_violation(
+                "sort_order",
+                QueryParamReason::InvalidValue,
+                format!("`sort_order` must be `asc` or `desc`, not `{}`", clip_value(order)),
+            ));
+        }
+    }
+    if let Some((parameter, field)) = named_secret_at(params, E::secret_fields()) {
+        refused.push(secret_violation(&parameter, &field));
+    }
+    refused.extend(shaping_refusals::<E>(&params.filters));
+    refused
+}
+
+/// A client's value, cut so a long one cannot flood the answer.
+fn clip_value(value: &str) -> String {
+    if value.chars().count() <= 40 {
+        value.to_string()
+    } else {
+        format!("{}…", value.chars().take(40).collect::<String>())
+    }
+}
+
+/// The refusals of the response-shaping keys: a `fields` entry that is not a field name, an
+/// `include`/`with` entry that is not a relation of the entity.
+///
+/// `fields` is read against no list of the entity's fields (the framework has none), so a
+/// well-formed name the response lacks is still ignored, as the sparse fieldset documents.
+fn shaping_refusals<E: backbone_orm::EntityRepoMeta>(
+    query: &HashMap<String, String>,
+) -> Vec<crate::violation::Violation> {
+    use backbone_orm::QueryParamReason;
+    let mut refused = Vec::new();
+    for name in sparse_fields(query) {
+        if !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            refused.push(query_violation(
+                "fields",
+                QueryParamReason::InvalidFieldName,
+                format!("`fields`: `{}` is not a field name", clip_value(&name)),
+            ));
+        }
+    }
+    let key = if query.contains_key("include") { "include" } else { "with" };
+    for name in include_relations(query) {
+        if !E::relations().iter().any(|(rel, _, _)| *rel == name) {
+            refused.push(query_violation(
+                key,
+                QueryParamReason::UnknownRelation,
+                format!("`{key}`: `{}` is not a relation of this resource", clip_value(&name)),
+            ));
+        }
+    }
+    refused
 }
 
 /// Reduce a list-style query into the filters the repository should actually see.
@@ -833,11 +1042,10 @@ fn is_bad_query_error(msg: &str) -> bool {
         || m.contains("needs a numeric column")
 }
 
-/// A list request refused before it reached the repository: 400's `invalid_request` code
-/// beside the sentence.
-fn bad_list_request(message: String) -> PaginatedApiResponse<serde_json::Value> {
-    let violation = crate::violation::Violation::new("", "invalid_request", message.clone());
-    PaginatedApiResponse::rejected(message, vec![violation])
+/// A list request refused before it reached the repository: the sentence and each refused
+/// parameter, named.
+fn refused_list(violations: Vec<crate::violation::Violation>) -> PaginatedApiResponse<serde_json::Value> {
+    PaginatedApiResponse::rejected(refusal_sentence(&violations), violations)
 }
 
 /// Pagination response metadata
@@ -1618,7 +1826,7 @@ where
             backbone_orm::secret_registry::register(table, E::secret_fields());
         }
         use axum::{
-            extract::{Path, Query},
+            extract::Path,
             routing::get,
             Extension, Router,
         };
@@ -1629,28 +1837,28 @@ where
             // GET /collection - List
             .route(base_path, Self::gate(&perms, Gate::Read, get({
                 let h = handler.clone();
-                move |query: Query<ListQueryParams>, access: Option<Extension<AccessScope>>| async move {
+                move |query: ListQuery, access: Option<Extension<AccessScope>>| async move {
                     Self::list_handler(h, query, access).await
                 }
             })))
             // GET /collection/trash - List deleted
             .route(&format!("{}/trash", base_path), Self::gate(&perms, Gate::Read, get({
                 let h = handler.clone();
-                move |query: Query<ListQueryParams>, access: Option<Extension<AccessScope>>| async move {
+                move |query: ListQuery, access: Option<Extension<AccessScope>>| async move {
                     Self::list_deleted_handler(h, query, access).await
                 }
             })))
             // GET /collection/:id - Get by ID
             .route(&format!("{}/:id", base_path), Self::gate(&perms, Gate::Read, get({
                 let h = handler.clone();
-                move |path: Path<String>, query: Query<ListQueryParams>, access: Option<Extension<AccessScope>>| async move {
+                move |path: Path<String>, query: ListQuery, access: Option<Extension<AccessScope>>| async move {
                     Self::get_handler(h, path, query, access).await
                 }
             })))
             // GET /collection/:id/deleted - Get deleted by ID
             .route(&format!("{}/:id/deleted", base_path), Self::gate(&perms, Gate::Read, get({
                 let h = handler.clone();
-                move |path: Path<String>, query: Query<ListQueryParams>, access: Option<Extension<AccessScope>>| async move {
+                move |path: Path<String>, query: ListQuery, access: Option<Extension<AccessScope>>| async move {
                     Self::get_deleted_handler(h, path, query, access).await
                 }
             })))
@@ -1659,7 +1867,7 @@ where
             .route(&format!("{}/:id/history", base_path), Self::gate(&perms, Gate::Read, get({
                 let h = handler.clone();
                 move |path: axum::extract::Path<String>,
-                      query: axum::extract::Query<ListQueryParams>,
+                      query: ListQuery,
                       provider: Option<axum::Extension<std::sync::Arc<dyn HistoryProvider>>>| async move {
                     Self::history_handler(h, path, query, provider).await
                 }
@@ -1667,13 +1875,13 @@ where
             // GET /collection/aggregate - Group and reduce
             .route(&format!("{}/aggregate", base_path), Self::gate(&perms, Gate::Read, get({
                 let h = handler.clone();
-                move |query: axum::extract::Query<ListQueryParams>| async move {
+                move |query: ListQuery| async move {
                     Self::aggregate_handler(h, query).await
                 }
             })))
             .route(&format!("{}/count", base_path), Self::gate(&perms, Gate::Read, get({
                 let h = handler.clone();
-                move |query: axum::extract::Query<ListQueryParams>| async move {
+                move |query: ListQuery| async move {
                     Self::count_active_handler(h, query).await
                 }
             })))
@@ -1873,53 +2081,82 @@ where
     /// server fault answers with a generic sentence; its detail is logged.
     fn failure<T>(err: &S::Error, fallback: axum::http::StatusCode) -> (axum::http::StatusCode, axum::Json<ApiResponse<T>>) {
         let violations = S::violations_of(err);
-        let status = S::status_of(err).unwrap_or(if violations.is_some() {
-            axum::http::StatusCode::UNPROCESSABLE_ENTITY
-        } else {
-            fallback
+        let status = S::status_of(err).unwrap_or(match &violations {
+            Some(v) if is_query_refusal(v) => axum::http::StatusCode::BAD_REQUEST,
+            Some(_) => axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            None => fallback,
         });
         error_at(status, violations, err)
     }
 
-    /// The response for a failed list-shaped call: a bad filter or sort key is the caller's
-    /// fault (400); anything else goes through [`Self::failure`].
-    fn list_failure(err: &S::Error) -> (axum::http::StatusCode, axum::Json<PaginatedApiResponse<serde_json::Value>>) {
-        use axum::{http::StatusCode, Json};
+    /// The status, sentence and violations for a failed list-shaped call (a list, the trash,
+    /// a count, an aggregate): a query parameter the request got wrong is 400, named on its
+    /// own path (`sort_by`, `priority[foo]`, `after`, …); anything else goes through
+    /// [`Self::failure`].
+    fn query_failure_parts(
+        err: &S::Error,
+        params: &ListQueryParams,
+        fallback: axum::http::StatusCode,
+    ) -> (axum::http::StatusCode, String, Vec<crate::violation::Violation>) {
+        use axum::http::StatusCode;
+        let violations = S::violations_of(err);
+        if let Some(v) = violations.as_ref().filter(|v| is_query_refusal(v)) {
+            let v = rename_typed_sort(v.clone(), params);
+            return (StatusCode::BAD_REQUEST, refusal_sentence(&v), v);
+        }
         let msg = err.to_string();
-        if is_bad_query_error(&msg) {
-            // The detail is the database's sentence (SQL, column and table names): logged,
-            // never sent.
+        if violations.is_none() && is_bad_query_error(&msg) {
+            // A refusal the repository could not match to a parameter (a hand-written
+            // repository, a statement built from something other than the query). The detail
+            // is the database's sentence (SQL, column and table names): logged, never sent.
             tracing::debug!(target: "backbone::http", error = %msg, "list query refused");
             let message = "Invalid query parameter or filter";
             return (
                 StatusCode::BAD_REQUEST,
-                Json(PaginatedApiResponse::rejected(
-                    message,
-                    vec![crate::violation::Violation::new("", "invalid_query", message)],
-                )),
+                message.to_string(),
+                vec![crate::violation::Violation::new("", crate::violation::INVALID_QUERY, message)],
             );
         }
-        let (status, Json(body)) = Self::failure::<()>(err, StatusCode::INTERNAL_SERVER_ERROR);
-        let error = body.error.unwrap_or_default();
-        (status, Json(PaginatedApiResponse::rejected(error, body.violations.unwrap_or_default())))
+        let (status, axum::Json(body)) = Self::failure::<()>(err, fallback);
+        (status, body.error.unwrap_or_default(), body.violations.unwrap_or_default())
+    }
+
+    /// [`Self::query_failure_parts`] as a list response.
+    fn list_failure(
+        err: &S::Error,
+        params: &ListQueryParams,
+    ) -> (axum::http::StatusCode, axum::Json<PaginatedApiResponse<serde_json::Value>>) {
+        let (status, error, violations) =
+            Self::query_failure_parts(err, params, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        (status, axum::Json(PaginatedApiResponse::rejected(error, violations)))
+    }
+
+    /// [`Self::query_failure_parts`] as a single-value response (a count, an aggregate).
+    fn query_failure<T>(
+        err: &S::Error,
+        params: &ListQueryParams,
+    ) -> (axum::http::StatusCode, axum::Json<ApiResponse<T>>) {
+        let (status, error, violations) =
+            Self::query_failure_parts(err, params, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        let body = if violations.is_empty() {
+            ApiResponse::error(error)
+        } else {
+            ApiResponse::rejected(error, violations)
+        };
+        (status, axum::Json(body))
     }
 
     async fn list_handler(
         handler: Arc<Self>,
-        axum::extract::Query(params): axum::extract::Query<ListQueryParams>,
+        ListQuery(params): ListQuery,
         access: Option<axum::Extension<AccessScope>>,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
 
         let params = params.normalized();
-        if let Some(err) = pagination_depth_error(params.page, params.limit) {
-            return (StatusCode::BAD_REQUEST, Json(bad_list_request(err)));
-        }
-        if let Some(field) = named_secret(&params, E::secret_fields()) {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(bad_list_request(secret_named_message(&field))),
-            );
+        let refused = query_refusals::<E>(&params, true);
+        if !refused.is_empty() {
+            return (StatusCode::BAD_REQUEST, Json(refused_list(refused)));
         }
 
         // Sparse fieldset (`?fields=a,b,c`) is response-shaping, not a filter — read it,
@@ -1950,7 +2187,7 @@ where
                 let response = PaginatedApiResponse::ok_with_info(items, &info);
                 (StatusCode::OK, Json(response))
             }
-            Err(e) => Self::list_failure(&e),
+            Err(e) => Self::list_failure(&e, &params),
         }
     }
 
@@ -1972,13 +2209,20 @@ where
     async fn get_handler(
         handler: Arc<Self>,
         axum::extract::Path(id): axum::extract::Path<String>,
-        axum::extract::Query(params): axum::extract::Query<ListQueryParams>,
+        ListQuery(params): ListQuery,
         access: Option<axum::Extension<AccessScope>>,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
 
         if let Some(refused) = invalid_id::<serde_json::Value>(&id, "id") {
             return refused;
+        }
+        let refused = shaping_refusals::<E>(&params.filters);
+        if !refused.is_empty() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::rejected(refusal_sentence(&refused), refused)),
+            );
         }
 
         let fields = sparse_fields(&params.filters);
@@ -2388,20 +2632,15 @@ where
 
     async fn list_deleted_handler(
         handler: Arc<Self>,
-        axum::extract::Query(params): axum::extract::Query<ListQueryParams>,
+        ListQuery(params): ListQuery,
         access: Option<axum::Extension<AccessScope>>,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
 
         let params = params.normalized();
-        if let Some(err) = pagination_depth_error(params.page, params.limit) {
-            return (StatusCode::BAD_REQUEST, Json(bad_list_request(err)));
-        }
-        if let Some(field) = named_secret(&params, E::secret_fields()) {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(bad_list_request(secret_named_message(&field))),
-            );
+        let refused = query_refusals::<E>(&params, true);
+        if !refused.is_empty() {
+            return (StatusCode::BAD_REQUEST, Json(refused_list(refused)));
         }
 
         let fields = sparse_fields(&params.filters);
@@ -2426,7 +2665,7 @@ where
                 let response = PaginatedApiResponse::ok(items, total, params.page, params.limit);
                 (StatusCode::OK, Json(response))
             }
-            Err(e) => Self::list_failure(&e),
+            Err(e) => Self::list_failure(&e, &params),
         }
     }
 
@@ -2476,7 +2715,7 @@ where
     async fn get_deleted_handler(
         handler: Arc<Self>,
         axum::extract::Path(id): axum::extract::Path<String>,
-        axum::extract::Query(params): axum::extract::Query<ListQueryParams>,
+        ListQuery(params): ListQuery,
         access: Option<axum::Extension<AccessScope>>,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
@@ -2546,32 +2785,27 @@ where
     /// 15. GET /collection/count - Count active entities
     async fn count_active_handler(
         handler: Arc<Self>,
-        axum::extract::Query(params): axum::extract::Query<ListQueryParams>,
+        ListQuery(params): ListQuery,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
 
         // An unfiltered request still answers the whole-table count, which is
         // what every existing caller expects; a filtered one now answers the
         // question it actually asked.
-        if let Some(field) = named_secret(&params, E::secret_fields()) {
+        let refused = query_refusals::<E>(&params, false);
+        if !refused.is_empty() {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(ApiResponse::<serde_json::Value>::error(secret_named_message(&field))),
+                Json(ApiResponse::<serde_json::Value>::rejected(refusal_sentence(&refused), refused)),
             );
         }
         match handler.service.count_active_filtered(repository_filters(&params)).await {
             Ok(count) => {
                 (StatusCode::OK, Json(ApiResponse::ok(serde_json::json!({ "count": count }))))
             }
-            Err(e) => {
-                // Now that the filters are read, a malformed one is the
-                // caller's fault — the same classification the list path uses.
-                if is_bad_query_error(&e.to_string()) {
-                    (StatusCode::BAD_REQUEST, Json(ApiResponse::<serde_json::Value>::error(e.to_string())))
-                } else {
-                    Self::failure(&e, StatusCode::INTERNAL_SERVER_ERROR)
-                }
-            }
+            // Now that the filters are read, a malformed one is the caller's fault, named —
+            // the same classification the list path uses.
+            Err(e) => Self::query_failure(&e, &params),
         }
     }
 
@@ -2581,14 +2815,15 @@ where
     /// caller can draw a chart and its headline figure from a single reply.
     async fn aggregate_handler(
         handler: Arc<Self>,
-        axum::extract::Query(params): axum::extract::Query<ListQueryParams>,
+        ListQuery(params): ListQuery,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
 
-        if let Some(field) = named_secret(&params, E::secret_fields()) {
+        let refused = query_refusals::<E>(&params, false);
+        if !refused.is_empty() {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(ApiResponse::<serde_json::Value>::error(secret_named_message(&field))),
+                Json(ApiResponse::<serde_json::Value>::rejected(refusal_sentence(&refused), refused)),
             );
         }
         let spec = aggregate_spec(&params);
@@ -2637,13 +2872,7 @@ where
                 });
                 (StatusCode::OK, Json(ApiResponse::ok(body)))
             }
-            Err(e) => {
-                if is_bad_query_error(&e.to_string()) {
-                    (StatusCode::BAD_REQUEST, Json(ApiResponse::<serde_json::Value>::error(e.to_string())))
-                } else {
-                    Self::failure(&e, StatusCode::INTERNAL_SERVER_ERROR)
-                }
-            }
+            Err(e) => Self::query_failure(&e, &params),
         }
     }
 
@@ -2660,7 +2889,7 @@ where
     async fn history_handler(
         handler: Arc<Self>,
         axum::extract::Path(id): axum::extract::Path<String>,
-        axum::extract::Query(params): axum::extract::Query<ListQueryParams>,
+        ListQuery(params): ListQuery,
         provider: Option<axum::Extension<std::sync::Arc<dyn HistoryProvider>>>,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
@@ -3109,6 +3338,9 @@ mod tests {
                 _ => &[],
             }
         }
+        fn relations() -> &'static [(&'static str, &'static str, &'static str)] {
+            &[("user", "users", "userId")]
+        }
     }
 
     fn secret_row() -> serde_json::Value {
@@ -3143,14 +3375,114 @@ mod tests {
         // A sort the filter grammar names wins over the typed pair.
         let f = repository_filters(&params(&[("orderby[name]", "asc")], Some("priority"), Some("desc")));
         assert!(!f.contains_key("orderby"), "{f:?}");
-        // It goes through the same sanitizer as any filter sort: an injection is dropped there.
-        let parsed = backbone_orm::filter::parse_filters(
+        // It goes through the same sanitizer as any filter sort: an injection is refused there,
+        // by the parameter that carried it.
+        let refused = backbone_orm::filter::parse_filters(
             &repository_filters(&params(&[], Some("name; drop table x"), None)),
             &HashMap::new(),
             None,
         )
-        .unwrap();
-        assert!(parsed.sorts.is_empty(), "{:?}", parsed.sorts);
+        .unwrap_err()
+        .downcast::<backbone_orm::QueryParamError>()
+        .expect("a named refusal");
+        assert_eq!(refused.parameter, "orderby");
+        let said = rename_typed_sort(
+            vec![query_violation(&refused.parameter, refused.reason, refused.message)],
+            &params(&[], Some("name; drop table x"), None),
+        );
+        assert_eq!(said[0].path, "sort_by");
+        assert_eq!(said[0].params["parameter"], "sort_by");
+        assert!(said[0].message.contains("`sort_by`") && !said[0].message.contains("orderby"), "{}", said[0].message);
+        // A sort the client wrote in the grammar keeps its own name.
+        let kept = rename_typed_sort(
+            vec![query_violation("orderby", refused.reason, "`orderby` x")],
+            &params(&[("orderby", "name")], Some("priority"), None),
+        );
+        assert_eq!(kept[0].path, "orderby");
+    }
+
+    fn ask(pairs: &[(&str, &str)]) -> ListQueryParams {
+        ListQueryParams {
+            filters: pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_paging_value_that_is_not_a_number_is_refused_on_its_own_parameter() {
+        for (raw, parameter) in [("page=abc", "page"), ("limit=-3", "limit"), ("page=2&limit=x1", "limit"), ("page=", "page")] {
+            assert!(serde_urlencoded::from_str::<ListQueryParams>(raw).is_err(), "{raw}");
+            let v = list_query_violation(raw, "decode");
+            assert_eq!((v.path.as_str(), v.code.as_str()), (parameter, "invalid_query"), "{raw}");
+            assert_eq!(v.params["parameter"], parameter);
+            assert_eq!(v.params["reason"], "not_a_number");
+            assert!(v.message.contains(parameter), "{}", v.message);
+        }
+    }
+
+    #[test]
+    fn a_typed_parameter_sent_twice_is_refused_by_name() {
+        let raw = "sort_by=a&sort_by=b";
+        assert!(serde_urlencoded::from_str::<ListQueryParams>(raw).is_err());
+        let v = list_query_violation(raw, "decode");
+        assert_eq!((v.path.as_str(), v.params["reason"].as_str()), ("sort_by", Some("invalid_value")));
+    }
+
+    #[test]
+    fn the_depth_secret_sort_order_and_shaping_refusals_each_name_their_parameter() {
+        let at = |params: &ListQueryParams, paged: bool| {
+            query_refusals::<Secretive>(params, paged)
+                .into_iter()
+                .map(|v| (v.path, v.params["reason"].as_str().unwrap_or("").to_string()))
+                .collect::<Vec<_>>()
+        };
+        let deep = ListQueryParams { page: 500, limit: 100, ..Default::default() };
+        assert_eq!(at(&deep, true), vec![("page".to_string(), "too_deep".to_string())]);
+        assert!(at(&deep, false).is_empty(), "count and aggregate do not page");
+        let mut p = ask(&[]);
+        p.sort_order = Some("sideways".into());
+        assert_eq!(at(&p, true), vec![("sort_order".to_string(), "invalid_value".to_string())]);
+        p.sort_order = Some("DESC".into());
+        assert!(at(&p, true).is_empty());
+        let mut p = ask(&[]);
+        p.sort_by = Some("tokenHash".into());
+        let named = query_refusals::<Secretive>(&p, true);
+        assert_eq!(named[0].path, "sort_by");
+        assert!(named[0].message.contains("sort_by") && named[0].message.contains("secret"), "{}", named[0].message);
+        assert_eq!(at(&ask(&[("token_hash[startwith]", "a")]), true)[0].0, "token_hash[startwith]");
+        assert_eq!(at(&ask(&[("include", "user,nothing")]), true), vec![("include".to_string(), "unknown_relation".to_string())]);
+        assert_eq!(at(&ask(&[("with", "nothing")]), true), vec![("with".to_string(), "unknown_relation".to_string())]);
+        assert!(at(&ask(&[("include", "user")]), true).is_empty());
+        assert_eq!(at(&ask(&[("fields", "id,na me")]), true), vec![("fields".to_string(), "invalid_field_name".to_string())]);
+        assert!(at(&ask(&[("fields", "id,someUnknownButWellFormed")]), true).is_empty(), "an unknown field is still ignored");
+    }
+
+    #[test]
+    fn a_refused_query_parameter_answers_400_not_422() {
+        use crate::persistence::traits::RepositoryError;
+        use crate::service::ServiceError;
+        let named = vec![crate::violation::Violation::invalid_query("page", "not_a_number", "x")];
+        let broken = vec![crate::violation::Violation::new("name", "max_length", "x")];
+        assert_eq!(service_error_status(&ServiceError::Repository(RepositoryError::Violations(named.clone()))), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(service_error_status(&ServiceError::Violations(named)), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(service_error_status(&ServiceError::Violations(broken.clone())), axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+        // A mix of a refused parameter and a broken rule is a broken rule.
+        let mixed = vec![crate::violation::Violation::invalid_query("page", "x", "x"), broken[0].clone()];
+        assert!(!is_query_refusal(&mixed));
+        assert!(!is_query_refusal(&[]));
+    }
+
+    #[test]
+    fn a_named_refusal_from_the_repository_becomes_an_invalid_query_violation() {
+        use crate::persistence::traits::RepositoryError;
+        let refused = backbone_orm::QueryParamError::unknown_column("sort_by", "full_name");
+        let err = RepositoryError::from_source(anyhow::Error::from(refused).context("while listing"));
+        let RepositoryError::Violations(v) = err else { panic!("{err:?}") };
+        assert_eq!(v.len(), 1);
+        assert_eq!((v[0].path.as_str(), v[0].code.as_str()), ("sort_by", "invalid_query"));
+        assert_eq!(v[0].params["parameter"], "sort_by");
+        assert_eq!(v[0].params["reason"], "unknown_column");
+        assert!(v[0].message.contains("sort_by") && v[0].message.contains("full_name"));
     }
 
     #[test]
@@ -3169,7 +3501,7 @@ mod tests {
                 sort_by: sort_by.map(str::to_string),
                 ..Default::default()
             };
-            named_secret(&params, <Secretive as backbone_orm::EntityRepoMeta>::secret_fields())
+            named_secret_at(&params, <Secretive as backbone_orm::EntityRepoMeta>::secret_fields())
         };
         for pairs in [
             vec![("token_hash", "abc")],
@@ -3180,7 +3512,9 @@ mod tests {
             vec![("min", "token_hash")],
             vec![("group_by", "tokenHash")],
         ] {
-            assert_eq!(ask(&pairs, None).as_deref().map(camel_to_snake_case), Some("token_hash".into()), "{pairs:?}");
+            let (parameter, field) = ask(&pairs, None).expect("named");
+            assert_eq!(camel_to_snake_case(&field), "token_hash", "{pairs:?}");
+            assert_eq!(parameter, pairs[0].0, "the refusal names the parameter that carried it");
         }
         assert!(ask(&[], Some("tokenHash")).is_some(), "sort_by");
         assert!(ask(&[("name[contain]", "token_hash"), ("orderby", "name")], None).is_none(), "a value is not a column");

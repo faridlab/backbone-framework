@@ -560,16 +560,97 @@ fn every_double_underscore_wire_key_is_ignored() {
     let mut params = HashMap::new();
     params.insert("__internal".to_string(), "x".to_string());
     params.insert("__internal[gt]".to_string(), "1".to_string());
-    params.insert("orderby".to_string(), "__internal".to_string());
-    params.insert("searchFields".to_string(), "__internal".to_string());
     let filter = parse_filters(&params, &HashMap::new(), None).unwrap();
     assert!(filter.conditions.is_empty(), "{:?}", filter.conditions);
-    assert!(filter.sorts.is_empty(), "{:?}", filter.sorts);
-    assert!(
-        filter.search_fields.is_empty(),
-        "{:?}",
-        filter.search_fields
-    );
+}
+
+#[test]
+fn a_double_underscore_sort_or_search_column_is_refused_by_name() {
+    // The reserved namespace is not a column a client may sort or search by; the request is
+    // refused, naming the parameter, rather than the column quietly dropped.
+    for key in ["orderby", "sort", "searchFields"] {
+        let mut params = HashMap::new();
+        params.insert(key.to_string(), "__internal".to_string());
+        let err = parse_filters(&params, &HashMap::new(), None).unwrap_err();
+        let named = err.downcast_ref::<QueryParamError>().expect("a named refusal");
+        assert_eq!(named.parameter, key);
+        assert_eq!(named.reason, QueryParamReason::InvalidFieldName);
+    }
+}
+
+fn refusal_of(pairs: &[(&str, &str)]) -> QueryParamError {
+    let params: HashMap<String, String> =
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+    parse_filters(&params, &HashMap::new(), None)
+        .expect_err("the request should be refused")
+        .downcast::<QueryParamError>()
+        .expect("a named refusal")
+}
+
+#[test]
+fn an_unknown_filter_operator_is_refused_naming_the_parameter() {
+    let e = refusal_of(&[("priority[neq]", "3")]);
+    assert_eq!(e.parameter, "priority[neq]");
+    assert_eq!(e.reason, QueryParamReason::UnknownOperator);
+    assert!(e.message.contains("priority[neq]") && e.message.contains("neq"), "{}", e.message);
+    assert!(e.message.contains("gte"), "the sentence lists the operators: {}", e.message);
+}
+
+#[test]
+fn a_filter_key_that_is_not_a_field_name_is_refused_naming_it() {
+    for key in ["na-me", "user.id", "a b", "name[eq", "x;y[eq]"] {
+        let e = refusal_of(&[(key, "1")]);
+        assert_eq!(e.parameter, key, "{key}");
+        assert_eq!(e.reason, QueryParamReason::InvalidFieldName, "{key}");
+    }
+}
+
+#[test]
+fn an_unusable_sort_column_is_refused_naming_the_sort_parameter() {
+    let e = refusal_of(&[("orderby", "na-me:desc")]);
+    assert_eq!((e.parameter.as_str(), e.reason), ("orderby", QueryParamReason::InvalidFieldName));
+    let e = refusal_of(&[("sort", "name,-a b")]);
+    assert_eq!((e.parameter.as_str(), e.reason), ("sort", QueryParamReason::InvalidFieldName));
+    let e = refusal_of(&[("orderby[na-me]", "desc")]);
+    assert_eq!((e.parameter.as_str(), e.reason), ("orderby[na-me]", QueryParamReason::InvalidFieldName));
+}
+
+#[test]
+fn a_paging_value_that_is_not_a_number_is_refused_naming_it() {
+    for key in ["offset", "page", "limit", "pageSize", "per_page"] {
+        let e = refusal_of(&[(key, "abc")]);
+        assert_eq!(e.parameter, key);
+        assert_eq!(e.reason, QueryParamReason::NotANumber);
+        assert!(e.message.contains(key), "{}", e.message);
+    }
+    let e = refusal_of(&[("offset", "-1")]);
+    assert_eq!(e.reason, QueryParamReason::NotANumber);
+}
+
+#[test]
+fn an_empty_sort_or_paging_value_asks_for_nothing() {
+    let mut params = HashMap::new();
+    params.insert("orderby".to_string(), "".to_string());
+    params.insert("limit".to_string(), " ".to_string());
+    params.insert("offset".to_string(), "".to_string());
+    let filter = parse_filters(&params, &HashMap::new(), None).unwrap();
+    assert!(filter.sorts.is_empty() && filter.limit.is_none() && filter.offset.is_none());
+    let mut params = HashMap::new();
+    params.insert("orderby".to_string(), "name,".to_string());
+    assert_eq!(parse_filters(&params, &HashMap::new(), None).unwrap().sorts.len(), 1);
+}
+
+#[test]
+fn a_known_operator_in_any_case_and_every_documented_spelling_still_parses() {
+    for op in [
+        "eq", "where", "ne", "noteq", "gt", "gte", "gteq", "lt", "lte", "lteq", "like", "ilike",
+        "notlike", "contain", "notcontain", "startwith", "startswith", "endwith", "endswith",
+        "in", "notin", "between", "notbetween", "isnull", "isnotnull", "or", "orwhere", "GTE",
+    ] {
+        let mut params = HashMap::new();
+        params.insert(format!("priority[{op}]"), "1,2".to_string());
+        assert!(parse_filters(&params, &HashMap::new(), None).is_ok(), "{op}");
+    }
 }
 
 #[test]

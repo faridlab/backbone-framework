@@ -16,6 +16,9 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The code of a violation that refuses one query parameter of a list-shaped request.
+pub const INVALID_QUERY: &str = "invalid_query";
+
 /// One broken rule.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -35,6 +38,14 @@ pub struct Violation {
 impl Violation {
     pub fn new(path: impl Into<String>, code: impl Into<String>, message: impl Into<String>) -> Self {
         Self { path: path.into(), code: code.into(), params: serde_json::Map::new(), message: message.into() }
+    }
+
+    /// A refused query parameter: the code [`INVALID_QUERY`] on the parameter's path, with the
+    /// parameter and the stable `reason` it was refused for in `params`.
+    pub fn invalid_query(parameter: &str, reason: &str, message: impl Into<String>) -> Self {
+        Self::new(parameter, INVALID_QUERY, message)
+            .with_param("parameter", parameter)
+            .with_param("reason", reason)
     }
 
     /// Add one checked-against value.
@@ -88,6 +99,20 @@ mod tests {
         assert_eq!(code_from_constraint("fiscal_period_status_transition"), "fiscal_period_status_transition");
         // A prefix without the separator is not a generated name.
         assert_eq!(code_from_constraint("ck_legacy"), "ck_legacy");
+    }
+
+    #[test]
+    fn a_refused_query_parameter_names_itself_and_its_reason() {
+        let v = Violation::invalid_query("sort_by", "unknown_column", "`sort_by`: `x` is not a field");
+        assert_eq!(
+            serde_json::to_value(&v).unwrap(),
+            serde_json::json!({
+                "path": "sort_by",
+                "code": "invalid_query",
+                "params": { "parameter": "sort_by", "reason": "unknown_column" },
+                "message": "`sort_by`: `x` is not a field"
+            })
+        );
     }
 
     #[test]

@@ -36,6 +36,7 @@
 
 mod types;
 mod validation;
+mod error;
 mod condition;
 mod query;
 mod parser;
@@ -43,6 +44,10 @@ pub mod cursor;
 
 pub use types::{FilterOperator, FilterValue, FilterLogical, SortDirection, SortSpec};
 pub use validation::{FilterableEntity, is_valid_field, sanitize_field_name};
+pub use error::{
+    attribute_operator_error, attribute_query_error, undefined_operator, QueryParamError,
+    QueryParamReason,
+};
 pub use condition::FilterCondition;
 pub use query::QueryFilter;
 pub use parser::{is_internal_key, parse_filters};

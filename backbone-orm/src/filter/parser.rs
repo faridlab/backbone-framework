@@ -7,7 +7,33 @@ use anyhow::Result;
 use super::types::{FilterOperator, FilterValue, FilterLogical, SortDirection, SortSpec};
 use super::condition::FilterCondition;
 use super::query::QueryFilter;
+use super::error::{QueryParamError, QueryParamReason};
 use super::validation::{is_valid_field, sanitize_field_name};
+
+/// The operator keywords a `field[operator]` filter accepts, as the refusal of an unknown one
+/// lists them.
+const OPERATOR_KEYWORDS: &str = "eq, ne, gt, gte, lt, lte, like, ilike, notlike, contain, \
+     notcontain, startwith, endwith, in, notin, between, notbetween, isnull, isnotnull, or";
+
+/// `name` as a field name, or the refusal of the parameter `parameter` that carries it.
+fn field_of(name: &str, parameter: &str) -> Result<String> {
+    sanitize_field_name(name).map_err(|_| {
+        QueryParamError::new(
+            parameter,
+            QueryParamReason::InvalidFieldName,
+            format!("`{parameter}` does not name a field: field names are letters, digits and underscores"),
+        )
+        .into()
+    })
+}
+
+/// A paging value as a whole, non-negative number, or the refusal of its parameter.
+fn count_of(parameter: &str, value: &str) -> Result<u32> {
+    value
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| QueryParamError::not_a_number(parameter, value).into())
+}
 
 /// Built-in PostgreSQL types that should NOT have their values normalized.
 /// Any column_type not in this list is treated as a custom enum type whose
@@ -122,7 +148,7 @@ pub fn parse_filters(
         if let Some(bracket_pos) = key.find('[') {
             if key.ends_with(']') {
                 let field = &key[..bracket_pos];
-                let sanitized_field = sanitize_field_name(field)?;
+                let sanitized_field = field_of(field, key)?;
 
                 // Validate against allow-list if provided
                 if let Some(allowed) = allowed_fields {
@@ -141,10 +167,7 @@ pub fn parse_filters(
                 // column and silently drop the sort (the wire's sorts have
                 // been empty this whole time).
                 if field.eq_ignore_ascii_case("orderby") || field.eq_ignore_ascii_case("sort") {
-                    let sort_field = match sanitize_field_name(operator_str) {
-                        Ok(f) => f,
-                        Err(_) => continue,
-                    };
+                    let sort_field = field_of(operator_str, key)?;
                     if let Some(allowed) = allowed_fields {
                         if !is_valid_field(&sort_field, allowed) {
                             continue;
@@ -249,9 +272,25 @@ pub fn parse_filters(
                             };
 
                             filter.add_condition(condition);
+                        } else {
+                            return Err(QueryParamError::new(
+                                key.as_str(),
+                                QueryParamReason::UnknownOperator,
+                                format!(
+                                    "`{key}`: `{operator_str}` is not a filter operator (use one of {OPERATOR_KEYWORDS})"
+                                ),
+                            )
+                            .into());
                         }
                     }
                 }
+            } else {
+                return Err(QueryParamError::new(
+                    key.as_str(),
+                    QueryParamReason::InvalidFieldName,
+                    format!("`{key}` opens an operator bracket it never closes"),
+                )
+                .into());
             }
         } else {
             // Handle non-bracket keys (simple equality or special keys)
@@ -262,23 +301,25 @@ pub fn parse_filters(
                         // Multiple fields: orderby=name,-age
                         for part in value.split(',') {
                             let part = part.trim();
+                            if part.is_empty() {
+                                continue;
+                            }
                             let direction = if part.starts_with('-') {
                                 SortDirection::Desc
                             } else {
                                 SortDirection::Asc
                             };
                             let field = part.trim_start_matches('-');
-                            if let Ok(sanitized) = sanitize_field_name(field) {
-                                let sort_field = audit_metadata_sql_expr(&sanitized)
-                                    .unwrap_or_else(|| sanitized.clone());
-                                // Validate against allow-list if provided
-                                if let Some(allowed) = allowed_fields {
-                                    if is_valid_field(&sanitized, allowed) {
-                                        filter.add_sort(SortSpec::new(sort_field, direction));
-                                    }
-                                } else {
+                            let sanitized = field_of(field, key)?;
+                            let sort_field = audit_metadata_sql_expr(&sanitized)
+                                .unwrap_or_else(|| sanitized.clone());
+                            // Validate against allow-list if provided
+                            if let Some(allowed) = allowed_fields {
+                                if is_valid_field(&sanitized, allowed) {
                                     filter.add_sort(SortSpec::new(sort_field, direction));
                                 }
+                            } else {
+                                filter.add_sort(SortSpec::new(sort_field, direction));
                             }
                         }
                     } else {
@@ -308,16 +349,18 @@ pub fn parse_filters(
                             (false, None) => SortDirection::Asc,
                         };
                         let field = bare.trim_start_matches('-');
-                        if let Ok(sanitized) = sanitize_field_name(field) {
-                            let sort_field = audit_metadata_sql_expr(&sanitized)
-                                .unwrap_or_else(|| sanitized.clone());
-                            if let Some(allowed) = allowed_fields {
-                                if is_valid_field(&sanitized, allowed) {
-                                    filter.add_sort(SortSpec::new(sort_field, direction));
-                                }
-                            } else {
+                        if field.trim().is_empty() {
+                            continue; // `orderby=` asks for no sort
+                        }
+                        let sanitized = field_of(field, key)?;
+                        let sort_field = audit_metadata_sql_expr(&sanitized)
+                            .unwrap_or_else(|| sanitized.clone());
+                        if let Some(allowed) = allowed_fields {
+                            if is_valid_field(&sanitized, allowed) {
                                 filter.add_sort(SortSpec::new(sort_field, direction));
                             }
+                        } else {
+                            filter.add_sort(SortSpec::new(sort_field, direction));
                         }
                     }
                 }
@@ -325,37 +368,34 @@ pub fn parse_filters(
                     filter.search = Some(value.clone());
                 }
                 "searchfields" => {
-                    filter.search_fields = value.split(',').filter_map(|s| {
+                    let mut columns = Vec::new();
+                    for s in value.split(',') {
                         let trimmed = s.trim();
-                        sanitize_field_name(trimmed).ok().filter(|sanitized| {
-                            if let Some(allowed) = allowed_fields {
-                                is_valid_field(sanitized, allowed)
-                            } else {
-                                true
-                            }
-                        })
-                    }).collect();
-                }
-                "limit" => {
-                    if let Ok(l) = value.parse::<u32>() {
-                        filter.limit = Some(l);
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        let sanitized = field_of(trimmed, key)?;
+                        if allowed_fields.map_or(true, |allowed| is_valid_field(&sanitized, allowed)) {
+                            columns.push(sanitized);
+                        }
                     }
+                    filter.search_fields = columns;
                 }
-                "offset" => {
-                    if let Ok(o) = value.parse::<u32>() {
-                        filter.offset = Some(o);
-                    }
+                // An empty paging value (`?limit=`) asks for nothing; a present one that is
+                // not a number is refused by name.
+                "limit" if !value.trim().is_empty() => {
+                    filter.limit = Some(count_of(key, value)?);
                 }
-                "page" => {
-                    if let Ok(p) = value.parse::<u32>() {
-                        filter.page = Some(p);
-                    }
+                "offset" if !value.trim().is_empty() => {
+                    filter.offset = Some(count_of(key, value)?);
                 }
-                "pagesize" | "perpage" | "per_page" => {
-                    if let Ok(p) = value.parse::<u32>() {
-                        filter.limit = Some(p);
-                    }
+                "page" if !value.trim().is_empty() => {
+                    filter.page = Some(count_of(key, value)?);
                 }
+                "pagesize" | "perpage" | "per_page" if !value.trim().is_empty() => {
+                    filter.limit = Some(count_of(key, value)?);
+                }
+                "limit" | "offset" | "page" | "pagesize" | "perpage" | "per_page" => {}
                 "after" => {
                     filter.cursor_after = Some(value.clone());
                 }
@@ -370,10 +410,7 @@ pub fn parse_filters(
                     // Skip if it's a known non-filter parameter
                     if !matches!(key.as_str(), "fields" | "include" | "with") {
                         // Validate and sanitize the field name
-                        let sanitized_field = match sanitize_field_name(key) {
-                            Ok(f) => f,
-                            Err(_) => continue, // Skip invalid field names
-                        };
+                        let sanitized_field = field_of(key, key)?;
 
                         // Validate against allow-list if provided
                         if let Some(allowed) = allowed_fields {

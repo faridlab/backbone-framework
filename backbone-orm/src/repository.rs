@@ -289,18 +289,27 @@ impl<T: for<'a> FromRow<'a, PgRow> + Send + Unpin> PostgresRepository<T> {
     where
         T: Send + Sync,
     {
-        // Parse filters from HashMap (no field allow-list by default for backward compatibility)
-        let mut query_filter = self.parse_typed_filters(filters, column_types, None).await?;
-        if let Some(cond) = base_condition {
-            query_filter.add_base_condition(cond);
-        }
+        // A parameter the request got wrong is refused by name, whether the parser or the
+        // database found it out.
+        let listed = async {
+            // Parse filters from HashMap (no field allow-list by default for backward compatibility)
+            let mut query_filter = self.parse_typed_filters(filters, column_types, None).await?;
+            if let Some(cond) = base_condition {
+                query_filter.add_base_condition(cond);
+            }
 
-        // Set up search fields if provided
-        if !search_fields.is_empty() {
-            query_filter.search_fields = search_fields.iter().map(|s| s.to_string()).collect();
-        }
+            // Set up search fields if provided
+            if !search_fields.is_empty() {
+                query_filter.search_fields = search_fields.iter().map(|s| s.to_string()).collect();
+            }
 
-        self.execute_list(pagination, query_filter).await
+            self.execute_list(pagination, query_filter).await
+        }
+        .await;
+        match listed {
+            Ok(page) => Ok(page),
+            Err(e) => Err(self.name_refused_parameter(e, filters).await),
+        }
     }
 
     /// List entities with pagination, filtering, and field whitelist enforcement
@@ -345,16 +354,23 @@ impl<T: for<'a> FromRow<'a, PgRow> + Send + Unpin> PostgresRepository<T> {
     where
         T: Send + Sync,
     {
-        // Parse filters with optional field whitelist
-        let mut query_filter =
-            self.parse_typed_filters(filters, column_types, allowed_fields).await?;
+        let listed = async {
+            // Parse filters with optional field whitelist
+            let mut query_filter =
+                self.parse_typed_filters(filters, column_types, allowed_fields).await?;
 
-        // Set up search fields if provided
-        if !search_fields.is_empty() {
-            query_filter.search_fields = search_fields.iter().map(|s| s.to_string()).collect();
+            // Set up search fields if provided
+            if !search_fields.is_empty() {
+                query_filter.search_fields = search_fields.iter().map(|s| s.to_string()).collect();
+            }
+
+            self.execute_list(pagination, query_filter).await
         }
-
-        self.execute_list(pagination, query_filter).await
+        .await;
+        match listed {
+            Ok(page) => Ok(page),
+            Err(e) => Err(self.name_refused_parameter(e, filters).await),
+        }
     }
 
     /// Update one row by id, setting only `only` columns when given (every serialized column but
@@ -485,8 +501,23 @@ impl<T: for<'a> FromRow<'a, PgRow> + Send + Unpin> PostgresRepository<T> {
             } else {
                 query_filter.cursor_after.clone().unwrap()
             };
-            let payload = crate::filter::cursor::decode_cursor(&opaque, &sorts)
-                .map_err(|e| anyhow::anyhow!("cursor refused: {e}"))?;
+            let payload = crate::filter::cursor::decode_cursor(&opaque, &sorts).map_err(|e| {
+                // The parameter it arrived in is `before` only when `after` was absent (see
+                // `backwards`).
+                let parameter = if backwards { "before" } else { "after" };
+                let why = match e {
+                    crate::filter::CursorError::SortMismatch { .. } => {
+                        "it was issued for a different sort order"
+                    }
+                    crate::filter::CursorError::Version(_) => "it was issued by an older version",
+                    _ => "it is not a position this list issued",
+                };
+                anyhow::Error::from(crate::filter::QueryParamError::new(
+                    parameter,
+                    crate::filter::QueryParamReason::InvalidCursor,
+                    format!("`{parameter}` cannot continue this list: {why}"),
+                ))
+            })?;
             let mut idx = filter_params.len() + 1;
             let (keyset_sql, keyset_params) = crate::filter::cursor::build_keyset_predicate(
                 &payload,
@@ -1284,6 +1315,56 @@ impl<T: for<'a> FromRow<'a, PgRow> + Send + Unpin> PostgresRepository<T> {
         column_types: &HashMap<String, String>,
         search_fields: &[&str],
     ) -> anyhow::Result<AggregateResult> {
+        match self
+            .aggregate_unattributed(spec, base_condition, filters, column_types, search_fields)
+            .await
+        {
+            Ok(result) => Ok(result),
+            Err(e) => Err(self.name_refused_parameter(e, filters).await),
+        }
+    }
+
+    /// Name the query parameter behind a failed statement (see
+    /// [`crate::filter::attribute_query_error`]). An operator the column's type lacks is
+    /// ambiguous when several filters use pattern operators, so that one case reads the table's
+    /// column types — through the pool, not the request's connection, which the failed
+    /// statement may have left in an aborted transaction.
+    async fn name_refused_parameter(
+        &self,
+        err: anyhow::Error,
+        filters: &HashMap<String, String>,
+    ) -> anyhow::Error {
+        let err = crate::filter::attribute_query_error(err, filters);
+        if crate::filter::undefined_operator(&err).is_none() {
+            return err;
+        }
+        let (schema, table) = match self.table_name.split_once('.') {
+            Some((s, t)) => (s.to_string(), t.to_string()),
+            None => ("public".to_string(), self.table_name.clone()),
+        };
+        let types: Vec<(String, String)> = sqlx::query_as(
+            "SELECT column_name, data_type FROM information_schema.columns \
+              WHERE table_schema = $1 AND table_name = $2",
+        )
+        .bind(schema)
+        .bind(table)
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        let types: HashMap<String, String> = types.into_iter().collect();
+        crate::filter::attribute_operator_error(err, filters, &types)
+    }
+
+    /// [`Self::aggregate_with_filters_and_base`] before a database refusal is matched to the
+    /// query parameter behind it.
+    async fn aggregate_unattributed(
+        &self,
+        spec: &AggregateSpec,
+        base_condition: Option<&str>,
+        filters: &HashMap<String, String>,
+        column_types: &HashMap<String, String>,
+        search_fields: &[&str],
+    ) -> anyhow::Result<AggregateResult> {
         let mut query_filter = self.parse_typed_filters(filters, column_types, None).await?;
         if let Some(cond) = base_condition {
             query_filter.add_base_condition(cond);
@@ -1302,15 +1383,17 @@ impl<T: for<'a> FromRow<'a, PgRow> + Send + Unpin> PostgresRepository<T> {
         let mut selects: Vec<String> = Vec::new();
         let mut value_keys: Vec<String> = Vec::new();
         for (func, field) in &spec.reductions {
-            let (column, pg_type) = resolve_column(field, &columns)?;
+            let (column, pg_type) = resolve_column(field, &columns)
+                .map_err(|_| crate::filter::QueryParamError::unknown_column(func.label(), field))?;
             if func.requires_numeric() && !is_numeric_pg_type(pg_type) {
-                return Err(AggregateFieldError(format!(
-                    "cannot {} `{}`: its type is {} — {} needs a numeric column",
+                return Err(crate::filter::QueryParamError::new(
                     func.label(),
-                    column,
-                    pg_type,
-                    func.label()
-                ))
+                    crate::filter::QueryParamReason::NotNumeric,
+                    format!(
+                        "`{label}`: `{field}` is not a numeric field, and {label} needs one",
+                        label = func.label()
+                    ),
+                )
                 .into());
             }
             let key = format!("{}:{}", func.label(), column);
@@ -1339,9 +1422,11 @@ impl<T: for<'a> FromRow<'a, PgRow> + Send + Unpin> PostgresRepository<T> {
             let qualified = qualify_relation_table(&self.table_name, rel_table);
             let rel_columns = catalog_columns(&self.pool, &qualified).await?;
             let (label_col, _) = resolve_column(label_field, &rel_columns).map_err(|_| {
-                AggregateFieldError(format!(
-                    "cannot label groups by `{label_field}`: the related table `{qualified}` has no such column"
-                ))
+                crate::filter::QueryParamError::new(
+                    "group_label",
+                    crate::filter::QueryParamReason::UnknownColumn,
+                    format!("`group_label`: `{label_field}` is not a field of the records the groups point at"),
+                )
             })?;
             label_select = format!(", (label_rel.{label_col})::text AS __group_label");
             label_join = format!(
@@ -1351,7 +1436,9 @@ impl<T: for<'a> FromRow<'a, PgRow> + Send + Unpin> PostgresRepository<T> {
 
         let sql = match &spec.group_by {
             Some(field) => {
-                let (column, _) = resolve_column(field, &columns)?;
+                let (column, _) = resolve_column(field, &columns).map_err(|_| {
+                    crate::filter::QueryParamError::unknown_column("group_by", field)
+                })?;
                 format!(
                     "SELECT GROUPING({column}) AS __is_total, ({column})::text AS __group_key{label_select}, \
                      COUNT(*) AS __count{reductions} \
