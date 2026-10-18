@@ -16,6 +16,35 @@ back to the `## [Unreleased]` section.
 
 ## [Unreleased]
 
+### Added
+
+- **backbone-core** — runtime support for generated hook triggers, in `write_hooks`: `in_trigger(f)`
+  counts how deeply trigger runs nest in a task-local and refuses the run past `TRIGGER_MAX_DEPTH` (8)
+  with the violation `TRIGGER_DEPTH_EXCEEDED` (`trigger_depth_exceeded`), so a cycle of triggers that
+  write through each other's services ends in a coded 422 that rolls the write back
+  (`current_trigger_depth()` reads the level); `NotificationRequested`, the outbox row a trigger's
+  `send_email` or `notify` stages (channel, template, rendered body, recipients, variables, the trigger
+  that asked) with `record(aggregate, id, company, ctx)` carrying the write's correlation and causation
+  ids; `ScheduledTrigger`, a scheduled trigger entry's name, schedule and description;
+  `Change::after_mut()` and `Change::before_and_after_mut()`, the row about to be stored for a hook that
+  fills a field. `row_rule::to_json` and `to_text` turn a rule value into JSON (a whole number is an
+  integer, a time its RFC 3339 text) or message text.
+- **backbone-core** — `CrudPermissions::public(gate)` and `is_public(gate)`: the routes of a public gate
+  carry no permission layer and read no `AuthContext`, so reference data a schema declares `public:` is
+  served to an unauthenticated caller where the host mounted the routes outside its authentication
+  layer; every other gate is guarded as before, and an upsert needs the half of it that is not public.
+
+### Deprecated
+
+- **backbone-core** — the `trigger` module (`TriggerHandler`, `TriggerEvent`, `TriggerContext`,
+  `TriggerContextMut`, `ActionExecutor`, `TriggerRegistry`). Nothing called the registry and the executor
+  only logged; hook triggers now run through `write_hooks` (the generated `<Model>WriteHooks` and
+  `<Model>Triggers`). It is removed after one minor release.
+
+### Breaking changes
+
+None.
+
 ## [3.14.0] - 2026-10-18
 
 ### Added
