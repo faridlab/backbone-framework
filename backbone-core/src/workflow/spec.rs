@@ -53,6 +53,9 @@ pub struct FailureSpec {
     /// The step to go to.
     #[serde(default)]
     pub next: Option<String>,
+    /// Context keys to set when the failure is routed to `next`.
+    #[serde(default)]
+    pub set: Vec<(String, Tpl)>,
     /// Attempts for a transient failure; the workflow's, else the engine's, when absent.
     #[serde(default)]
     pub retry: Option<RetrySpec>,

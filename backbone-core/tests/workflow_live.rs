@@ -817,6 +817,7 @@ async fn a_business_failure_is_not_retried_and_a_routed_one_follows_its_branch()
     routed.trigger_event = "TicketRouted".into();
     routed.steps[1].on_failure = Some(FailureSpec {
         next: Some("recover".into()),
+        set: vec![("recovered_from".into(), lit(json!("refusal")))],
         ..Default::default()
     });
     routed.steps.insert(
@@ -851,6 +852,10 @@ async fn a_business_failure_is_not_retried_and_a_routed_one_follows_its_branch()
         "the failure message reaches the context"
     );
     assert_eq!(h.notes("T-8").await, vec!["opened", "recovered"]);
+    assert_eq!(
+        inst.context["recovered_from"], "refusal",
+        "the failure branch's `set` ran"
+    );
     h.teardown().await;
 }
 

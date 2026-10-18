@@ -1416,7 +1416,7 @@ impl WorkflowEngine {
                 // A hand call that outlasted its step's timeout takes `on_timeout` when there is one.
                 let route: Option<Outcome> = match failure.kind {
                     FailKind::TimedOut if on_timeout.is_some() => on_timeout,
-                    FailKind::Business => policy.next.clone().map(|n| Outcome { set: Vec::new(), next: Some(n) }),
+                    FailKind::Business => policy.next.clone().map(|n| Outcome { set: policy.set.clone(), next: Some(n) }),
                     FailKind::Transient | FailKind::TimedOut => {
                         if attempts < retry.max_attempts as i32 {
                             let delay = match retry.backoff {
@@ -1443,7 +1443,7 @@ impl WorkflowEngine {
                             .await?;
                             return Ok(StepEnd::Paused);
                         }
-                        policy.on_exhausted.clone().or_else(|| policy.next.clone().map(|n| Outcome { set: Vec::new(), next: Some(n) }))
+                        policy.on_exhausted.clone().or_else(|| policy.next.clone().map(|n| Outcome { set: policy.set.clone(), next: Some(n) }))
                     }
                 };
 
