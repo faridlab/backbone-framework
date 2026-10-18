@@ -68,7 +68,11 @@ back to the `## [Unreleased]` section.
 
 ### Breaking changes
 
-None.
+- **backbone-outbox** — `OutboxRecord` gained the public field `org_unit_id`. Code that builds an `OutboxRecord`
+  with a struct literal outside the crate must add `org_unit_id: None` (the value `OutboxRecord::new` sets);
+  construction through `OutboxRecord::new` is unaffected. This was released in 3.16.0 under the heading
+  "None" by mistake; no released module builds the struct by literal, and serpa-service needed the one-line
+  addition at seven call sites.
 
 ## [3.15.0] - 2026-10-18
 
