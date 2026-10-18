@@ -31,6 +31,7 @@
 //!   connection and the row locks for as long. Stage an event and let the relay do the slow part.
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -324,6 +325,30 @@ impl<'a, E> Change<'a, E> {
     }
 }
 
+impl<'a, E> Change<'a, E> {
+    /// The row to store, mutable: for a hook that fills a field before the write. `None` for a
+    /// delete or a restore, which store no new row.
+    pub fn after_mut(&mut self) -> Option<&mut E> {
+        match self {
+            Change::Created { after }
+            | Change::Updated { after, .. }
+            | Change::Transitioned { after, .. } => Some(&mut **after),
+            Change::Deleted { .. } | Change::Restored { .. } => None,
+        }
+    }
+
+    /// The row as it was read and the row to store, the second mutable: for a hook that fills a
+    /// field of an update from what it was. `None` unless the change is an update.
+    pub fn before_and_after_mut(&mut self) -> Option<(&E, &mut E)> {
+        match self {
+            Change::Updated { before, after } | Change::Transitioned { before, after, .. } => {
+                Some((*before, &mut **after))
+            }
+            _ => None,
+        }
+    }
+}
+
 impl<'a, E: serde::Serialize> Change<'a, E> {
     /// Whether the serialized field `name` differs between the row before and after. A create
     /// changes every field it sets (non-null); a delete changes none.
@@ -373,6 +398,115 @@ impl<'a, E: PersistentEntity> Change<'a, E> {
             // A verb on an entity with no state field: nothing to say about a move.
             None => Change::Updated { before, after },
         }
+    }
+}
+
+// ── Hook triggers ───────────────────────────────────────────────────────────────
+
+/// How many trigger runs may be nested: a trigger whose hand method writes another entity runs that
+/// entity's triggers inside its own, and so on. The run past this depth is refused, so a cycle of
+/// triggers ends in an error instead of a stack.
+pub const TRIGGER_MAX_DEPTH: u32 = 8;
+
+/// The violation code of a trigger run refused for nesting too deep.
+pub const TRIGGER_DEPTH_EXCEEDED: &str = "trigger_depth_exceeded";
+
+tokio::task_local! {
+    static TRIGGER_DEPTH: u32;
+}
+
+/// How many trigger runs enclose the current task.
+pub fn current_trigger_depth() -> u32 {
+    TRIGGER_DEPTH.try_with(|d| *d).unwrap_or(0)
+}
+
+/// Run `f`, the triggers of one hook, one level deeper than the run that encloses it. The generated
+/// write hooks wrap every trigger they run in this, so writes a trigger makes through other
+/// entities' services (whose hooks wrap theirs the same way) count their nesting: the
+/// [`TRIGGER_MAX_DEPTH`]th level inside another is refused with the violation
+/// [`TRIGGER_DEPTH_EXCEEDED`], which rolls the whole write back.
+pub async fn in_trigger<T, F>(f: F) -> ServiceResult<T>
+where
+    F: std::future::Future<Output = ServiceResult<T>>,
+{
+    let depth = current_trigger_depth();
+    if depth >= TRIGGER_MAX_DEPTH {
+        return Err(ServiceError::Violations(vec![crate::violation::Violation::new(
+            "",
+            TRIGGER_DEPTH_EXCEEDED,
+            format!("triggers are nested more than {TRIGGER_MAX_DEPTH} deep: a trigger writes a row whose trigger writes a row, and so on"),
+        )
+        .with_param("max", TRIGGER_MAX_DEPTH)]));
+    }
+    TRIGGER_DEPTH.scope(depth + 1, f).await
+}
+
+/// A scheduled entry of a model's hook triggers (`schedule:` on a trigger): what a composing
+/// service's scheduler runs at `schedule`, with the generated `run_<model>_scheduled`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScheduledTrigger {
+    /// The entry's name (its key in the hook file).
+    pub name: &'static str,
+    /// The schedule as written: cron, `every 5.minutes`, `every 1.day at 03:00`.
+    pub schedule: &'static str,
+    /// What the entry says it is for.
+    pub description: &'static str,
+}
+
+/// A request to tell someone something, staged by a hook trigger's `send_email` or `notify`. An
+/// effect outside the database is never performed inside the write's transaction: the request is an
+/// outbox row (`NotificationRequested`) that commits with the write, and a consumer (a mail or
+/// notification module's relay subscriber) performs it, at least once and idempotently.
+///
+/// The payload is this struct as JSON. `channel` is `email` or `notify`; a `send_email` names a
+/// `template` and a `notify` a `template` or a literal `body`; `to` is what the trigger's recipient
+/// expression evaluated to (an address, an id, or a list of them); `data` is the template's
+/// variables; `trigger` is `<Model>.<key>` of the trigger that asked.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NotificationRequested {
+    /// `email` or `notify`.
+    pub channel: String,
+    /// The template to render, when the request names one.
+    pub template: Option<String>,
+    /// The literal text of a `notify`, with its `#{field}` already filled in.
+    pub body: Option<String>,
+    /// The recipients, as evaluated.
+    pub to: Value,
+    /// The template variables, as evaluated.
+    pub data: Value,
+    /// The trigger that asked: `<Model>.<key>`.
+    pub trigger: String,
+}
+
+impl NotificationRequested {
+    /// The event type of the outbox row.
+    pub const NAME: &'static str = "NotificationRequested";
+    /// The payload version.
+    pub const VERSION: i32 = 1;
+
+    /// The outbox row of this request, about `aggregate` (`User`) `aggregate_id`, under `company_id`
+    /// (see [`WriteCtx::company_of`]), carrying the write's correlation and causation ids.
+    pub fn record(
+        &self,
+        aggregate: &str,
+        aggregate_id: &str,
+        company_id: Uuid,
+        ctx: &WriteCtx,
+    ) -> OutboxRecord {
+        let mut record = OutboxRecord::new(
+            Self::NAME,
+            aggregate,
+            aggregate_id,
+            company_id,
+            serde_json::to_value(self).unwrap_or(Value::Null),
+            chrono::Utc::now(),
+        )
+        .with_version(Self::VERSION)
+        .with_correlation_id(ctx.correlation_id.clone());
+        if let Some(cause) = &ctx.causation_id {
+            record = record.with_causation_id(cause.clone());
+        }
+        record
     }
 }
 
@@ -532,6 +666,131 @@ mod tests {
             after: &mut row("open", None)
         }
         .field_changed("note"));
+    }
+
+    #[test]
+    fn a_hook_may_change_the_row_to_store_but_not_the_row_it_read() {
+        let before = row("open", None);
+        let mut after = row("open", None);
+        let mut change = Change::Updated {
+            before: &before,
+            after: &mut after,
+        };
+        {
+            let (old, entity) = change
+                .before_and_after_mut()
+                .expect("an update has both rows");
+            assert_eq!(old.status, "open");
+            entity.note = Some("filled".into());
+        }
+        assert_eq!(change.after().unwrap().note.as_deref(), Some("filled"));
+        assert_eq!(change.before().unwrap().note, None);
+
+        let mut created = row("open", None);
+        let mut change = Change::Created {
+            after: &mut created,
+        };
+        assert!(
+            change.before_and_after_mut().is_none(),
+            "a create has no row before it"
+        );
+        change.after_mut().unwrap().status = "new".into();
+        assert_eq!(change.subject().status, "new");
+
+        let gone = row("open", None);
+        let mut change = Change::Deleted {
+            before: &gone,
+            hard: false,
+        };
+        assert!(change.after_mut().is_none(), "a delete stores no row");
+    }
+
+    #[tokio::test]
+    async fn trigger_runs_nest_to_a_cap_and_the_run_past_it_is_refused_with_a_code() {
+        assert_eq!(current_trigger_depth(), 0);
+        // Each run is one level inside the last; the ninth level inside another is refused.
+        fn nest(
+            level: u32,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ServiceResult<u32>> + Send>>
+        {
+            Box::pin(async move {
+                in_trigger(async move {
+                    assert_eq!(current_trigger_depth(), level + 1);
+                    match nest(level + 1).await {
+                        Ok(deepest) => Ok(deepest),
+                        Err(ServiceError::Violations(v)) if v[0].code == TRIGGER_DEPTH_EXCEEDED => {
+                            Ok(level + 1)
+                        }
+                        Err(other) => Err(other),
+                    }
+                })
+                .await
+            })
+        }
+        let deepest = nest(0).await.unwrap();
+        assert_eq!(
+            deepest, TRIGGER_MAX_DEPTH,
+            "{TRIGGER_MAX_DEPTH} nested runs ran, the next was refused"
+        );
+        assert_eq!(
+            current_trigger_depth(),
+            0,
+            "the depth does not leak out of the scope"
+        );
+
+        // The refusal itself: a violation with the code and the cap.
+        let refused = TRIGGER_DEPTH
+            .scope(TRIGGER_MAX_DEPTH, async {
+                in_trigger(async { Ok(()) }).await
+            })
+            .await
+            .unwrap_err();
+        match refused {
+            ServiceError::Violations(v) => {
+                assert_eq!(v[0].code, TRIGGER_DEPTH_EXCEEDED);
+                assert_eq!(v[0].params["max"], TRIGGER_MAX_DEPTH);
+            }
+            other => panic!("expected a violation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_notification_request_is_an_outbox_row_about_the_aggregate_with_the_writes_ids() {
+        let ctx = WriteCtx {
+            correlation_id: "req-1".into(),
+            causation_id: Some("cause-1".into()),
+            actor: None,
+            company_id: None,
+            outbox_schema: Some("billing".into()),
+        };
+        let request = NotificationRequested {
+            channel: "email".into(),
+            template: Some("welcome".into()),
+            body: None,
+            to: serde_json::json!("a@b.test"),
+            data: serde_json::json!({ "name": "Ann" }),
+            trigger: "User.after_create".into(),
+        };
+        let record = request.record("User", "u-1", Uuid::from_u128(3), &ctx);
+        assert_eq!(
+            (
+                record.event_type.as_str(),
+                record.aggregate_type.as_str(),
+                record.aggregate_id.as_str(),
+                record.version
+            ),
+            ("NotificationRequested", "User", "u-1", 1)
+        );
+        assert_eq!(record.company_id, Uuid::from_u128(3));
+        assert_eq!(record.correlation_id.as_deref(), Some("req-1"));
+        assert_eq!(record.causation_id.as_deref(), Some("cause-1"));
+        assert_eq!(record.payload["channel"], "email");
+        assert_eq!(record.payload["to"], "a@b.test");
+        assert_eq!(record.payload["trigger"], "User.after_create");
+        assert_eq!(
+            serde_json::from_value::<NotificationRequested>(record.payload).unwrap(),
+            request
+        );
     }
 
     #[tokio::test]

@@ -102,6 +102,7 @@ pub mod state_machine;
 #[cfg(feature = "openapi")]
 pub mod openapi;
 
+#[allow(deprecated)]
 pub use trigger::{
     TriggerHandler, TriggerEvent, TriggerContext, TriggerContextMut,
     ActionExecutor, TriggerRegistry,

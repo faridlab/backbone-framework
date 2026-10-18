@@ -1,5 +1,11 @@
 //! Generic trigger handler trait and types for entity lifecycle events.
 //!
+//! **Deprecated.** Nothing calls this registry, and `ActionExecutor` only logs. Hook `triggers:`
+//! now run in the write's transaction through [`crate::write_hooks`]: the schema generator emits a
+//! `<Model>WriteHooks` that runs a trigger's compilable actions and a `<Model>Triggers` trait for
+//! the rest. This module stays for one minor release so code that names it still builds, and is
+//! removed after it.
+//!
 //! Phase 0 generic base for the `trigger.rs` generator (Category C).
 //!
 //! Every generated `{Model}TriggerHandler` used to re-define the same
@@ -19,6 +25,8 @@
 //! pub type OrderTriggerHandlerObj = dyn TriggerHandler<TriggerContext<Order>, TriggerEvent>;
 //! ```
 
+#![allow(deprecated)]
+
 use std::sync::Arc;
 use async_trait::async_trait;
 
@@ -29,6 +37,7 @@ use async_trait::async_trait;
 /// - `Ctx` — entity-specific trigger context (e.g. `TriggerContext<Order>`)
 /// - `Evt` — trigger event type (e.g. `TriggerEvent`)
 #[async_trait]
+#[deprecated(since = "3.15.0", note = "nothing calls it; hook triggers run through backbone_core::write_hooks (the generated <Model>WriteHooks and <Model>Triggers)")]
 pub trait TriggerHandler<Ctx, Evt>: Send + Sync {
     /// Events this handler responds to.
     fn events(&self) -> Vec<Evt>;
@@ -49,6 +58,7 @@ pub trait TriggerHandler<Ctx, Evt>: Send + Sync {
 ///
 /// Generated files use a type alias: `pub type OrderTriggerEvent = TriggerEvent;`
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[deprecated(since = "3.15.0", note = "nothing calls it; hook triggers run through backbone_core::write_hooks (the generated <Model>WriteHooks and <Model>Triggers)")]
 pub enum TriggerEvent {
     BeforeCreate,
     AfterCreate,
@@ -71,6 +81,7 @@ impl TriggerEvent {
 
 /// Immutable trigger context passed to handlers.
 #[derive(Debug, Clone)]
+#[deprecated(since = "3.15.0", note = "nothing calls it; hook triggers run through backbone_core::write_hooks (the generated <Model>WriteHooks and <Model>Triggers)")]
 pub struct TriggerContext<T: Clone> {
     pub event: TriggerEvent,
     pub entity: T,
@@ -108,6 +119,7 @@ impl<T: Clone> TriggerContext<T> {
 
 /// Mutable trigger context for before-hooks that may modify the entity.
 #[derive(Debug)]
+#[deprecated(since = "3.15.0", note = "nothing calls it; hook triggers run through backbone_core::write_hooks (the generated <Model>WriteHooks and <Model>Triggers)")]
 pub struct TriggerContextMut<T: Clone> {
     pub event: TriggerEvent,
     pub entity: T,
@@ -141,6 +153,7 @@ impl<T: Clone> TriggerContextMut<T> {
 /// Shared executor for side-effect actions (email, notify, webhook, emit).
 ///
 /// All methods are stub implementations pending real integrations.
+#[deprecated(since = "3.15.0", note = "nothing calls it; hook triggers run through backbone_core::write_hooks (the generated <Model>WriteHooks and <Model>Triggers)")]
 pub struct ActionExecutor;
 
 impl ActionExecutor {
@@ -174,6 +187,7 @@ impl Default for ActionExecutor {
 // ─── Generic registry ────────────────────────────────────────────────────────
 
 /// Registry that dispatches trigger events to registered handlers.
+#[deprecated(since = "3.15.0", note = "nothing calls it; hook triggers run through backbone_core::write_hooks (the generated <Model>WriteHooks and <Model>Triggers)")]
 pub struct TriggerRegistry<T: Clone + Send + Sync + 'static> {
     handlers: Vec<Arc<dyn TriggerHandler<TriggerContext<T>, TriggerEvent>>>,
 }

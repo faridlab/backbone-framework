@@ -149,6 +149,34 @@ pub fn text(s: &str) -> Val {
     Val::Text(s.to_string())
 }
 
+/// A rule value as JSON, for a hook that builds a payload or sets a field from an expression: a
+/// whole number is a JSON integer (so it reads into an integer column), a time its RFC 3339 text.
+pub fn to_json(v: &Val) -> Value {
+    match v {
+        Val::Null => Value::Null,
+        Val::Bool(b) => Value::Bool(*b),
+        Val::Num(n) if n.fract() == 0.0 && n.abs() < 9.0e15 => Value::from(*n as i64),
+        Val::Num(n) => serde_json::Number::from_f64(*n).map(Value::Number).unwrap_or(Value::Null),
+        Val::Text(s) => Value::String(s.clone()),
+        Val::List(items) => Value::Array(items.iter().map(to_json).collect()),
+        Val::Time(t) => Value::String(t.to_rfc3339()),
+    }
+}
+
+/// A rule value as text, for interpolating into a message: null is empty, a list its items joined
+/// with a comma, a whole number without a fraction.
+pub fn to_text(v: &Val) -> String {
+    match v {
+        Val::Null => String::new(),
+        Val::Bool(b) => b.to_string(),
+        Val::Num(n) if n.fract() == 0.0 && n.abs() < 9.0e15 => (*n as i64).to_string(),
+        Val::Num(n) => n.to_string(),
+        Val::Text(s) => s.clone(),
+        Val::List(items) => items.iter().map(to_text).collect::<Vec<_>>().join(", "),
+        Val::Time(t) => t.to_rfc3339(),
+    }
+}
+
 /// Whether a rule's value lets the write through: everything but a definite `false`.
 pub fn holds(v: &Val) -> bool {
     !matches!(v, Val::Bool(false))
@@ -429,6 +457,20 @@ mod tests {
         // Scale does not change the value.
         assert_eq!(eq(text("1.10"), text("1.1")), Val::Bool(true));
         assert_eq!(ge(text("100.00"), text("100")), Val::Bool(true));
+    }
+
+    #[test]
+    fn a_value_reads_as_json_and_as_text() {
+        let at = chrono::DateTime::parse_from_rfc3339("2026-01-02T03:04:05Z").unwrap().with_timezone(&Utc);
+        assert_eq!(to_json(&Val::Num(3.0)), json!(3), "a whole number is an integer, so it reads into an int column");
+        assert_eq!(to_json(&Val::Num(2.5)), json!(2.5));
+        assert_eq!(to_json(&Val::Null), Value::Null);
+        assert_eq!(to_json(&Val::List(vec![text("a"), Val::Bool(true)])), json!(["a", true]));
+        assert_eq!(to_json(&Val::Time(at)), json!("2026-01-02T03:04:05+00:00"));
+        assert_eq!(to_text(&Val::Num(3.0)), "3");
+        assert_eq!(to_text(&Val::Null), "");
+        assert_eq!(to_text(&Val::List(vec![text("a"), Val::Num(2.0)])), "a, 2");
+        assert_eq!(to_text(&text("hi")), "hi");
     }
 
     #[test]
