@@ -82,6 +82,7 @@ pub mod service;
 pub mod violation;
 pub mod write_guard;
 pub mod write_hooks;
+pub mod notification;
 pub mod row_rule;
 pub mod actor_roles;
 pub mod usecase;
