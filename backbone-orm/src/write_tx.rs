@@ -234,20 +234,15 @@ where
 /// One transactional unit of a bulk write: begun here, finished with [`TxUnit::finish`].
 ///
 /// Joins the active write transaction as a savepoint; otherwise begins a transaction on the
-/// request connection when `use_request_conn` and one is bound (the shape `bulk_create` always
-/// had), or on a pool connection with the current company bound (the shape of the other bulk
-/// paths). Behaviour without a write transaction is unchanged.
-pub(crate) async fn begin_unit(
-    pool: &PgPool,
-    use_request_conn: bool,
-) -> Result<TxUnit, sqlx::Error> {
+/// request connection when one is bound, which carries the request's whole fence (company, org
+/// units, audit attribution); otherwise on a pool connection with the current company bound.
+/// Every id-list and row-list batch begins here, so none of them sees less than a single write.
+pub(crate) async fn begin_unit(pool: &PgPool) -> Result<TxUnit, sqlx::Error> {
     if let Some(conn) = current_conn() {
         return TxUnit::begin_on(conn).await;
     }
-    if use_request_conn {
-        if let Some(conn) = crate::company_scope::request_conn_only() {
-            return TxUnit::begin_on(conn).await;
-        }
+    if let Some(conn) = crate::company_scope::request_conn_only() {
+        return TxUnit::begin_on(conn).await;
     }
     let conn = pool.acquire().await?;
     let unit = TxUnit::begin_on(Arc::new(Mutex::new(conn))).await?;

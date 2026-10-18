@@ -276,7 +276,7 @@ where
             return Ok(Vec::new());
         }
         let table = self.table_name();
-        let unit = crate::write_tx::begin_unit(self.pool(), true).await?;
+        let unit = crate::write_tx::begin_unit(self.pool()).await?;
         let rows = async {
             let mut conn = unit.conn().await;
             insert_each(&mut conn, table, entities).await
@@ -299,7 +299,7 @@ where
             return Ok(Vec::new());
         }
         let table = self.table_name();
-        let unit = crate::write_tx::begin_unit(self.pool(), true).await?;
+        let unit = crate::write_tx::begin_unit(self.pool()).await?;
         let rows = async {
             let mut conn = unit.conn().await;
             update_each_changed(&mut conn, table, guard, pairs).await
@@ -869,7 +869,7 @@ where
              ) WHERE id IN ({placeholders}) AND (metadata->>'deleted_at') IS NULL",
             self.table_name()
         );
-        let unit = crate::write_tx::begin_unit(self.pool(), false).await?;
+        let unit = crate::write_tx::begin_unit(self.pool()).await?;
         let outcome: Result<u64> = async {
             let mut conn = unit.conn().await;
             let mut q = sqlx::query(&query);
@@ -903,7 +903,7 @@ where
              RETURNING *",
             self.table_name()
         );
-        let unit = crate::write_tx::begin_unit(self.pool(), false).await?;
+        let unit = crate::write_tx::begin_unit(self.pool()).await?;
         let outcome: Result<Vec<T>> = async {
             let mut conn = unit.conn().await;
             let mut q = sqlx::query_as::<_, T>(&query);
@@ -934,7 +934,7 @@ where
             "DELETE FROM {} WHERE id IN ({placeholders}) AND (metadata->>'deleted_at') IS NOT NULL",
             self.table_name()
         );
-        let unit = crate::write_tx::begin_unit(self.pool(), false).await?;
+        let unit = crate::write_tx::begin_unit(self.pool()).await?;
         let outcome: Result<u64> = async {
             let mut conn = unit.conn().await;
             let mut q = sqlx::query(&query);
@@ -1278,7 +1278,7 @@ where
             "DELETE FROM {} WHERE id IN ({placeholders})",
             self.table_name()
         );
-        let unit = crate::write_tx::begin_unit(self.pool(), false).await?;
+        let unit = crate::write_tx::begin_unit(self.pool()).await?;
         let outcome: Result<u64> = async {
             let mut conn = unit.conn().await;
             let mut q = sqlx::query(&query);
@@ -1471,7 +1471,7 @@ where
     if entities.is_empty() {
         return Ok(Vec::new());
     }
-    let unit = crate::write_tx::begin_unit(pool, false).await?;
+    let unit = crate::write_tx::begin_unit(pool).await?;
     let outcome: Result<Vec<T>> = async {
         let mut conn = unit.conn().await;
         let mut out = Vec::with_capacity(entities.len());
