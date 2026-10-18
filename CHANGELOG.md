@@ -16,6 +16,70 @@ back to the `## [Unreleased]` section.
 
 ## [Unreleased]
 
+### Added
+
+- **backbone-orm** — `QueryParamError` and `QueryParamReason`: one refused query parameter, as the parameter
+  the client sent, a stable reason code (`unknown_column`, `unknown_operator`, `invalid_field_name`,
+  `invalid_value`, `not_a_number`, `invalid_cursor`, `too_deep`, `unknown_relation`, `not_numeric`,
+  `unsupported_operator`) and a sentence that never carries SQL or an internal name. `parse_filters` and the
+  repository raise it (a bad operator, field name or paging number; a cursor nobody issued; an aggregate
+  column the table lacks); `attribute_query_error` names the parameter behind a database refusal (a
+  missing column, a value the column cannot take, an operator its type lacks) by matching it to the raw
+  query map, and `attribute_operator_error` narrows the operator case with the table's column types.
+- **backbone-core** — `http::ListQuery`, the extractor of every list-shaped route, which refuses a `page` or
+  `limit` that is not a number by name; `violation::INVALID_QUERY` and `Violation::invalid_query`.
+- **backbone-core** — `notification`: the delivery of `NotificationRequested` rows (ADR-0034, amendment).
+  `NotificationDelivery` is what a notification module implements (`deliver` answers `Delivered`, `Retry` or
+  `Reject`); `NotificationDispatcher` is the outbox relay's sink (`dispatcher.sink()`), which claims each
+  request with `inbox::once` in a transaction held across the delivery, maps `Retry` to a pending row and
+  `Reject`, a malformed payload and the retry limit (`RetryPolicy`, counted in the dispatcher, in memory) to a
+  dead one with the reason, and preserves the record's correlation and causation ids;
+  `RecordingDelivery` is the test double. No mail module ships with it.
+
+### Changed
+
+- **List requests refuse a bad parameter by name.** A list, the trash, a count or an aggregate that carries a
+  parameter the request got wrong answers `400` with one violation per parameter, coded `invalid_query`, its
+  `path` the parameter as sent and its `params` `{parameter, reason}`, and a sentence that names both. This
+  replaces `Invalid query parameter or filter` with no path, and the database's own sentence on a count or an
+  aggregate. **Behaviour change for a client that relied on being ignored**: an unknown filter operator
+  (`priority[neq]`, which was dropped, so the list answered more rows than asked for), a filter or sort key
+  that is not a field name, a non-numeric `offset` / `pageSize` / `perPage`, a `sort_order` other than
+  `asc` / `desc`, an `include` or `with` that names no relation of the entity, and a `fields` entry that is
+  not a field name are now refused. A well-formed `fields` entry the response lacks is still ignored. A
+  `page` or `limit` that is not a number answers the JSON envelope instead of axum's plain-text 400, and a
+  page past the offset ceiling or a request that names a secret field answers `invalid_query` on the
+  parameter instead of `invalid_request` on no path. `service_error_status` answers `400` for a violation set
+  that is all `invalid_query`, and `RepositoryError::from_source` turns a `QueryParamError` into it.
+- **backbone-orm** — an aggregate's refusals (`group_by`, `sum`, `avg`, `min`, `max`, `group_label`) are
+  `QueryParamError`s naming that parameter. `AggregateFieldError` stays as a type, but the repository no longer
+  returns it: code that downcast to it must downcast to `QueryParamError`.
+
+### Breaking
+
+No public struct gained a field and no trait a method without a default; `QueryParamReason` and
+`PendingNotification` are `#[non_exhaustive]`. What can still break a caller is behaviour:
+
+- `backbone_orm::parse_filters` (and so every `list_with_filters*` and `aggregate_with_filters`) returns `Err`
+  where it used to skip: an unknown operator, a key that is not a field name (a bracket key already
+  returned a plain error), a sort or `searchFields` column that is not a field name, a non-numeric
+  `offset` / `page` / `limit` / `pageSize`. A non-HTTP caller that fed it free-form keys and relied on the
+  skipping must filter them first. The error is a `QueryParamError`.
+- A client that sent an unknown operator, `include`, `sort_order` or the like and got a list anyway now
+  gets a `400` (see Changed); the webapp's documented "unknown operator = silent no-op" no longer holds.
+- The code of the too-deep-page and secret-field refusals is `invalid_query` on the parameter, not
+  `invalid_request` on no path; a client matching the old code must match the new one.
+- `AggregateFieldError` is no longer returned by an aggregate (see Changed).
+
+### Fixed
+
+- **backbone-orm** — `bulk_soft_delete`, `bulk_restore`, `bulk_permanent_delete`, `bulk_delete` and the
+  full-row `bulk_update` took a pooled connection with only the company bound when no write transaction was
+  open, so under an org-unit fence they saw no row, matched none of their ids and refused the whole batch.
+  They now begin on the request's own connection, as `bulk_create` does (inside `in_write_tx` they were
+  already a savepoint of it, and still are). Without a request scope nothing changes.
+
+
 ## [3.16.0] - 2026-10-18
 
 ### Added

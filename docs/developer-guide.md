@@ -217,8 +217,9 @@ see [`backbone-core/docs/configuration.md`](../backbone-core/docs/configuration.
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| `400 Invalid query parameter or filter: …` | Unknown filter/sort key (often stray camelCase like `sortOrder`) injected as a column name | Use a real entity field; check spelling/case |
-| `400 Result set too deep: offset … exceeds the maximum of 10000` | Paged past `MAX_PAGINATION_OFFSET` | Add filters to narrow the result set instead of deep paging |
+| `400` with a violation coded `invalid_query` | A list parameter the request got wrong: `path` (and `params.parameter`) names it as sent and `params.reason` says why (`unknown_column`, `unknown_operator`, `invalid_field_name`, `invalid_value`, `not_a_number`, `invalid_cursor`, `too_deep`, `unknown_relation`, `not_numeric`, `unsupported_operator`); an unknown filter/sort key is often a stray camelCase name like `sortOrder` | Fix the named parameter: use a real entity field, a filter operator from the grammar, a value the column takes |
+| `400 Invalid query parameter or filter` with no path | The database refused a list query and no parameter could be matched to it (a hand-written repository) | Read the debug log of target `backbone::http`; give the repository a `QueryParamError` for the case |
+| `400` `invalid_query` on `page`, reason `too_deep` | Paged past `MAX_PAGINATION_OFFSET` (10000 rows) | Add filters to narrow the result set instead of deep paging |
 | `cargo update` pulled a breaking change | Dependency pinned to `branch = "main"` | Pin `tag = "v<version>"` on every backbone crate |
 | Crate versions inconsistent at build | Different tags across backbone deps | Pin **all** backbone crates to the same tag |
 | A `@private` field leaked via `?include=` | Expanding a relation whose target has private fields (v1 limitation) | Don't enable `?include=` for targets with private fields |

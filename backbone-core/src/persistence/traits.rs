@@ -46,9 +46,10 @@ pub enum RepositoryError {
 
 impl RepositoryError {
     /// The repository error for a failure an inner layer reported as any error type.
-    /// A database error inside it (however wrapped in context) converts as a `sqlx::Error`
-    /// does, so a constraint the database refused with stays a violation; anything else
-    /// keeps its sentence as a database error.
+    /// A [`backbone_orm::QueryParamError`] inside it (a list parameter the request got wrong)
+    /// becomes one `invalid_query` violation on that parameter. A database error inside it
+    /// (however wrapped in context) converts as a `sqlx::Error` does, so a constraint the database
+    /// refused with stays a violation; anything else keeps its sentence as a database error.
     pub fn from_source(e: impl Into<anyhow::Error>) -> Self {
         let e: anyhow::Error = e.into();
         // A query parameter the request got wrong is the caller's to fix, named.
