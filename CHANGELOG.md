@@ -16,6 +16,43 @@ back to the `## [Unreleased]` section.
 
 ## [Unreleased]
 
+### Added
+
+- **backbone-core** — `workflow`: the engine of the schema's `schema/workflows` with `config.executor: engine`
+  ([ADR-0035](../../docs/handbook/adr/0035-workflow-engine.md)). `WorkflowEngine` keeps an instance and a step
+  log per workflow in `<schema>.bb_workflow_instances` and `bb_workflow_steps` (fenced by company, one
+  `UNIQUE (workflow, trigger_event_id)` so a replayed start event starts nothing): `on_event` starts the
+  workflows an outbox record triggers and resumes the instances waiting for it (a resume is claimed with
+  `inbox::once` in its own transaction and matched by a stored `(wait_event, wait_key)` under the event's
+  company); each step runs in **one** `in_write_tx` that commits the step's writes, its log row and the
+  instance update together; a transient failure retries with a stored backoff (three attempts by default,
+  `config.retry` or a step's `retry:` otherwise), a business failure (`NotFound`, `Validation`,
+  `Violations`, `AlreadyExists`) is routed to `on_failure.next` or fails the instance, and a failed instance
+  compensates the steps whose condition holds, last first, each in its own transaction and once;
+  `sweep` (`workflow_timer_sweep`, every minute, `FOR UPDATE SKIP LOCKED`) takes a wait's `on_timeout`,
+  expires an instance past its deadline, runs a failed step again when its backoff has passed, and drives
+  on an instance a crash left `running`; `persistence: false` runs a flow end to end in one transaction.
+  `BackgroundTasks` (the module's `background_tasks()`) is what a composing service wires: `deliver` as the
+  relay's sink and `timer_sweep` as the job. The engine stages `emit_event` and a terminal's `emit` as outbox
+  rows and `send_email`, `notify`, `send_notification` and `send_sms` as `NotificationRequested`, all in the
+  step's transaction with the instance's correlation id and the starting event as cause. The module is
+  `workflow::{expr, spec, schema, engine}`: the closed expression set (`Expr`, `Template`, `Tpl`, `eval`,
+  `Funcs`), the compiled `WorkflowSpec` and the `WorkflowDefinition` trait a generated module implements,
+  the tables as SQL (`schema::migration_sql`), and the engine (feature `postgres`).
+- **backbone-core** — the sqlx dependency of `backbone-core` enables its `json` feature (the engine reads and
+  writes `jsonb`).
+
+### Deprecated
+
+- **backbone-core** — the `flow` module (`FlowError`, `FlowStatus`, `FlowInstance`, `FlowExecutor`,
+  `WorkflowContext`, `WorkflowStep`): an in-memory instance with no persistence, wait, timer or compensation
+  that nothing used. Declared workflows run through `backbone_core::workflow`. It is removed after one minor
+  release.
+
+### Breaking changes
+
+None.
+
 ## [3.15.0] - 2026-10-18
 
 ### Added
