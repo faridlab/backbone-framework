@@ -16,6 +16,8 @@ back to the `## [Unreleased]` section.
 
 ## [Unreleased]
 
+## [3.15.0] - 2026-10-18
+
 ### Added
 
 - **backbone-core** — runtime support for generated hook triggers, in `write_hooks`: `in_trigger(f)`

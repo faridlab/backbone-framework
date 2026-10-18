@@ -1,6 +1,6 @@
 [package]
 name = "backbone-outbox"
-version = "3.14.0"
+version = "3.15.0"
 edition = "2021"
 description = "Durable transactional-outbox + inbox + relay primitives for go-live exactly-once event delivery over Postgres."
 license = "MIT OR Apache-2.0"
@@ -19,7 +19,7 @@ thiserror = "1.0"
 tracing = "0.1"
 tokio = { version = "1.0", features = ["time", "macros", "rt"], optional = true }
 # Only for `outbox::stage_in_write_tx`, which stages on the task's write transaction.
-backbone-orm = { path = "../backbone-orm", version = "3.14.0", optional = true }
+backbone-orm = { path = "../backbone-orm", version = "3.15.0", optional = true }
 
 [features]
 # The relay RUNNER (a poll loop that drains the outbox on an interval until shutdown). Off by default —
