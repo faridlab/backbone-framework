@@ -19,6 +19,7 @@ struct OutboxRow {
     correlation_id: Option<String>,
     causation_id: Option<String>,
     version: i32,
+    org_unit_id: Option<Uuid>,
 }
 impl OutboxRow {
     fn into_record(self) -> OutboxRecord {
@@ -33,6 +34,7 @@ impl OutboxRow {
             correlation_id: self.correlation_id,
             causation_id: self.causation_id,
             version: self.version,
+            org_unit_id: self.org_unit_id,
         }
     }
 }
@@ -63,7 +65,7 @@ where
     // Short-lived read: borrows a connection only for the SELECT, then returns it to the pool.
     let rows: Vec<OutboxRow> = sqlx::query_as(&format!(
         r#"SELECT id, event_type, aggregate_type, aggregate_id, company_id, payload, occurred_at,
-                  correlation_id, causation_id, version
+                  correlation_id, causation_id, version, org_unit_id
            FROM {schema}.outbox_events
            WHERE published_at IS NULL AND failed_at IS NULL
            ORDER BY occurred_at, id

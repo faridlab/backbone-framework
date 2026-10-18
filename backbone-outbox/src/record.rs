@@ -31,6 +31,12 @@ pub struct OutboxRecord {
     pub causation_id: Option<String>,
     /// Event schema version (see `extension-contract.md` §4).
     pub version: i32,
+    /// The org unit the event was staged under (ADR-0029): read back from the table's
+    /// `org_unit_id` column by the relay, which the table fills from the writer's acting unit.
+    /// `None` for a record that was never read from a fenced table, or staged with no unit bound.
+    /// A consumer that writes on behalf of the event (the workflow engine) acts under it.
+    #[serde(default)]
+    pub org_unit_id: Option<Uuid>,
 }
 
 impl OutboxRecord {
@@ -56,7 +62,14 @@ impl OutboxRecord {
             correlation_id: None,
             causation_id: None,
             version: 1,
+            org_unit_id: None,
         }
+    }
+
+    /// Set the org unit the event belongs to (what the relay reads back from the table).
+    pub fn with_org_unit_id(mut self, unit: Uuid) -> Self {
+        self.org_unit_id = Some(unit);
+        self
     }
 
     /// Set the event id explicitly (e.g. reuse the messaging envelope id).

@@ -99,6 +99,18 @@ impl OrgScope {
         }
     }
 
+    /// A scope for work done on behalf of one event or record (a workflow step, a job): it acts at
+    /// `unit` and sees only `unit`'s own rows, for `company`'s legacy fence. Unlike
+    /// [`for_company_unit`](Self::for_company_unit), the unit need not be the company node: a
+    /// branch's event is handled under the branch while the company fence stays the company's.
+    pub fn for_unit_of_company(unit: Uuid, company: Uuid) -> Self {
+        Self {
+            scope_unit_ids: vec![unit],
+            acting_unit_id: unit,
+            legacy_company_id: Some(company),
+        }
+    }
+
     /// Every unit id this session may see rows for: the union of the entitled subtrees plus the
     /// root node. Order is stable (sorted) so the serialized form is deterministic.
     pub fn scope_unit_ids(&self) -> &[Uuid] {
