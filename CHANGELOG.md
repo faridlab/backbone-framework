@@ -16,6 +16,8 @@ back to the `## [Unreleased]` section.
 
 ## [Unreleased]
 
+## [3.17.0] - 2026-10-18
+
 ### Added
 
 - **backbone-orm** — `QueryParamError` and `QueryParamReason`: one refused query parameter, as the parameter
