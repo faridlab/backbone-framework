@@ -21,6 +21,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use backbone_orm::company_scope::with_company_scope;
+use backbone_orm::org_scope::{with_org_request_scope, OrgScope};
 use backbone_orm::{current_write_tx, in_write_tx, PgPool, WriteTx};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
@@ -63,6 +64,49 @@ impl Default for EngineConfig {
             sweep_batch: 50,
             max_steps: 5000,
         }
+    }
+}
+
+/// Whose instance it is: the company, and the org unit the event that started it belongs to
+/// (ADR-0029). The engine acts under both: a step runs from a delivered event, with no request to
+/// bind a scope, so the unit is what the fenced tables (the workflow tables and the outbox) see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Tenant {
+    /// The company.
+    pub company_id: Uuid,
+    /// The org unit; `None` for an event staged with no unit bound.
+    pub org_unit_id: Option<Uuid>,
+}
+
+impl Tenant {
+    /// A company with no org unit.
+    pub fn company(company_id: Uuid) -> Self {
+        Self {
+            company_id,
+            org_unit_id: None,
+        }
+    }
+
+    /// A company and the org unit an event belongs to.
+    pub fn unit(company_id: Uuid, org_unit_id: Uuid) -> Self {
+        Self {
+            company_id,
+            org_unit_id: Some(org_unit_id),
+        }
+    }
+
+    /// The tenant an outbox record was staged under.
+    pub fn of(record: &OutboxRecord) -> Self {
+        Self {
+            company_id: record.company_id,
+            org_unit_id: record.org_unit_id,
+        }
+    }
+}
+
+impl From<Uuid> for Tenant {
+    fn from(company_id: Uuid) -> Self {
+        Self::company(company_id)
     }
 }
 
@@ -128,6 +172,8 @@ pub struct InstanceRow {
     pub version: i32,
     /// The company that owns it.
     pub company_id: Uuid,
+    /// The org unit of the event that started it (ADR-0029).
+    pub org_unit_id: Option<Uuid>,
     /// `running`, `waiting`, `completed`, `failed`, `expired`, `compensating`, `compensated` or `cancelled`.
     pub status: String,
     /// The step it is on (the next to run, or the wait it sits in).
@@ -260,7 +306,7 @@ pub struct WorkflowEngine {
     cfg: EngineConfig,
 }
 
-const INSTANCE_COLUMNS: &str = "id, workflow, version, company_id, status, current_step, context, trigger_event_id, \
+const INSTANCE_COLUMNS: &str = "id, workflow, version, company_id, org_unit_id, status, current_step, context, trigger_event_id, \
      correlation_id, deadline_at, wait_event, wait_key, wait_due_at, attempts, last_error, created_at, updated_at";
 
 impl WorkflowEngine {
@@ -341,25 +387,25 @@ impl WorkflowEngine {
         let to_drive: Vec<(Arc<dyn WorkflowDefinition>, Uuid)> = {
             let mut v = Vec::new();
             for id in report.started.iter().chain(report.resumed.iter()) {
-                if let Some(def) = self.def_for_instance(record.company_id, *id).await? {
+                if let Some(def) = self.def_for_instance(Tenant::of(record), *id).await? {
                     v.push((def, *id));
                 }
             }
             v
         };
         for (def, id) in to_drive {
-            Box::pin(self.drive(&def, record.company_id, id)).await?;
+            Box::pin(self.drive(&def, Tenant::of(record), id)).await?;
         }
         Ok(report)
     }
 
     async fn def_for_instance(
         &self,
-        company: Uuid,
+        tenant: Tenant,
         id: Uuid,
     ) -> Result<Option<Arc<dyn WorkflowDefinition>>, WorkflowError> {
         let name: Option<String> = self
-            .in_tx(company, async {
+            .in_tx(tenant, async {
                 let tx = write_tx()?;
                 let mut conn = tx.conn().await;
                 Ok(sqlx::query_scalar(&format!(
@@ -374,13 +420,38 @@ impl WorkflowEngine {
         Ok(name.and_then(|n| self.def_named(&n).cloned()))
     }
 
-    /// `work` in one write transaction under `company`'s scope; a failure of the work is an error.
+    /// Run `work` under the tenant's scope: the company alone, or, when the instance has an org
+    /// unit, an org request scope at that unit for that company (the binders the request path
+    /// uses), so the fenced tables and the outbox see the unit the event belongs to.
+    async fn scoped<T, E>(
+        &self,
+        tenant: Tenant,
+        work: impl std::future::Future<Output = Result<T, E>>,
+    ) -> Result<T, E>
+    where
+        E: From<sqlx::Error>,
+    {
+        // Boxed: the work is large, and a nest of scopes must not stack its frames on a thread.
+        let work = Box::pin(work);
+        match tenant.org_unit_id {
+            None => with_company_scope(Some(tenant.company_id), work).await,
+            Some(unit) => {
+                let scope = OrgScope::for_unit_of_company(unit, tenant.company_id);
+                match Box::pin(with_org_request_scope(&self.pool, scope, work)).await {
+                    Ok(done) => done,
+                    Err(e) => Err(E::from(e)),
+                }
+            }
+        }
+    }
+
+    /// `work` in one write transaction under `tenant`'s scope; a failure of the work is an error.
     async fn in_tx<T>(
         &self,
-        company: Uuid,
+        tenant: Tenant,
         work: impl std::future::Future<Output = Result<T, RunError>>,
     ) -> Result<T, WorkflowError> {
-        match with_company_scope(Some(company), in_write_tx(&self.pool, work)).await {
+        match self.scoped(tenant, in_write_tx(&self.pool, work)).await {
             Ok(v) => Ok(v),
             Err(RunError::Wf(e)) => Err(e),
             Err(RunError::Failure(f)) => Err(WorkflowError::Config(f.message)),
@@ -405,9 +476,7 @@ impl WorkflowEngine {
             .correlation_id
             .clone()
             .unwrap_or_else(|| record.id.to_string());
-        let created: Result<Option<Uuid>, RunError> = with_company_scope(
-            Some(record.company_id),
-            in_write_tx(&self.pool, async {
+        let created: Result<Option<Uuid>, RunError> = self.scoped(Tenant::of(record), in_write_tx(&self.pool, async {
                 let ctx = self.ctx_for(record.company_id, &correlation, record.id);
                 let funcs = DefFuncs { def: &**def, ctx: &ctx };
                 let mut context = serde_json::Map::new();
@@ -446,9 +515,9 @@ impl WorkflowEngine {
                     let mut conn = tx.conn().await;
                     sqlx::query_scalar(&format!(
                     "INSERT INTO {}.bb_workflow_instances
-                       (id, workflow, version, company_id, status, current_step, context, trigger_event_id,
-                        correlation_id, deadline_at)
-                     VALUES ($1, $2, $3, $4, 'running', $5, $6, $7, $8,
+                       (id, workflow, version, company_id, org_unit_id, status, current_step, context,
+                        trigger_event_id, correlation_id, deadline_at)
+                     VALUES ($1, $2, $3, $4, $10, 'running', $5, $6, $7, $8,
                              CASE WHEN $9::double precision IS NULL THEN NULL
                                   ELSE now() + make_interval(secs => $9::double precision) END)
                      ON CONFLICT (workflow, trigger_event_id) DO NOTHING
@@ -464,6 +533,7 @@ impl WorkflowEngine {
                 .bind(record.id)
                 .bind(&correlation)
                 .bind(deadline.map(|s| s as f64))
+                .bind(record.org_unit_id)
                 .fetch_optional(&mut *conn)
                 .await?
                 };
@@ -525,9 +595,7 @@ impl WorkflowEngine {
             .correlation_id
             .clone()
             .unwrap_or_else(|| record.id.to_string());
-        let resumed: Result<Vec<Uuid>, RunError> = with_company_scope(
-            Some(record.company_id),
-            in_write_tx(&self.pool, async {
+        let resumed: Result<Vec<Uuid>, RunError> = self.scoped(Tenant::of(record), in_write_tx(&self.pool, async {
                 let tx = write_tx()?;
                 let claimed = {
                     let mut conn = tx.conn().await;
@@ -643,9 +711,10 @@ impl WorkflowEngine {
     /// # Errors
     /// A database error; the instance stays on the step it was about to run, and the sweep
     /// drives it again.
-    pub async fn run(&self, company: Uuid, id: Uuid) -> Result<(), WorkflowError> {
-        match self.def_for_instance(company, id).await? {
-            Some(def) => Box::pin(self.drive(&def, company, id)).await,
+    pub async fn run(&self, tenant: impl Into<Tenant>, id: Uuid) -> Result<(), WorkflowError> {
+        let tenant = tenant.into();
+        match self.def_for_instance(tenant, id).await? {
+            Some(def) => Box::pin(self.drive(&def, tenant, id)).await,
             None => Ok(()),
         }
     }
@@ -653,7 +722,7 @@ impl WorkflowEngine {
     async fn drive(
         &self,
         def: &Arc<dyn WorkflowDefinition>,
-        company: Uuid,
+        tenant: Tenant,
         id: Uuid,
     ) -> Result<(), WorkflowError> {
         if !def.spec().persistence {
@@ -661,44 +730,45 @@ impl WorkflowEngine {
             return Ok(());
         }
         for _ in 0..self.cfg.max_steps.max(1) {
-            match Box::pin(self.step_once(def, company, id)).await? {
+            match Box::pin(self.step_once(def, tenant, id)).await? {
                 StepEnd::Advanced => continue,
                 StepEnd::Compensate => {
-                    Box::pin(self.compensate_company(def, company, id)).await?;
+                    Box::pin(self.compensate_company(def, tenant, id)).await?;
                     return Ok(());
                 }
                 StepEnd::Paused | StepEnd::Finished | StepEnd::Gone => return Ok(()),
             }
         }
-        self.fail_runaway(def, company, id).await
+        self.fail_runaway(def, tenant, id).await
     }
 
     /// One step, in one transaction; a failure is handled in another.
     async fn step_once(
         &self,
         def: &Arc<dyn WorkflowDefinition>,
-        company: Uuid,
+        tenant: Tenant,
         id: Uuid,
     ) -> Result<StepEnd, WorkflowError> {
-        let correlation = self.correlation_of(company, id).await?;
-        let ran: Result<StepEnd, RunError> = with_company_scope(
-            Some(company),
-            with_correlation_id(
-                correlation,
-                in_write_tx(&self.pool, Box::pin(self.run_one(def, id))),
-            ),
-        )
-        .await;
+        let correlation = self.correlation_of(tenant, id).await?;
+        let ran: Result<StepEnd, RunError> = self
+            .scoped(
+                tenant,
+                with_correlation_id(
+                    correlation,
+                    in_write_tx(&self.pool, Box::pin(self.run_one(def, id))),
+                ),
+            )
+            .await;
         match ran {
             Ok(end) => Ok(end),
             Err(RunError::Wf(e)) => Err(e),
-            Err(RunError::Failure(f)) => Box::pin(self.after_failure(def, company, id, f)).await,
+            Err(RunError::Failure(f)) => Box::pin(self.after_failure(def, tenant, id, f)).await,
         }
     }
 
-    async fn correlation_of(&self, company: Uuid, id: Uuid) -> Result<String, WorkflowError> {
+    async fn correlation_of(&self, tenant: Tenant, id: Uuid) -> Result<String, WorkflowError> {
         let found: Option<Option<String>> = self
-            .in_tx(company, async {
+            .in_tx(tenant, async {
                 let tx = write_tx()?;
                 let mut conn = tx.conn().await;
                 Ok(sqlx::query_scalar(&format!(
@@ -769,8 +839,8 @@ impl WorkflowEngine {
     ) -> Result<(), sqlx::Error> {
         let mut conn = tx.conn().await;
         sqlx::query(&format!(
-            "INSERT INTO {}.bb_workflow_steps (instance_id, company_id, seq, step, outcome, error)
-             VALUES ($1, $2, $3, $4, $5, $6)",
+            "INSERT INTO {}.bb_workflow_steps (instance_id, company_id, org_unit_id, seq, step, outcome, error)
+             VALUES ($1, $2, $7, $3, $4, $5, $6)",
             self.schema
         ))
         .bind(inst.id)
@@ -779,6 +849,7 @@ impl WorkflowEngine {
         .bind(step)
         .bind(outcome)
         .bind(error)
+        .bind(inst.org_unit_id)
         .execute(&mut *conn)
         .await?;
         Ok(())
@@ -1381,14 +1452,12 @@ impl WorkflowEngine {
     async fn after_failure(
         &self,
         def: &Arc<dyn WorkflowDefinition>,
-        company: Uuid,
+        tenant: Tenant,
         id: Uuid,
         failure: StepFailure,
     ) -> Result<StepEnd, WorkflowError> {
         let spec = def.spec();
-        let decided: Result<StepEnd, RunError> = with_company_scope(
-            Some(company),
-            in_write_tx(&self.pool, async {
+        let decided: Result<StepEnd, RunError> = self.scoped(tenant, in_write_tx(&self.pool, async {
                 let tx = write_tx()?;
                 let Some(inst) = self.lock(&tx, id).await? else { return Ok(StepEnd::Gone) };
                 if inst.status != "running" {
@@ -1504,7 +1573,7 @@ impl WorkflowEngine {
     async fn fail_runaway(
         &self,
         def: &Arc<dyn WorkflowDefinition>,
-        company: Uuid,
+        tenant: Tenant,
         id: Uuid,
     ) -> Result<(), WorkflowError> {
         let message = format!(
@@ -1514,7 +1583,7 @@ impl WorkflowEngine {
         let end = self
             .after_failure(
                 def,
-                company,
+                tenant,
                 id,
                 StepFailure {
                     step: "(runaway)".into(),
@@ -1524,7 +1593,7 @@ impl WorkflowEngine {
             )
             .await?;
         if matches!(end, StepEnd::Compensate) {
-            Box::pin(self.compensate_company(def, company, id)).await?;
+            Box::pin(self.compensate_company(def, tenant, id)).await?;
         }
         Ok(())
     }
@@ -1538,9 +1607,14 @@ impl WorkflowEngine {
     ///
     /// # Errors
     /// A database error between steps; call it again.
-    pub async fn compensate(&self, company: Uuid, id: Uuid) -> Result<(), WorkflowError> {
-        match self.def_for_instance(company, id).await? {
-            Some(def) => Box::pin(self.compensate_company(&def, company, id)).await,
+    pub async fn compensate(
+        &self,
+        tenant: impl Into<Tenant>,
+        id: Uuid,
+    ) -> Result<(), WorkflowError> {
+        let tenant = tenant.into();
+        match self.def_for_instance(tenant, id).await? {
+            Some(def) => Box::pin(self.compensate_company(&def, tenant, id)).await,
             None => Ok(()),
         }
     }
@@ -1548,105 +1622,108 @@ impl WorkflowEngine {
     async fn compensate_company(
         &self,
         def: &Arc<dyn WorkflowDefinition>,
-        company: Uuid,
+        tenant: Tenant,
         id: Uuid,
     ) -> Result<(), WorkflowError> {
         let spec = def.spec();
         let mut failures: Vec<String> = Vec::new();
         for comp in spec.compensation.iter().rev() {
             let label = format!("compensate:{}", comp.name);
-            let ran: Result<Option<()>, RunError> = with_company_scope(
-                Some(company),
-                in_write_tx(
-                    &self.pool,
-                    Box::pin(self.compensate_one(def, id, comp, &label)),
-                ),
-            )
-            .await;
+            let ran: Result<Option<()>, RunError> = self
+                .scoped(
+                    tenant,
+                    in_write_tx(
+                        &self.pool,
+                        Box::pin(self.compensate_one(def, id, comp, &label)),
+                    ),
+                )
+                .await;
             match ran {
                 Ok(_) => {}
                 Err(RunError::Wf(e)) => return Err(e),
                 Err(RunError::Failure(f)) => {
                     failures.push(format!("{}: {}", comp.name, f.message));
                     // Record the failure in a transaction of its own (the step's rolled back).
-                    let _: Result<(), RunError> = with_company_scope(
-                        Some(company),
-                        in_write_tx(&self.pool, async {
-                            let tx = write_tx()?;
-                            if let Some(inst) = self.lock(&tx, id).await? {
-                                let seq = self.next_seq(&tx, id).await?;
-                                self.log_step(
-                                    &tx,
-                                    &inst,
-                                    seq,
-                                    &label,
-                                    "compensation_failed",
-                                    Some(&f.message),
-                                )
-                                .await?;
-                            }
-                            Ok(())
-                        }),
-                    )
-                    .await;
+                    let _: Result<(), RunError> = self
+                        .scoped(
+                            tenant,
+                            in_write_tx(&self.pool, async {
+                                let tx = write_tx()?;
+                                if let Some(inst) = self.lock(&tx, id).await? {
+                                    let seq = self.next_seq(&tx, id).await?;
+                                    self.log_step(
+                                        &tx,
+                                        &inst,
+                                        seq,
+                                        &label,
+                                        "compensation_failed",
+                                        Some(&f.message),
+                                    )
+                                    .await?;
+                                }
+                                Ok(())
+                            }),
+                        )
+                        .await;
                 }
             }
         }
-        let outcome: Result<(), RunError> = with_company_scope(
-            Some(company),
-            in_write_tx(&self.pool, async {
-                let tx = write_tx()?;
-                let Some(inst) = self.lock(&tx, id).await? else {
-                    return Ok(());
-                };
-                if !matches!(inst.status.as_str(), "compensating" | "failed") {
-                    return Ok(());
-                }
-                // Anything a previous run could not undo stays visible.
-                let pending: Vec<String> = {
-                    let mut conn = tx.conn().await;
-                    sqlx::query_scalar(&format!(
-                        "SELECT DISTINCT step FROM {s}.bb_workflow_steps
+        let outcome: Result<(), RunError> = self
+            .scoped(
+                tenant,
+                in_write_tx(&self.pool, async {
+                    let tx = write_tx()?;
+                    let Some(inst) = self.lock(&tx, id).await? else {
+                        return Ok(());
+                    };
+                    if !matches!(inst.status.as_str(), "compensating" | "failed") {
+                        return Ok(());
+                    }
+                    // Anything a previous run could not undo stays visible.
+                    let pending: Vec<String> = {
+                        let mut conn = tx.conn().await;
+                        sqlx::query_scalar(&format!(
+                            "SELECT DISTINCT step FROM {s}.bb_workflow_steps
                           WHERE instance_id = $1 AND outcome = 'compensation_failed'
                             AND step NOT IN (SELECT step FROM {s}.bb_workflow_steps
                                               WHERE instance_id = $1 AND outcome = 'compensated')",
-                        s = self.schema
-                    ))
-                    .bind(id)
-                    .fetch_all(&mut *conn)
-                    .await?
-                };
-                // `pending` already holds this run's failures (logged before this transaction);
-                // `failures` carries their messages for the reason, and covers a log write that failed.
-                let (status, error) = if failures.is_empty() && pending.is_empty() {
-                    ("compensated", None)
-                } else if !failures.is_empty() {
-                    (
-                        "failed",
-                        Some(format!("compensation incomplete: {}", failures.join("; "))),
-                    )
-                } else {
-                    (
-                        "failed",
-                        Some(format!("compensation incomplete: {}", pending.join(", "))),
-                    )
-                };
-                let mut conn = tx.conn().await;
-                sqlx::query(&format!(
-                    "UPDATE {}.bb_workflow_instances
+                            s = self.schema
+                        ))
+                        .bind(id)
+                        .fetch_all(&mut *conn)
+                        .await?
+                    };
+                    // `pending` already holds this run's failures (logged before this transaction);
+                    // `failures` carries their messages for the reason, and covers a log write that failed.
+                    let (status, error) = if failures.is_empty() && pending.is_empty() {
+                        ("compensated", None)
+                    } else if !failures.is_empty() {
+                        (
+                            "failed",
+                            Some(format!("compensation incomplete: {}", failures.join("; "))),
+                        )
+                    } else {
+                        (
+                            "failed",
+                            Some(format!("compensation incomplete: {}", pending.join(", "))),
+                        )
+                    };
+                    let mut conn = tx.conn().await;
+                    sqlx::query(&format!(
+                        "UPDATE {}.bb_workflow_instances
                         SET status = $2, last_error = COALESCE($3, last_error), updated_at = now()
                       WHERE id = $1",
-                    self.schema
-                ))
-                .bind(id)
-                .bind(status)
-                .bind(error)
-                .execute(&mut *conn)
-                .await?;
-                Ok(())
-            }),
-        )
-        .await;
+                        self.schema
+                    ))
+                    .bind(id)
+                    .bind(status)
+                    .bind(error)
+                    .execute(&mut *conn)
+                    .await?;
+                    Ok(())
+                }),
+            )
+            .await;
         match outcome {
             Ok(()) => Ok(()),
             Err(RunError::Wf(e)) => Err(e),
@@ -1773,13 +1850,13 @@ impl WorkflowEngine {
 
     async fn sweep_due(&self) -> Result<SweepReport, WorkflowError> {
         let mut report = SweepReport::default();
-        let candidates: Vec<(Uuid, Uuid)> = {
+        let candidates: Vec<(Uuid, Uuid, Option<Uuid>)> = {
             let mut tx = self.pool.begin().await?;
             sqlx::query("SELECT set_config('app.workflow_sweep', 'on', true)")
                 .execute(&mut *tx)
                 .await?;
             let rows = sqlx::query_as(&format!(
-                "SELECT id, company_id FROM {s}.bb_workflow_instances
+                "SELECT id, company_id, org_unit_id FROM {s}.bb_workflow_instances
                   WHERE {due}
                   ORDER BY COALESCE(wait_due_at, deadline_at, updated_at)
                   LIMIT $2",
@@ -1793,15 +1870,20 @@ impl WorkflowEngine {
             tx.commit().await?;
             rows
         };
-        for (id, company) in candidates {
-            let Some(def) = self.def_for_instance(company, id).await? else {
+        for (id, company, unit) in candidates {
+            let tenant = Tenant {
+                company_id: company,
+                org_unit_id: unit,
+            };
+            let Some(def) = self.def_for_instance(tenant, id).await? else {
                 continue;
             };
-            let claimed: Result<Option<Claim>, RunError> = with_company_scope(
-                Some(company),
-                in_write_tx(&self.pool, Box::pin(self.claim_due(&def, id))),
-            )
-            .await;
+            let claimed: Result<Option<Claim>, RunError> = self
+                .scoped(
+                    tenant,
+                    in_write_tx(&self.pool, Box::pin(self.claim_due(&def, id))),
+                )
+                .await;
             let claim = match claimed {
                 Ok(c) => c,
                 Err(RunError::Wf(e)) => return Err(e),
@@ -1814,20 +1896,20 @@ impl WorkflowEngine {
                 None => {}
                 Some(Claim::TimedOut) => {
                     report.timed_out.push(id);
-                    Box::pin(self.drive(&def, company, id)).await?;
+                    Box::pin(self.drive(&def, tenant, id)).await?;
                 }
                 Some(Claim::Expired) => report.expired.push(id),
                 Some(Claim::Retry) => {
                     report.retried.push(id);
-                    Box::pin(self.drive(&def, company, id)).await?;
+                    Box::pin(self.drive(&def, tenant, id)).await?;
                 }
                 Some(Claim::Recover) => {
                     report.recovered.push(id);
-                    Box::pin(self.drive(&def, company, id)).await?;
+                    Box::pin(self.drive(&def, tenant, id)).await?;
                 }
                 Some(Claim::Compensate) => {
                     report.compensated.push(id);
-                    Box::pin(self.compensate_company(&def, company, id)).await?;
+                    Box::pin(self.compensate_company(&def, tenant, id)).await?;
                 }
             }
         }
@@ -1959,10 +2041,9 @@ impl WorkflowEngine {
     ///
     /// # Errors
     /// A database error.
-    pub async fn cancel(&self, company: Uuid, id: Uuid) -> Result<bool, WorkflowError> {
-        let done: Result<bool, RunError> = with_company_scope(
-            Some(company),
-            in_write_tx(&self.pool, async {
+    pub async fn cancel(&self, tenant: impl Into<Tenant>, id: Uuid) -> Result<bool, WorkflowError> {
+        let tenant = tenant.into();
+        let done: Result<bool, RunError> = self.scoped(tenant, in_write_tx(&self.pool, async {
                 let tx = write_tx()?;
                 let Some(inst) = self.lock(&tx, id).await? else { return Ok(false) };
                 if inst.is_final() {
@@ -1991,16 +2072,17 @@ impl WorkflowEngine {
         }
     }
 
-    /// An instance and its step log, as the company sees them (`None` when it has none by that id).
+    /// An instance and its step log, as the tenant sees them (`None` when it has none by that id).
     ///
     /// # Errors
     /// A database error.
     pub async fn describe(
         &self,
-        company: Uuid,
+        tenant: impl Into<Tenant>,
         id: Uuid,
     ) -> Result<Option<(InstanceRow, Vec<StepRow>)>, WorkflowError> {
-        self.in_tx(company, async {
+        let tenant = tenant.into();
+        self.in_tx(tenant, async {
             let tx = write_tx()?;
             let mut conn = tx.conn().await;
             let inst: Option<InstanceRow> = sqlx::query_as(&format!(

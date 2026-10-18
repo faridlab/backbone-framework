@@ -44,6 +44,21 @@ back to the `## [Unreleased]` section.
 - **backbone-core** — the sqlx dependency of `backbone-core` enables its `json` feature (the engine reads and
   writes `jsonb`).
 
+- **backbone-core** — the workflow engine acts under the org unit of the event that started an instance
+  (ADR-0029). A step runs from a delivered event or the sweep, with no request to bind a scope; the engine
+  now binds one itself (`with_org_request_scope` over the new `OrgScope::for_unit_of_company`), so an outbox
+  fenced by org unit (`backbone-outbox`'s `multi_tenant`) admits every row it stages (`emit_event`,
+  notifications, a terminal's `emit`, compensation). Without it those writes were refused by the fence and the
+  instance ended `running` (fixed before the first release). The instance and its step rows carry a nullable
+  `org_unit_id`; `workflow::schema::org_fence_sql` fences both tables by unit; `Tenant` (company and unit)
+  is what `run`, `compensate`, `cancel` and `describe` take (a bare company converts); the sweep runs each
+  instance under its own company and unit.
+- **backbone-outbox** — `OutboxRecord::org_unit_id` (and `with_org_unit_id`): the org unit the event was
+  staged under, which the relay reads back from the table. Constructing the struct with a literal needs the
+  new field; `OutboxRecord::new` is unchanged.
+- **backbone-orm** — `OrgScope::for_unit_of_company(unit, company)`: a scope that acts at one unit for a
+  company's legacy fence, for work done on behalf of an event.
+
 ### Deprecated
 
 - **backbone-core** — the `flow` module (`FlowError`, `FlowStatus`, `FlowInstance`, `FlowExecutor`,

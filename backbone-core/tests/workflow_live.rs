@@ -25,6 +25,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use backbone_core::service::{ServiceError, ServiceResult};
+use backbone_core::workflow::engine::Tenant;
 use backbone_core::workflow::expr::{BinOp, Dur, Expr, Part, Root, Seg, Template, Tpl};
 use backbone_core::workflow::spec::{
     Backoff, Branch, Call, CompStep, EmitSpec, FailureSpec, Outcome, RetrySpec, StepKind, StepSpec,
@@ -350,6 +351,11 @@ struct Harness {
 
 impl Harness {
     async fn new() -> Option<Self> {
+        Self::fenced(false).await
+    }
+
+    /// `org_fence`: the workflow tables fenced by org unit (ADR-0029) instead of by company.
+    async fn fenced(org_fence: bool) -> Option<Self> {
         let Ok(dsn) = std::env::var("BACKBONE_ORM_RLS_DSN") else {
             eprintln!("skipping: BACKBONE_ORM_RLS_DSN not set");
             return None;
@@ -382,6 +388,12 @@ impl Harness {
             .execute(&admin)
             .await
             .unwrap();
+        if org_fence {
+            sqlx::raw_sql(&schema::org_fence_sql("wf"))
+                .execute(&admin)
+                .await
+                .unwrap();
+        }
         outbox::migrate(&admin, "wf").await.unwrap();
         sqlx::raw_sql(&format!(
             "CREATE TABLE wf.notes (id uuid PRIMARY KEY, company_id uuid NOT NULL, ticket text NOT NULL, text text NOT NULL);
@@ -476,9 +488,26 @@ fn fast() -> EngineConfig {
     }
 }
 
+/// An event of `company`, staged at the company's own node (as a request scoped to the company
+/// stages it): on an outbox fenced by org unit the engine must act under that unit to stage anything.
 fn event(kind: &str, company: Uuid, payload: Value) -> OutboxRecord {
+    unit_event(kind, company, company, payload)
+}
+
+/// An event of `company` staged at org unit `unit`.
+fn unit_event(kind: &str, company: Uuid, unit: Uuid, payload: Value) -> OutboxRecord {
     OutboxRecord::new(kind, "Ticket", "t", company, payload, chrono::Utc::now())
         .with_correlation_id("corr-1")
+        .with_org_unit_id(unit)
+}
+
+macro_rules! harness_org {
+    () => {
+        match Harness::fenced(true).await {
+            Some(h) => h,
+            None => return,
+        }
+    };
 }
 
 macro_rules! harness {
@@ -1275,5 +1304,300 @@ async fn the_latest_event_is_readable_by_the_steps_after_a_wait() {
         vec!["from the acknowledgement", "opened"],
         "after a wait, `event` is the event that ended it, not the one that started the instance"
     );
+    h.teardown().await;
+}
+
+// ── the org fence (ADR-0029) ───────────────────────────────────────────────────────────────
+
+fn emit(name: &str, event: &str, next_step: &str) -> StepSpec {
+    action(
+        name,
+        "emit_event",
+        vec![
+            ("event", lit(json!(event))),
+            (
+                "data",
+                Tpl::Map(vec![("ticket".into(), hole(ctx(&["ticket_id"])))]),
+            ),
+        ],
+        next(next_step),
+    )
+}
+
+/// A flow that stages a row at every place the engine can: an event and a notification before a
+/// wait, an event after the wait is resumed, one on the timeout branch, and a terminal's own.
+fn staging() -> WorkflowSpec {
+    let mut s = spec(
+        "Staging",
+        "StagingStarted",
+        true,
+        vec![
+            action(
+                "mail",
+                "send_email",
+                vec![
+                    ("template", lit(json!("welcome"))),
+                    ("to", lit(json!("ann@example.test"))),
+                    (
+                        "data",
+                        Tpl::Map(vec![("ticket".into(), hole(ctx(&["ticket_id"])))]),
+                    ),
+                ],
+                next("announce"),
+            ),
+            emit("announce", "StagingAnnounced", "await"),
+            StepSpec {
+                name: "await".into(),
+                guard: None,
+                kind: StepKind::Wait {
+                    event: Some("StagingAcked".into()),
+                    key: vec![WaitKey {
+                        event_field: "ticket_id".into(),
+                        context: ctx(&["ticket_id"]),
+                    }],
+                    timeout: Some(Dur::Secs(600)),
+                    on_event: Some(next("after_ack")),
+                    on_timeout: Some(next("after_timeout")),
+                },
+                on_failure: None,
+                call_timeout: None,
+            },
+            emit("after_ack", "StagingResumed", "done"),
+            emit("after_timeout", "StagingTimedOut", "done"),
+            StepSpec {
+                name: "done".into(),
+                guard: None,
+                kind: StepKind::Terminal {
+                    status: Terminal::Completed,
+                    reason: None,
+                    emit: Some(EmitSpec {
+                        event: "StagingDone".into(),
+                        data: Tpl::Map(vec![]),
+                    }),
+                    compensate: false,
+                    result: None,
+                },
+                on_failure: None,
+                call_timeout: None,
+            },
+        ],
+    );
+    s.compensation = Vec::new();
+    s
+}
+
+/// A flow that fails and compensates by staging an event.
+fn compensating() -> WorkflowSpec {
+    let mut s = failing("refuse", None);
+    s.name = "Compensating".into();
+    s.trigger_event = "CompensatingStarted".into();
+    s.compensation = vec![CompStep {
+        name: "say_so".into(),
+        when: None,
+        action: "emit_event".into(),
+        entity: None,
+        id: None,
+        params: vec![
+            ("event".into(), lit(json!("StagingCompensated"))),
+            ("data".into(), Tpl::Map(vec![])),
+        ],
+        verb: None,
+    }];
+    s
+}
+
+async fn staged_units(h: &Harness) -> Vec<(String, Option<Uuid>)> {
+    sqlx::query_as(
+        "SELECT event_type, org_unit_id FROM wf.outbox_events
+          WHERE event_type LIKE 'Staging%' OR event_type = 'NotificationRequested' ORDER BY event_type",
+    )
+    .fetch_all(&h.admin)
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn every_row_the_engine_stages_lands_under_the_org_unit_of_the_event_that_started_the_instance(
+) {
+    let h = harness_org!();
+    let engine = h.engine(vec![staging(), compensating()]);
+    let (company, unit) = (Uuid::new_v4(), Uuid::new_v4());
+    let tenant = Tenant::unit(company, unit);
+
+    // Before the wait: a notification request and an event.
+    let timed = engine
+        .on_event(&unit_event(
+            "StagingStarted",
+            company,
+            unit,
+            json!({ "ticket_id": "T-1" }),
+        ))
+        .await
+        .unwrap()
+        .started[0];
+    // The timeout branch, run by the sweep, which acts under the instance's company and unit.
+    h.force_due(timed).await;
+    assert_eq!(engine.sweep().await.unwrap().timed_out, vec![timed]);
+    // The acknowledged branch, resumed by an event of the same unit.
+    let acked = engine
+        .on_event(&unit_event(
+            "StagingStarted",
+            company,
+            unit,
+            json!({ "ticket_id": "T-2" }),
+        ))
+        .await
+        .unwrap()
+        .started[0];
+    let resumed = engine
+        .on_event(&unit_event(
+            "StagingAcked",
+            company,
+            unit,
+            json!({ "ticket_id": "T-2" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resumed.resumed, vec![acked]);
+    // A failure whose compensation stages an event.
+    let failed = engine
+        .on_event(&unit_event(
+            "CompensatingStarted",
+            company,
+            unit,
+            json!({ "ticket_id": "T-3" }),
+        ))
+        .await
+        .unwrap()
+        .started[0];
+
+    for id in [timed, acked, failed] {
+        let (inst, steps) = engine.describe(tenant, id).await.unwrap().unwrap();
+        assert_eq!(
+            inst.org_unit_id,
+            Some(unit),
+            "the instance remembers the unit of its event"
+        );
+        assert!(
+            matches!(inst.status.as_str(), "completed" | "compensated"),
+            "{}",
+            inst.status
+        );
+        assert!(!steps.is_empty());
+    }
+    let unit_of_steps: Vec<Option<Uuid>> =
+        sqlx::query_scalar("SELECT DISTINCT org_unit_id FROM wf.bb_workflow_steps")
+            .fetch_all(&h.admin)
+            .await
+            .unwrap();
+    assert_eq!(
+        unit_of_steps,
+        vec![Some(unit)],
+        "every step row carries the unit"
+    );
+
+    let rows = staged_units(&h).await;
+    let kinds: Vec<&str> = rows.iter().map(|r| r.0.as_str()).collect();
+    for wanted in [
+        "NotificationRequested",
+        "StagingAnnounced",
+        "StagingTimedOut",
+        "StagingResumed",
+        "StagingDone",
+        "StagingCompensated",
+    ] {
+        assert!(
+            kinds.contains(&wanted),
+            "{wanted} was not staged: {kinds:?}"
+        );
+    }
+    assert!(
+        rows.iter().all(|r| r.1 == Some(unit)),
+        "every row is under the event's unit, never another or none: {rows:?}"
+    );
+    h.teardown().await;
+}
+
+#[tokio::test]
+async fn an_instance_is_fenced_by_org_unit_and_an_event_of_another_unit_cannot_resume_it() {
+    let h = harness_org!();
+    let engine = h.engine(vec![staging()]);
+    let (company, u1, u2) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let other_company = Uuid::new_v4();
+    let id = engine
+        .on_event(&unit_event(
+            "StagingStarted",
+            company,
+            u1,
+            json!({ "ticket_id": "T-F" }),
+        ))
+        .await
+        .unwrap()
+        .started[0];
+
+    // The same key, the same company, another unit: not this instance's, so it does not move.
+    let wrong_unit = engine
+        .on_event(&unit_event(
+            "StagingAcked",
+            company,
+            u2,
+            json!({ "ticket_id": "T-F" }),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        wrong_unit.resumed.is_empty(),
+        "an event outside the instance's unit resumed it"
+    );
+    // Another company's unit, likewise.
+    let wrong_company = engine
+        .on_event(&unit_event(
+            "StagingAcked",
+            other_company,
+            other_company,
+            json!({ "ticket_id": "T-F" }),
+        ))
+        .await
+        .unwrap();
+    assert!(wrong_company.resumed.is_empty());
+    let (inst, _) = engine
+        .describe(Tenant::unit(company, u1), id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(inst.status, "waiting");
+
+    // Nobody but its own unit can read it, however the scope is spelled.
+    assert!(engine
+        .describe(Tenant::unit(company, u2), id)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(engine
+        .describe(Tenant::unit(other_company, other_company), id)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(
+        engine.describe(company, id).await.unwrap().is_none(),
+        "a scope with no unit sees nothing of an org-fenced table"
+    );
+    let unscoped: i64 = sqlx::query_scalar("SELECT count(*) FROM wf.bb_workflow_instances")
+        .fetch_one(&h.app)
+        .await
+        .unwrap();
+    assert_eq!(unscoped, 0);
+
+    // Its own unit resumes it.
+    let right = engine
+        .on_event(&unit_event(
+            "StagingAcked",
+            company,
+            u1,
+            json!({ "ticket_id": "T-F" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(right.resumed, vec![id]);
     h.teardown().await;
 }

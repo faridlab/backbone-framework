@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS {schema}.bb_workflow_instances (
     workflow         text NOT NULL,
     version          int  NOT NULL,
     company_id       uuid NOT NULL,
+    org_unit_id      uuid,
     status           text NOT NULL CHECK (status IN ({statuses})),
     current_step     text,
     context          jsonb NOT NULL DEFAULT '{{}}'::jsonb,
@@ -78,6 +79,7 @@ CREATE INDEX IF NOT EXISTS idx_bb_workflow_instances_unfinished
 CREATE TABLE IF NOT EXISTS {schema}.bb_workflow_steps (
     instance_id uuid NOT NULL REFERENCES {schema}.bb_workflow_instances (id) ON DELETE CASCADE,
     company_id  uuid NOT NULL,
+    org_unit_id uuid,
     seq         int  NOT NULL,
     step        text NOT NULL,
     outcome     text NOT NULL,
@@ -110,6 +112,49 @@ CREATE POLICY bb_workflow_steps_company_isolation ON {schema}.bb_workflow_steps 
     WITH CHECK (company_id = NULLIF(current_setting('app.company_id', true), '')::uuid);
 "#
     )
+}
+
+/// The statements that fence both tables by org unit instead of by company (ADR-0029), for a module
+/// whose tables are org-scoped: the `<table>_org_unit_isolation` policy (the entitlement union, plus
+/// the read-only sweep clause) replaces the company policy, and a trigger fills a NULL `org_unit_id`
+/// from the acting unit. A row with no org unit is then refused loudly. The generated migration
+/// adds the kind guard over `organization.org_units` to this.
+///
+/// # Panics
+/// On a `schema` that is not a plain lowercase identifier.
+pub fn org_fence_sql(schema: &str) -> String {
+    assert!(
+        valid_schema(schema),
+        "`{schema}` is not a plain schema name"
+    );
+    let mut out = String::new();
+    for table in ["bb_workflow_instances", "bb_workflow_steps"] {
+        let sweep = if table == "bb_workflow_instances" {
+            "\n                OR current_setting('app.workflow_sweep', true) = 'on'"
+        } else {
+            ""
+        };
+        out.push_str(&format!(
+            r#"DROP POLICY IF EXISTS {table}_company_isolation ON {schema}.{table};
+DROP POLICY IF EXISTS {table}_org_unit_isolation ON {schema}.{table};
+CREATE POLICY {table}_org_unit_isolation ON {schema}.{table} FOR ALL
+    USING      (org_unit_id = ANY(string_to_array(current_setting('app.scope_unit_ids', true), ',')::uuid[]){sweep})
+    WITH CHECK (org_unit_id = ANY(string_to_array(current_setting('app.scope_unit_ids', true), ',')::uuid[]));
+CREATE OR REPLACE FUNCTION {schema}.{table}_org_unit_fill() RETURNS trigger AS $$
+BEGIN
+    IF NEW.org_unit_id IS NULL THEN
+        NEW.org_unit_id := nullif(current_setting('app.acting_unit_id', true), '')::uuid;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS {table}_org_unit_fill ON {schema}.{table};
+CREATE TRIGGER {table}_org_unit_fill BEFORE INSERT ON {schema}.{table}
+    FOR EACH ROW EXECUTE FUNCTION {schema}.{table}_org_unit_fill();
+"#
+        ));
+    }
+    out
 }
 
 /// The statements that replace both policies, for a test that creates the tables more than once.
