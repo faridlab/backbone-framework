@@ -178,6 +178,7 @@ pub struct CrudPermissions {
     entity: String,
     module: Option<String>,
     overrides: Vec<(Gate, String)>,
+    public: Vec<Gate>,
 }
 
 impl CrudPermissions {
@@ -187,6 +188,7 @@ impl CrudPermissions {
             entity: entity.into(),
             module: None,
             overrides: Vec::new(),
+            public: Vec::new(),
         }
     }
 
@@ -202,6 +204,34 @@ impl CrudPermissions {
         self.overrides.retain(|(g, _)| *g != gate);
         self.overrides.push((gate, permission.into()));
         self
+    }
+
+    /// Declare the routes of `gate` public: they require no permission at all, and no
+    /// `AuthContext`, so an unauthenticated request is served where the service mounted the routes
+    /// outside its authentication layer (see the generated `public_routes()`). The schema's
+    /// `public:` declares it per entity; the tenant or company fence still applies, since it lives
+    /// in the database connection and not in this layer.
+    pub fn public(mut self, gate: Gate) -> Self {
+        let gate = if gate == Gate::CreateUpdate {
+            Gate::Create
+        } else {
+            gate
+        };
+        if !self.public.contains(&gate) {
+            self.public.push(gate);
+        }
+        self
+    }
+
+    /// Whether the routes of `gate` are public. An upsert is public only when both the create and
+    /// the update it performs are.
+    pub fn is_public(&self, gate: Gate) -> bool {
+        match gate {
+            Gate::CreateUpdate => {
+                self.public.contains(&Gate::Create) && self.public.contains(&Gate::Update)
+            }
+            g => self.public.contains(&g),
+        }
     }
 
     /// The canonical permission `gate` requires.
@@ -230,10 +260,16 @@ impl CrudPermissions {
         }
     }
 
-    /// What a route of `gate` needs.
+    /// What a route of `gate` needs: nothing for a public gate, and for an upsert only the half
+    /// that is not public.
     pub fn needs(&self, gate: Gate) -> Vec<Needs> {
         match gate {
-            Gate::CreateUpdate => vec![self.one(Gate::Create), self.one(Gate::Update)],
+            Gate::CreateUpdate => [Gate::Create, Gate::Update]
+                .into_iter()
+                .filter(|g| !self.public.contains(g))
+                .map(|g| self.one(g))
+                .collect(),
+            g if self.public.contains(&g) => Vec::new(),
             g => vec![self.one(g)],
         }
     }
@@ -381,5 +417,26 @@ mod tests {
             p.needs(Gate::Read)[0].alternates.is_empty(),
             "a renamed permission has no legacy alternates"
         );
+    }
+
+    #[test]
+    fn a_public_gate_needs_nothing_and_an_upsert_needs_only_its_non_public_half() {
+        let p = CrudPermissions::new("label").public(Gate::Read);
+        assert!(p.is_public(Gate::Read) && !p.is_public(Gate::Create));
+        assert!(p.needs(Gate::Read).is_empty());
+        assert_eq!(p.needs(Gate::Create)[0].permission, "label:create");
+
+        let p = CrudPermissions::new("label").public(Gate::Create);
+        assert!(!p.is_public(Gate::CreateUpdate), "an upsert also updates");
+        assert_eq!(
+            p.needs(Gate::CreateUpdate)
+                .iter()
+                .map(|n| n.permission.as_str())
+                .collect::<Vec<_>>(),
+            vec!["label:update"]
+        );
+        let p = p.public(Gate::Update);
+        assert!(p.is_public(Gate::CreateUpdate));
+        assert!(p.needs(Gate::CreateUpdate).is_empty());
     }
 }

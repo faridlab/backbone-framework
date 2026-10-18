@@ -1558,6 +1558,9 @@ where
         route: axum::routing::MethodRouter<()>,
     ) -> axum::routing::MethodRouter<()> {
         match perms {
+            // A public gate is left unwrapped: no `AuthContext` is read, so an unauthenticated
+            // request is served where the service mounted the route outside its auth layer.
+            Some(p) if p.is_public(gate) => route,
             Some(p) => crate::permission::guarded_needs(route, p.needs(gate)),
             None => route,
         }
