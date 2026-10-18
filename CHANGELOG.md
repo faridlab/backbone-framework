@@ -16,6 +16,8 @@ back to the `## [Unreleased]` section.
 
 ## [Unreleased]
 
+## [3.18.0] - 2026-10-19
+
 ### Fixed
 
 - **Every paged read has a deterministic total order.** A list with no sort had no `ORDER BY`, so Postgres
