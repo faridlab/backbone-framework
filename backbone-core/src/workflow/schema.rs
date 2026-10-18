@@ -24,8 +24,9 @@ pub fn valid_schema(schema: &str) -> bool {
 }
 
 /// The statements that create `bb_workflow_instances` and `bb_workflow_steps` in `schema`, fence
-/// them by `company_id` with row-level security, and create the `inbox_consumed` table the engine
-/// dedups resumes with. Run it as the table owner. Not idempotent for the policies' sake: run it
+/// them by `company_id` with row-level security. The outbox and inbox tables the engine stages events
+/// in and dedups resumes with are `backbone_core::write_hooks::migrate_outbox`'s (a module that stages
+/// events runs it already). Run it as the table owner. Not idempotent for the policies' sake: run it
 /// once, as a migration does; [`drop_and_create_policies`] is for a test that re-creates them.
 ///
 /// # Panics
@@ -86,13 +87,6 @@ CREATE TABLE IF NOT EXISTS {schema}.bb_workflow_steps (
     PRIMARY KEY (instance_id, seq)
 );
 
-CREATE TABLE IF NOT EXISTS {schema}.inbox_consumed (
-    consumer    text NOT NULL,
-    event_id    uuid NOT NULL,
-    consumed_at timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (consumer, event_id)
-);
-
 ALTER TABLE {schema}.bb_workflow_instances ENABLE ROW LEVEL SECURITY;
 ALTER TABLE {schema}.bb_workflow_instances FORCE ROW LEVEL SECURITY;
 ALTER TABLE {schema}.bb_workflow_steps ENABLE ROW LEVEL SECURITY;
@@ -143,7 +137,6 @@ mod tests {
             "hr.bb_workflow_steps",
             "UNIQUE (workflow, trigger_event_id)",
             "FORCE ROW LEVEL SECURITY",
-            "hr.inbox_consumed",
             "'compensating'",
         ] {
             assert!(sql.contains(needle), "{needle}");
