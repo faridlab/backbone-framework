@@ -750,10 +750,17 @@ impl<T: for<'a> FromRow<'a, PgRow> + Send + Unpin> PostgresRepository<T> {
                     .try_get::<Option<chrono::NaiveDate>, _>(field)
                     .ok()?
                     .map(|d| d.to_string()),
-                _ => row
-                    .try_get::<Option<String>, _>(field)
+                "timestamp" => row
+                    .try_get::<Option<chrono::NaiveDateTime>, _>(field)
                     .ok()?
-                    .filter(|s| !s.is_empty() || data_type.is_empty()),
+                    .map(|t| t.format("%Y-%m-%d %H:%M:%S%.6f").to_string()),
+                // A text column: no cast, decoded as text.
+                "" => row.try_get::<Option<String>, _>(field).ok()?,
+                // A column of an enum type, whose cast names the type: Postgres sends the
+                // label as text, but a checked decode as `String` refuses a type that is not
+                // `text`, which dropped the cursor for every page of a list sorted by an enum
+                // (the page said more rows followed and handed out no way to continue).
+                _ => row.try_get_unchecked::<Option<String>, _>(field).ok()?,
             };
             values.push(serde_json::Value::String(text?));
         }

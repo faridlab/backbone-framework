@@ -49,15 +49,20 @@ async fn setup(pool: &PgPool, schema: &str) {
     sqlx::raw_sql(&format!(
         "DROP SCHEMA IF EXISTS {schema} CASCADE;
          CREATE SCHEMA {schema};
+         CREATE TYPE {schema}.item_state AS ENUM ('open', 'draft', 'done');
          CREATE TABLE {schema}.item (
              id       uuid PRIMARY KEY DEFAULT gen_random_uuid(),
              name     text NOT NULL,
              rank     integer NOT NULL,
              tier     text NOT NULL,
+             state    {schema}.item_state NOT NULL DEFAULT 'open',
+             seen_at  timestamp NOT NULL DEFAULT now(),
              metadata jsonb NOT NULL DEFAULT '{{}}'
          );
-         INSERT INTO {schema}.item (name, rank, tier, metadata)
+         INSERT INTO {schema}.item (name, rank, tier, state, seen_at, metadata)
          SELECT 'item ' || n, n % 5, CASE WHEN n % 2 = 0 THEN 'a' ELSE 'b' END,
+                (ARRAY['open', 'draft', 'done'])[n % 3 + 1]::{schema}.item_state,
+                timestamp '2026-01-01 00:00:00.123456' + ((n % 4) || ' minutes')::interval,
                 CASE WHEN n % 4 = 0
                      THEN jsonb_build_object('deleted_at', now() - (n || ' minutes')::interval)
                      ELSE '{{}}'::jsonb END
@@ -456,6 +461,41 @@ async fn an_unsorted_list_hands_out_a_cursor_that_a_later_request_continues_from
     )
     .await;
     assert_eq!(next.data.iter().map(|i| i.id).collect::<Vec<_>>(), want);
+
+    drop_schema(&pool, &schema).await;
+}
+
+#[tokio::test]
+async fn a_keyset_walk_sorted_by_an_enum_or_a_timestamp_column_hands_out_a_cursor_on_every_page() {
+    let Some((pool, schema)) = pool().await else {
+        return;
+    };
+    let repo: Repo = Repo::new(pool.clone(), &format!("{schema}.item"));
+
+    // `state` is an enum whose declared order is not alphabetical; `seen_at` is a timestamp
+    // without a time zone. Both tie heavily, so the id tiebreaker carries the walk.
+    for (sort, order) in [
+        ("state", "state, id"),
+        ("-seen_at", "seen_at DESC, id"),
+        ("state,-seen_at", "state, seen_at DESC, id"),
+    ] {
+        let want = expected_ids(
+            &pool,
+            &format!("SELECT id FROM {schema}.item WHERE {ACTIVE} ORDER BY {order}"),
+        )
+        .await;
+        let filters = params(&[("sort", sort)]);
+        assert_eq!(
+            walk_cursor(&repo, Some(ACTIVE), &filters, 7).await,
+            want,
+            "keyset walk, sort={sort}"
+        );
+        assert_eq!(
+            walk_pages(&repo, Some(ACTIVE), &filters, 7, |_| async {}).await,
+            want,
+            "offset walk, sort={sort}"
+        );
+    }
 
     drop_schema(&pool, &schema).await;
 }

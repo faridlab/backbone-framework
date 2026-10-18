@@ -32,6 +32,12 @@ back to the `## [Unreleased]` section.
   `backbone-core`'s `PostgresRepository` list, search and `find_by_field` queries end `created_at DESC` on
   the key column, and `InMemoryRepository` pages in key order instead of hash order.
 
+- **A keyset walk over a list sorted by an enum or a timestamp column lost its cursor.** The boundary row's
+  value was decoded as `text`, which the driver refuses for an enum (and for a `timestamp` without a time
+  zone), so a page that said more rows followed (`has_more`) handed out no `next_cursor`: the walk ended
+  after its first page, with no error. The label is now read as text without the type check, and a
+  `timestamp` as a timestamp. Found by the order probes of the conformance suite.
+
 ### Changed
 
 - **Behaviour change: the default order of an unsorted list is now `id` ascending.** It used to be
