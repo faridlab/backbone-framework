@@ -431,6 +431,8 @@ impl WorkflowEngine {
                         .map_err(|m| fail("start", FailKind::Business, format!("extract `{k}`: {m}")))?;
                     context.insert(k.clone(), v);
                 }
+                // The latest event, for steps that read `event.*` after the start.
+                context.insert("_event".into(), record.payload.clone());
                 let deadline = match &spec.timeout {
                     Some(d) => Some(
                         expr::render_duration(d, &scope, &funcs)
@@ -607,9 +609,12 @@ impl WorkflowEngine {
             completed: &completed,
             now: Utc::now(),
         };
-        let (context, next) =
+        let (mut context, next) =
             Box::pin(self.apply_outcome(spec, step_name, inst, outcome, &scope, &funcs, None))
                 .await?;
+        if let (Some(payload), Some(map)) = (event, context.as_object_mut()) {
+            map.insert("_event".into(), payload.clone());
+        }
         let seq = self.next_seq(tx, inst.id).await?;
         self.log_step(tx, inst, seq, step_name, outcome_label, None)
             .await?;
@@ -866,7 +871,7 @@ impl WorkflowEngine {
         let null = Value::Null;
         let scope = Scope {
             context: &inst.context,
-            event: &null,
+            event: inst.context.get("_event").unwrap_or(&null),
             result: inst.context.get("result").unwrap_or(&null),
             error: inst.context.get("error").unwrap_or(&null),
             config: &null,
@@ -1453,7 +1458,7 @@ impl WorkflowEngine {
                     let err_text = Value::String(failure.message.clone());
                     let scope = Scope {
                         context: &carrier.context,
-                        event: &null,
+                        event: inst.context.get("_event").unwrap_or(&null),
                         result: carrier.context.get("result").unwrap_or(&null),
                         error: &err_text,
                         config: &null,
@@ -1693,7 +1698,7 @@ impl WorkflowEngine {
         let null = Value::Null;
         let scope = Scope {
             context: &inst.context,
-            event: &null,
+            event: inst.context.get("_event").unwrap_or(&null),
             result: inst.context.get("result").unwrap_or(&null),
             error: inst.context.get("error").unwrap_or(&null),
             config: &null,

@@ -1227,3 +1227,48 @@ async fn the_background_tasks_deliver_subscribed_events_and_ignore_the_rest() {
     assert_eq!(tasks.timer_sweep().await.unwrap().total(), 0);
     h.teardown().await;
 }
+
+#[tokio::test]
+async fn the_latest_event_is_readable_by_the_steps_after_a_wait() {
+    let h = harness!();
+    let mut s = escalation();
+    // The acknowledgement's own `note` is written by the step that follows the wait.
+    for step in &mut s.steps {
+        if let StepKind::Action { params, .. } = &mut step.kind {
+            if step.name == "note_ack" {
+                for (k, v) in params.iter_mut() {
+                    if k == "text" {
+                        *v = hole(Expr::Path {
+                            root: Root::Event,
+                            path: vec![Seg::Key("note".into())],
+                        });
+                    }
+                }
+            }
+        }
+    }
+    let engine = h.engine(vec![s]);
+    let company = Uuid::new_v4();
+    engine
+        .on_event(&event(
+            "TicketRaised",
+            company,
+            json!({ "ticket_id": "T-EV", "note": "from the start event" }),
+        ))
+        .await
+        .unwrap();
+    engine
+        .on_event(&event(
+            "TicketAcked",
+            company,
+            json!({ "ticket_id": "T-EV", "note": "from the acknowledgement" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        h.notes("T-EV").await,
+        vec!["from the acknowledgement", "opened"],
+        "after a wait, `event` is the event that ended it, not the one that started the instance"
+    );
+    h.teardown().await;
+}
