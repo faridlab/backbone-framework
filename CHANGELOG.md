@@ -16,6 +16,8 @@ back to the `## [Unreleased]` section.
 
 ## [Unreleased]
 
+## [3.14.0] - 2026-10-18
+
 ### Added
 
 - **backbone-orm** — `in_write_tx(pool, work)`: one task-local database transaction around everything
