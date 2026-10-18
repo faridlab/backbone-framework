@@ -1,5 +1,11 @@
 //! Workflow step and context traits for saga-pattern workflows.
 //!
+//! **Deprecated.** Nothing used these types: an in-memory instance with no persistence, wait, timer
+//! or compensation. A workflow a schema declares with `config.executor: engine` runs through
+//! [`crate::workflow`]: the generated spec and definition, and a [`WorkflowEngine`](crate::workflow)
+//! over Postgres. This module stays for one minor release so code that names it still builds, and is
+//! removed after it.
+//!
 //! Phase 0 generic base for the `flow.rs` generator (Category C).
 //!
 //! Every generated `{Name}Workflow` used to re-define the same
@@ -21,10 +27,13 @@
 //! // impl execute_step() — the only unique part — stays in the generated file
 //! ```
 
+#![allow(deprecated)]
+
 use std::sync::Arc;
 
 // ─── FlowError ───────────────────────────────────────────────────────────────
 
+#[deprecated(since = "3.16.0", note = "nothing used it; declared workflows run through backbone_core::workflow (WorkflowSpec, WorkflowDefinition and WorkflowEngine)")]
 /// Common workflow execution error — identical for every workflow.
 ///
 /// Generated files use a type alias: `pub type OrderProcessingFlowError = FlowError;`
@@ -54,6 +63,7 @@ pub enum FlowError {
 
 // ─── FlowStatus ──────────────────────────────────────────────────────────────
 
+#[deprecated(since = "3.16.0", note = "nothing used it; declared workflows run through backbone_core::workflow (WorkflowSpec, WorkflowDefinition and WorkflowEngine)")]
 /// Workflow execution status — identical for every workflow.
 ///
 /// Generated files use a type alias: `pub type OrderProcessingFlowStatus = FlowStatus;`
@@ -87,6 +97,7 @@ pub enum FlowStatus {
     serialize = "S: serde::Serialize",
     deserialize = "S: serde::de::DeserializeOwned",
 ))]
+#[deprecated(since = "3.16.0", note = "nothing used it; declared workflows run through backbone_core::workflow (WorkflowSpec, WorkflowDefinition and WorkflowEngine)")]
 pub struct FlowInstance<S>
 where
     S: std::fmt::Debug + Clone + serde::Serialize + serde::de::DeserializeOwned,
@@ -159,6 +170,7 @@ where
 
 // ─── FlowExecutor ────────────────────────────────────────────────────────────
 
+#[deprecated(since = "3.16.0", note = "nothing used it; declared workflows run through backbone_core::workflow (WorkflowSpec, WorkflowDefinition and WorkflowEngine)")]
 /// Generic executor shell — holds the handler, provides cancel/fail helpers.
 ///
 /// Generated files wrap this with a newtype and add the unique `execute_step()`:
@@ -234,6 +246,7 @@ impl<H: Send + Sync + 'static> FlowExecutor<H> {
 
 // ─── Traits ──────────────────────────────────────────────────────────────────
 
+#[deprecated(since = "3.16.0", note = "nothing used it; declared workflows run through backbone_core::workflow (WorkflowSpec, WorkflowDefinition and WorkflowEngine)")]
 /// Workflow execution context for an entity `E`.
 pub trait WorkflowContext<E>: Send + Sync {
     fn entity(&self) -> &E;
@@ -241,6 +254,7 @@ pub trait WorkflowContext<E>: Send + Sync {
     fn get_var(&self, key: &str) -> Option<&serde_json::Value>;
 }
 
+#[deprecated(since = "3.16.0", note = "nothing used it; declared workflows run through backbone_core::workflow (WorkflowSpec, WorkflowDefinition and WorkflowEngine)")]
 /// A named step within a workflow.
 pub trait WorkflowStep: Send + Sync {
     fn name(&self) -> &'static str;
