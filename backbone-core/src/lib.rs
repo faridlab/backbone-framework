@@ -95,6 +95,7 @@ pub mod graphql;
 // Category C generic base traits — Phase 0 extension for trigger/flow/projection
 pub mod trigger;
 pub mod flow;
+pub mod workflow;
 pub mod projection;
 pub mod state_machine;
 

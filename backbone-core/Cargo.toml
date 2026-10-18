@@ -55,7 +55,7 @@ tower = "0.4"
 tower-http = { version = "0.5", features = ["cors", "trace"] }
 
 # Database (optional - only for builder pattern examples)
-sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono"], optional = true }
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json"], optional = true }
 
 # OpenAPI schema generation (optional, default-off — see `openapi` feature)
 utoipa = { version = "5", features = ["uuid", "chrono"], optional = true }
