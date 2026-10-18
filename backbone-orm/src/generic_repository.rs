@@ -698,13 +698,14 @@ where
         Ok(result.is_some())
     }
 
-    /// Paginate active entities (most-recent-first by ID).
+    /// Paginate active entities, ordered by `id` ascending — the same key order every
+    /// filtered list ends on, so a page never repeats or skips a row between two fetches.
     pub async fn list_paginated(&self, pagination: PaginationParams) -> Result<PaginatedResult<T>> {
         let offset = pagination.offset();
         let limit = pagination.limit();
         let query = format!(
             "SELECT * FROM {} WHERE metadata->>'deleted_at' IS NULL \
-             ORDER BY id DESC LIMIT $1 OFFSET $2",
+             ORDER BY id LIMIT $1 OFFSET $2",
             self.table_name()
         );
         let data = crate::company_scope::fetch_all_scoped(
@@ -755,13 +756,14 @@ where
         Ok(result)
     }
 
-    /// Paginate soft-deleted entities (trash view).
+    /// Paginate soft-deleted entities (trash view), most recently deleted first, `id` ascending
+    /// among rows deleted at the same instant so the order is total.
     pub async fn list_deleted(&self, pagination: PaginationParams) -> Result<PaginatedResult<T>> {
         let offset = pagination.offset();
         let limit = pagination.limit();
         let query = format!(
             "SELECT * FROM {} WHERE (metadata->>'deleted_at') IS NOT NULL \
-             ORDER BY (metadata->>'deleted_at') DESC LIMIT $1 OFFSET $2",
+             ORDER BY (metadata->>'deleted_at') DESC, id LIMIT $1 OFFSET $2",
             self.table_name()
         );
         let data = crate::company_scope::fetch_all_scoped(
@@ -1246,12 +1248,13 @@ where
         Ok(result.is_some())
     }
 
-    /// Paginate entities (most-recent-first by ID).
+    /// Paginate entities, ordered by `id` ascending — the same key order every filtered list
+    /// ends on, so a page never repeats or skips a row between two fetches.
     pub async fn list_paginated(&self, pagination: PaginationParams) -> Result<PaginatedResult<T>> {
         let offset = pagination.offset();
         let limit = pagination.limit();
         let query = format!(
-            "SELECT * FROM {} ORDER BY id DESC LIMIT $1 OFFSET $2",
+            "SELECT * FROM {} ORDER BY id LIMIT $1 OFFSET $2",
             self.table_name()
         );
         let data = crate::company_scope::fetch_all_scoped(

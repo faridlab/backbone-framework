@@ -396,10 +396,11 @@ where
 
         // List query
         let list_query = format!(
-            "SELECT {} FROM {} WHERE {} ORDER BY created_at DESC LIMIT ${} OFFSET ${}",
+            "SELECT {} FROM {} WHERE {} ORDER BY created_at DESC, {} LIMIT ${} OFFSET ${}",
             columns,
             table,
             where_clause,
+            E::id_column(),
             param_idx,
             param_idx + 1
         );
@@ -478,10 +479,11 @@ where
 
         // List
         let list_query = format!(
-            "SELECT {} FROM {} WHERE {} = $1 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT $2 OFFSET $3",
+            "SELECT {} FROM {} WHERE {} = $1 AND deleted_at IS NULL ORDER BY created_at DESC, {} LIMIT $2 OFFSET $3",
             E::select_columns().join(", "),
             E::table_name(),
-            field
+            field,
+            E::id_column()
         );
 
         let rows = sqlx::query(&list_query)

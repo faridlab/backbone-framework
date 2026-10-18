@@ -1223,9 +1223,10 @@ mod postgres_traits {
         /// Build paginated list query
         fn list_query() -> String {
             format!(
-                "SELECT {} FROM {} WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT $1 OFFSET $2",
+                "SELECT {} FROM {} WHERE deleted_at IS NULL ORDER BY created_at DESC, {} LIMIT $1 OFFSET $2",
                 Self::select_columns().join(", "),
-                Self::table_name()
+                Self::table_name(),
+                Self::id_column()
             )
         }
 
@@ -1240,9 +1241,10 @@ mod postgres_traits {
         /// Build list deleted (trash) query
         fn list_deleted_query() -> String {
             format!(
-                "SELECT {} FROM {} WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC LIMIT $1 OFFSET $2",
+                "SELECT {} FROM {} WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC, {} LIMIT $1 OFFSET $2",
                 Self::select_columns().join(", "),
-                Self::table_name()
+                Self::table_name(),
+                Self::id_column()
             )
         }
 

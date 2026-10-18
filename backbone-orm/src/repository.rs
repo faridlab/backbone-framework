@@ -472,26 +472,25 @@ impl<T: for<'a> FromRow<'a, PgRow> + Send + Unpin> PostgresRepository<T> {
         // Cast suffixes for the sort columns, for the keyset binds.
         let mut boundary_casts: Vec<Option<String>> = Vec::new();
 
-        // The deterministic order: a cursor walks one, and a page-mode list
-        // that carries a sort gets the same treatment so it can HAND OUT a
-        // cursor to start a keyset walk from. Appending the id tiebreaker
-        // only reorders rows that tied — ties had no order to preserve.
-        let mut sorts: Vec<(String, FilterSortDirection)> = query_filter
-            .sorts
-            .iter()
-            .map(|s| (s.field.clone(), s.direction.clone()))
-            .collect();
-        if cursor_walk || !sorts.is_empty() {
-            if sorts.is_empty() {
-                sorts.push(("id".into(), FilterSortDirection::Asc));
-            } else if sorts.last().map(|(f, _)| f != "id").unwrap_or(true) {
-                sorts.push(("id".into(), FilterSortDirection::Asc));
-            }
-        }
+        // The total order every paged read carries — see `total_order`. A
+        // cursor walks it, and a page-mode list gets the same order so it can
+        // HAND OUT a cursor to start a keyset walk from, and so offset paging
+        // returns each row exactly once whatever the physical row order does
+        // between two page fetches.
+        let sorts = total_order(
+            query_filter
+                .sorts
+                .iter()
+                .map(|s| (s.field.clone(), s.direction.clone()))
+                .collect(),
+        );
 
-        // Casts whenever there is a deterministic order to key: cursor mode
-        // walks on them, page mode encodes the handed-out cursor from them.
-        if !sorts.is_empty() {
+        // Casts for the sort columns: cursor mode walks on them, and a page
+        // that sorts by something other than the key encodes its handed-out
+        // cursor from them. A list ordered by the key alone needs none —
+        // the id decodes as a uuid on its own — which spares the plain
+        // unsorted list a catalog round trip it never needed.
+        if cursor_walk || sorts.iter().any(|(f, _)| f != "id") {
             boundary_casts = self.sort_column_casts(&sorts).await?;
         }
 
@@ -527,36 +526,12 @@ impl<T: for<'a> FromRow<'a, PgRow> + Send + Unpin> PostgresRepository<T> {
             );
             where_clause = and_keyset_predicate(&where_clause, &keyset_sql);
             filter_params.extend(keyset_params);
-            let parts: Vec<String> = sorts
-                .iter()
-                .map(|(f, d)| {
-                    let dir = if (*d == FilterSortDirection::Desc) != backwards {
-                        "DESC"
-                    } else {
-                        "ASC"
-                    };
-                    format!("{} {}", f, dir)
-                })
-                .collect();
-            order_clause = format!(" ORDER BY {}", parts.join(", "));
+            order_clause = order_by_sql(&sorts, backwards);
         } else {
-            // Page mode with a sort: the caller's order, made deterministic
-            // by the same id tiebreaker so the cursor it hands out is real.
-            if sorts.is_empty() {
-                order_clause = query_filter.build_order_by_clause();
-            } else {
-                let parts: Vec<String> = sorts
-                    .iter()
-                    .map(|(f, d)| {
-                        let dir =
-                            if *d == FilterSortDirection::Desc { "DESC" } else { "ASC" };
-                        format!("{} {}", f, dir)
-                    })
-                    .collect();
-                order_clause = format!(" ORDER BY {}", parts.join(", "));
-            }
+            // Page mode: the caller's order (or the key's), already total.
+            order_clause = order_by_sql(&sorts, false);
         }
-        // The deterministic order a cursor walks in (cursor mode only).
+        // The deterministic order the handed-out cursors are cut in.
         let boundary_sorts: Vec<(String, FilterSortDirection)> = sorts;
 
         // The total: exact in page mode (today's behaviour), the planner's
@@ -903,6 +878,46 @@ pub fn changed_columns<T: Serialize>(before: &T, after: &T) -> anyhow::Result<Ve
         .filter(|(k, v)| k != "id" && before.get(k) != Some(v))
         .map(|(k, _)| k)
         .collect())
+}
+
+/// The primary-key column every generated table carries, and the final key of
+/// every paged read's order.
+const KEY_COLUMN: &str = "id";
+
+/// Make a requested sort a TOTAL order.
+///
+/// One rule for every paged read (list, filtered list, search, trash, keyset
+/// walk): the order is the caller's sorts followed by the primary key `id`
+/// ascending, unless `id` is already one of the sorts — it is unique, so
+/// anything after it could never be consulted. With no sort at all the order
+/// is `id` ascending.
+///
+/// Without a final unique key Postgres is free to return rows that tie (and,
+/// with no `ORDER BY` at all, every row) in physical order, which changes
+/// after an update or a vacuum — so offset paging could repeat a row on one
+/// page and skip another between two fetches. `id` is the primary key, so the
+/// order can ride its index with `LIMIT` when nothing else is sorted.
+pub(crate) fn total_order(
+    mut sorts: Vec<(String, FilterSortDirection)>,
+) -> Vec<(String, FilterSortDirection)> {
+    if !sorts.iter().any(|(f, _)| f == KEY_COLUMN) {
+        sorts.push((KEY_COLUMN.into(), FilterSortDirection::Asc));
+    }
+    sorts
+}
+
+/// ` ORDER BY ...` for a total order. `backwards` inverts every direction,
+/// which is how a `before=` walk reads the page that precedes a cursor; the
+/// caller reverses the rows afterwards.
+pub(crate) fn order_by_sql(sorts: &[(String, FilterSortDirection)], backwards: bool) -> String {
+    let parts: Vec<String> = sorts
+        .iter()
+        .map(|(f, d)| {
+            let dir = if (*d == FilterSortDirection::Desc) != backwards { "DESC" } else { "ASC" };
+            format!("{} {}", f, dir)
+        })
+        .collect();
+    format!(" ORDER BY {}", parts.join(", "))
 }
 
 /// AND the keyset predicate onto a built WHERE clause. The existing clause is parenthesised
@@ -1444,7 +1459,7 @@ impl<T: for<'a> FromRow<'a, PgRow> + Send + Unpin> PostgresRepository<T> {
                      COUNT(*) AS __count{reductions} \
                      FROM {table}{label_join}{where_clause} \
                      GROUP BY GROUPING SETS (({column}), ()) \
-                     ORDER BY __is_total DESC, __count DESC \
+                     ORDER BY __is_total DESC, __count DESC, __group_key \
                      LIMIT {limit}",
                     column = column,
                     label_select = label_select,
@@ -1755,5 +1770,46 @@ mod changed_columns_tests {
             vec!["label".to_string(), "notes".to_string()]
         );
         assert!(changed_columns(&before, &before).unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod total_order_tests {
+    use super::{order_by_sql, total_order};
+    use crate::filter::SortDirection::{Asc, Desc};
+
+    fn s(f: &str, d: crate::filter::SortDirection) -> (String, crate::filter::SortDirection) {
+        (f.to_string(), d)
+    }
+
+    #[test]
+    fn no_sort_orders_by_the_key_ascending() {
+        assert_eq!(order_by_sql(&total_order(vec![]), false), " ORDER BY id ASC");
+    }
+
+    #[test]
+    fn a_sort_gets_the_key_as_its_final_tiebreaker() {
+        let order = total_order(vec![s("status", Desc), s("name", Asc)]);
+        assert_eq!(order_by_sql(&order, false), " ORDER BY status DESC, name ASC, id ASC");
+    }
+
+    #[test]
+    fn the_tiebreaker_is_not_repeated_when_the_key_is_already_sorted() {
+        let last = total_order(vec![s("name", Asc), s("id", Desc)]);
+        assert_eq!(order_by_sql(&last, false), " ORDER BY name ASC, id DESC");
+        let first = total_order(vec![s("id", Desc), s("name", Asc)]);
+        assert_eq!(order_by_sql(&first, false), " ORDER BY id DESC, name ASC");
+    }
+
+    #[test]
+    fn a_backwards_walk_inverts_every_direction_including_the_key() {
+        let order = total_order(vec![s("created_at", Desc)]);
+        assert_eq!(order_by_sql(&order, true), " ORDER BY created_at ASC, id DESC");
+    }
+
+    #[test]
+    fn the_order_is_idempotent() {
+        let once = total_order(vec![s("name", Asc)]);
+        assert_eq!(total_order(once.clone()), once);
     }
 }

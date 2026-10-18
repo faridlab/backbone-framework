@@ -46,6 +46,15 @@ where
     trash: RwLock<HashMap<String, E>>,
 }
 
+/// The stored entities in key order — the same total order the database-backed repositories
+/// page in, so a page never repeats or skips an entity because a hash map happened to iterate
+/// differently between two reads.
+fn ordered_by_id<E>(map: &HashMap<String, E>) -> Vec<&E> {
+    let mut entries: Vec<(&String, &E)> = map.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    entries.into_iter().map(|(_, e)| e).collect()
+}
+
 impl<E> InMemoryRepository<E>
 where
     E: PersistentEntity,
@@ -209,8 +218,8 @@ where
         let total = store.len() as u64;
 
         let offset = ((page.saturating_sub(1)) * limit) as usize;
-        let entities: Vec<E> = store
-            .values()
+        let entities: Vec<E> = ordered_by_id(&store)
+            .into_iter()
             .skip(offset)
             .take(limit as usize)
             .cloned()
@@ -224,8 +233,8 @@ where
         let total = trash.len() as u64;
 
         let offset = ((page.saturating_sub(1)) * limit) as usize;
-        let entities: Vec<E> = trash
-            .values()
+        let entities: Vec<E> = ordered_by_id(&trash)
+            .into_iter()
             .skip(offset)
             .take(limit as usize)
             .cloned()
@@ -272,8 +281,8 @@ where
         // For in-memory, we do basic JSON field matching
         let store = self.store.read().unwrap();
 
-        let filtered: Vec<E> = store
-            .values()
+        let filtered: Vec<E> = ordered_by_id(&store)
+            .into_iter()
             .filter(|entity| {
                 // Serialize entity to JSON for field matching
                 if let Ok(json) = serde_json::to_value(entity) {
@@ -443,6 +452,32 @@ mod tests {
         let restored = repo.restore(&id).await.unwrap();
         assert!(restored.is_some());
         assert!(repo.find_by_id(&id).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn pages_follow_id_order_so_no_entity_repeats_or_is_skipped() {
+        let repo = InMemoryRepository::<TestEntity>::new();
+        let created = repo
+            .bulk_create((0..23).map(|i| TestEntity::new(&format!("e{i}"), i)).collect())
+            .await
+            .unwrap();
+        for e in created.iter().step_by(3) {
+            repo.soft_delete(&e.id).await.unwrap();
+        }
+
+        let mut active = Vec::new();
+        let mut trash = Vec::new();
+        for page in 1..=6 {
+            active.extend(repo.list(page, 4).await.unwrap().0.into_iter().map(|e| e.id));
+            trash.extend(repo.list_deleted(page, 4).await.unwrap().0.into_iter().map(|e| e.id));
+        }
+        for (what, ids, want) in [("active", active, 15), ("trash", trash, 8)] {
+            assert_eq!(ids.len(), want, "{what}: every entity appears once");
+            let mut sorted = ids.clone();
+            sorted.sort();
+            sorted.dedup();
+            assert_eq!(sorted, ids, "{what}: pages follow id order with no repeats");
+        }
     }
 
     #[tokio::test]

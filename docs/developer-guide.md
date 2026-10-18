@@ -161,6 +161,15 @@ Projects each object down to the requested top-level keys plus the always-on
 `id`. Unknown keys are ignored; omitting `fields` returns everything. `fields`,
 `include`, and `with` are reserved keys — they never reach the `WHERE` clause.
 
+### In what order does a list come back?
+
+Always a total order: the request's sorts, then the primary key `id` ascending
+(unless `id` is itself one of the sorts). A list with no sort is ordered by `id`
+ascending, so offset paging returns every row exactly once even while rows are
+being updated between page fetches, and a keyset cursor can be cut from any list.
+The order is **not** chronological — `id` is a random uuid on most tables — so a
+screen that wants newest first sends `sort=-created_at`.
+
 ### How do I expand a related object (relation expansion)?
 
 ```
@@ -169,8 +178,10 @@ GET /api/v1/orders?include=customer          (alias: ?with=customer)
 
 Hydrates declared to-one relations, injecting each related row as a sibling
 object keyed by the relation name. Batched (one `WHERE id = ANY(...)` per
-relation — no N+1). Only relations the entity **declares** are honored; unknown
-names are ignored.
+relation — no N+1). Only relations the entity **declares** are honored; any other
+name is refused with `400 invalid_query` (reason `unknown_relation`). The names an
+entity accepts are its `EntityRepoMeta::relations()`, and the generated webapp schema
+states the same list as `<entity>IncludableRelations`.
 
 > **v1 caveat:** the expanded object is the raw related row — it is **not** run
 > through the target's response DTO or its `@private` field-security. Do **not**

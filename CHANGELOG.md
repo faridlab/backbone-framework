@@ -16,6 +16,34 @@ back to the `## [Unreleased]` section.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Every paged read has a deterministic total order.** A list with no sort had no `ORDER BY`, so Postgres
+  returned rows in physical order, which changes after an update or a vacuum: offset paging over such a list
+  could repeat a row on one page and skip another between two fetches (the first row of an unsorted
+  `GET /users?limit=3` changed between two captures with no deploy in between). One rule now covers the list,
+  the filtered list, the search, the trash and the keyset walk: the order is the request's sorts followed by
+  the primary key `id` ascending, unless `id` is already one of the sorts; with no sort it is `id` ascending.
+  The order rides the primary-key index when nothing else is sorted, so `LIMIT` still reads only the page.
+  Rows that tie on the sort key were already ordered by `id`; the unsorted list was the gap. The helpers that
+  never took a sort follow the same key: `GenericCrudRepository::list_paginated` (both delete modes) now
+  orders by `id` ascending, and `list_deleted` by `deleted_at` descending then `id`. An aggregate's groups
+  order by count descending then group key, so the `group_limit` cut no longer varies between runs.
+  `backbone-core`'s `PostgresRepository` list, search and `find_by_field` queries end `created_at DESC` on
+  the key column, and `InMemoryRepository` pages in key order instead of hash order.
+
+### Changed
+
+- **Behaviour change: the default order of an unsorted list is now `id` ascending.** It used to be
+  undefined (in practice insertion order on a table never updated, physical order after), and
+  `GenericCrudRepository::list_paginated` returned `id` descending. A consumer that relied on either to show
+  newest first or oldest first must say so with a sort (`sort=-created_at`, `sort=created_at`); the webapp
+  passes its own default sort. `id` is a random uuid on most tables, so the new default is stable, not
+  chronological.
+- An unsorted list that has more rows now hands out `meta.next_cursor` / `prev_cursor` like a sorted one,
+  because its order is the key and a cursor cut in it can be continued. It reads the same rows as before; no
+  catalog round trip is added to it.
+
 ## [3.17.0] - 2026-10-18
 
 ### Added
