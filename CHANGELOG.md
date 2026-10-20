@@ -16,6 +16,36 @@ back to the `## [Unreleased]` section.
 
 ## [Unreleased]
 
+### Added
+
+- **Field-level permissions** (ADR-0033, second amendment). An entity may declare fields a caller may see
+  and set only while holding a permission: the generated `EntityRepoMeta::field_permissions()` returns
+  `(field, permission)` pairs (empty default), and the generic routes enforce the gate from the caller's
+  resolved grants — the same source the route layer reads (`*:*` and the wildcards hold everything, a
+  caller with no `AuthContext` holds nothing):
+  - the value is **redacted to `null`** (the key stays, so response shapes are stable and a client cannot
+    tell a redaction from a stored null) on the record, the list, the trash, the write's own response and
+    the audited-history answers;
+  - the row an `?include=` expands is redacted too, by the **target's own** gate — the gate is registered
+    under the target's table (`backbone_orm::field_permission_registry`, mirroring the secret registry), so
+    a cross-module include (a salary through a timeoff list) is covered even though the including module
+    knows the target only as a table name;
+  - a filter, sort, search column or aggregate naming the field is refused `400 invalid_query` with the new
+    stable reason **`field_permission`** on the parameter that named it, for a non-holder (a holder may
+    ask);
+  - a create, PUT, PATCH or their bulk forms naming the field — either casing, `null` included, presence
+    is the setting — is refused `422` with code **`field_permission_required`** and `params.permission`,
+    for a caller who holds the route's permission but not the field's.
+  Hand-written routes gain `without_secrets_for(&ctx, response)`; `without_secrets` keeps its shape and now
+  redacts every gated field (fail-closed).
+
+### Changed
+
+- **Breaking for a module that adopts a gated field:** a list request naming the field is refused for
+  callers who hold the route's read but not the field's permission (such a request was answered), and
+  those callers' responses change from the value to `null` on every read surface. Adoption is per schema;
+  a module that declares no gate is unchanged.
+
 ## [3.18.0] - 2026-10-19
 
 ### Fixed
