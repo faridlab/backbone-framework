@@ -5,7 +5,7 @@
 //! - `BackboneCrudHandler`: Generic Axum router builder for all 11 endpoints
 //! - Response types: `ApiResponse`, `PaginatedResponse`, `BulkResponse`
 
-use crate::extractors::{JsonOrForm, StrictJsonOrForm};
+use crate::extractors::JsonOrForm;
 pub use crate::permission::{
     guarded, guarded_all, permission_refusal, unauthenticated_refusal, CrudPermissions,
 };
@@ -533,22 +533,15 @@ fn aggregate_spec(params: &ListQueryParams) -> backbone_orm::repository::Aggrega
     }
 }
 
-/// The secret field (`@sensitive`, `@hashed`) a list-style request names as a column,
-/// if any: as a filter (`token_hash=…`, `token_hash[startwith]=…`), a sort (`orderby`,
-/// `sort`, `sort_by`, `orderby[…]`), a search column (`searchFields`), or an aggregate's
-/// group or reduction. Each answers a question about the secret's value — a prefix match
-/// recovers a digest one character at a time, and `min=` returns one outright — so the
-/// request is refused rather than the column quietly dropped. Answers the parameter that
-/// names it beside the field, as the client spelled them.
-fn named_secret_at(params: &ListQueryParams, secret_fields: &[&str]) -> Option<(String, String)> {
-    if secret_fields.is_empty() {
-        return None;
-    }
-    let secrets: Vec<String> = secret_fields.iter().map(|f| camel_to_snake_case(f)).collect();
+/// The fields a list-style request names as columns, walked the same way for secrets and for
+/// permission-gated fields: as a filter (`token_hash=…`, `token_hash[startwith]=…`), a sort
+/// (`orderby`, `sort`, `sort_by`, `orderby[…]`), a search column (`searchFields`), or an
+/// aggregate's group or reduction. Each answer is `(parameter, name it carries)`, as the client
+/// spelled them, in a stable order so a request always names the same one.
+fn named_columns(params: &ListQueryParams) -> Vec<(String, String)> {
     const COLUMN_LISTS: [&str; 10] = [
         "orderby", "sort", "searchfields", "search_fields", "group_by", "sum", "avg", "min", "max", "group_label",
     ];
-    // (parameter, name it carries), in a stable order so a request always names the same one.
     let mut names: Vec<(String, String)> = Vec::new();
     let mut keys: Vec<&String> = params.filters.keys().collect();
     keys.sort();
@@ -571,8 +564,43 @@ fn named_secret_at(params: &ListQueryParams, secret_fields: &[&str]) -> Option<(
     }
     names.extend(params.sort_by.iter().map(|n| ("sort_by".to_string(), n.clone())));
     names
+}
+
+/// The secret field (`@sensitive`, `@hashed`) a list-style request names as a column, if any
+/// (see [`named_columns`]). Each such column answers a question about the secret's value — a
+/// prefix match recovers a digest one character at a time, and `min=` returns one outright — so
+/// the request is refused rather than the column quietly dropped. Answers the parameter that
+/// names it beside the field, as the client spelled them.
+fn named_secret_at(params: &ListQueryParams, secret_fields: &[&str]) -> Option<(String, String)> {
+    if secret_fields.is_empty() {
+        return None;
+    }
+    let secrets: Vec<String> = secret_fields.iter().map(|f| camel_to_snake_case(f)).collect();
+    named_columns(params)
         .into_iter()
         .find(|(_, n)| secrets.contains(&camel_to_snake_case(n.trim())))
+}
+
+/// The permission-gated field a list-style request names as a column while not holding the
+/// permission that unlocks it, if any (see [`named_columns`]): `(parameter, field, permission)`.
+/// A holder may ask these questions of the value; a non-holder may not, or a filter's yes/no
+/// answer and a `min`/`max` would hand the value back one comparison at a time.
+fn named_gated_at<'a>(
+    params: &ListQueryParams,
+    gated: &'a [(&'static str, &'static str)],
+    caller: Option<&backbone_auth::middleware::AuthContext>,
+) -> Option<(String, String, &'a str)> {
+    if gated.is_empty() {
+        return None;
+    }
+    let held = |permission: &str| caller.is_some_and(|c| c.has_permission(permission));
+    named_columns(params).into_iter().find_map(|(parameter, name)| {
+        let column = camel_to_snake_case(name.trim());
+        gated.iter()
+            .find(|(field, _)| camel_to_snake_case(field) == column)
+            .filter(|(_, permission)| !held(permission))
+            .map(|(field, permission)| (parameter, (*field).to_string(), *permission))
+    })
 }
 
 /// The answer to a request that names a secret field (see [`named_secret`]).
@@ -590,14 +618,65 @@ fn secret_violation(parameter: &str, field: &str) -> crate::violation::Violation
     .with_param("field", field)
 }
 
+/// The refusal of a list-shaped request that names a permission-gated field as a column without
+/// holding the permission, on the parameter that names it, naming the permission too.
+fn gated_violation(parameter: &str, field: &str, permission: &str) -> crate::violation::Violation {
+    query_violation(
+        parameter,
+        backbone_orm::QueryParamReason::FieldPermission,
+        format!(
+            "`{parameter}`: `{field}` needs the permission `{permission}` to be filtered, sorted, searched or aggregated"
+        ),
+    )
+    .with_param("field", field)
+    .with_param("permission", permission)
+}
+
+/// The refusals of a write body that names a permission-gated field its caller does not hold the
+/// permission for: setting such a field is a holder's act, or a caller could write what it
+/// cannot read and infer the value via the errors. A key's presence in the body is the setting —
+/// `null` included, in either casing — so a caller without the permission omits the key. A
+/// caller with no context holds nothing.
+fn gated_write_refusals<E: backbone_orm::EntityRepoMeta>(
+    keys: impl Iterator<Item = String>,
+    caller: Option<&backbone_auth::middleware::AuthContext>,
+) -> Vec<crate::violation::Violation> {
+    let gated = E::field_permissions();
+    if gated.is_empty() {
+        return Vec::new();
+    }
+    let mut refused = Vec::new();
+    for key in keys {
+        let column = camel_to_snake_case(key.trim());
+        for (field, permission) in gated {
+            if camel_to_snake_case(field) == column
+                && !caller.is_some_and(|c| c.has_permission(permission))
+            {
+                refused.push(
+                    crate::violation::Violation::new(
+                        key.clone(),
+                        "field_permission_required",
+                        format!("`{key}` needs the permission `{permission}` to be set"),
+                    )
+                    .with_param("permission", *permission),
+                );
+            }
+        }
+    }
+    refused
+}
+
 /// What a list-shaped request must satisfy before it reaches the service, beyond what the
 /// service itself checks: each refused parameter named on its own path.
 ///
 /// `paged` adds the offset-depth bound (the count and aggregate routes do not page); the
-/// response-shaping keys (`fields`, `include`/`with`) are read against the entity.
+/// response-shaping keys (`fields`, `include`/`with`) are read against the entity. `caller` is
+/// the request's `AuthContext`, if it has one: a permission-gated field the caller does not
+/// hold may not be named as a column (a caller with no context holds nothing).
 fn query_refusals<E: backbone_orm::EntityRepoMeta>(
     params: &ListQueryParams,
     paged: bool,
+    caller: Option<&backbone_auth::middleware::AuthContext>,
 ) -> Vec<crate::violation::Violation> {
     use backbone_orm::QueryParamReason;
     let mut refused = Vec::new();
@@ -617,6 +696,9 @@ fn query_refusals<E: backbone_orm::EntityRepoMeta>(
     }
     if let Some((parameter, field)) = named_secret_at(params, E::secret_fields()) {
         refused.push(secret_violation(&parameter, &field));
+    }
+    if let Some((parameter, field, permission)) = named_gated_at(params, E::field_permissions(), caller) {
+        refused.push(gated_violation(&parameter, &field, permission));
     }
     refused.extend(shaping_refusals::<E>(&params.filters));
     refused
@@ -811,39 +893,124 @@ fn strip_secrets(mut value: serde_json::Value, secret_fields: &[&str]) -> serde_
     value
 }
 
+/// Redact the permission-gated fields of an already-serialized response object: the KEY stays
+/// (so a response shape never changes with the caller) and the value becomes `null`, for every
+/// field whose permission `caller` does not hold. A caller with no context holds nothing
+/// (fail-closed); `*:*` and the wildcards hold everything, as any other permission check.
+///
+/// A client therefore cannot tell a redacted value from a stored `null` — that is the accepted
+/// contract, and it is what keeps the gate silent: no error, no missing key.
+fn redact_gated(
+    mut value: serde_json::Value,
+    gated: &[(&'static str, &'static str)],
+    caller: Option<&backbone_auth::middleware::AuthContext>,
+) -> serde_json::Value {
+    if gated.is_empty() {
+        return value;
+    }
+    if let serde_json::Value::Object(map) = &mut value {
+        for (field, permission) in gated {
+            if !caller.is_some_and(|c| c.has_permission(permission)) {
+                map.insert(field.to_string(), serde_json::Value::Null);
+            }
+        }
+    }
+    value
+}
+
+/// [`redact_gated`] over an answer whose shape the framework does not own (a history provider's
+/// recorded rows): every object key that names a gated field, in either casing, at any depth, is
+/// set to `null` for a caller who does not hold its permission.
+fn redact_gated_deep(
+    value: &mut serde_json::Value,
+    gated: &[(&'static str, &'static str)],
+    caller: Option<&backbone_auth::middleware::AuthContext>,
+) {
+    let held = |permission: &str| caller.is_some_and(|c| c.has_permission(permission));
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, inner) in map.iter_mut() {
+                let column = camel_to_snake_case(key);
+                if let Some((_, permission)) =
+                    gated.iter().find(|(field, _)| camel_to_snake_case(field) == column)
+                {
+                    if !held(permission) {
+                        *inner = serde_json::Value::Null;
+                        continue;
+                    }
+                }
+                redact_gated_deep(inner, gated, caller);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                redact_gated_deep(item, gated, caller);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// The shape every generic route serves one entity in: its secrets stripped for
-/// everyone, then its private fields for anyone but the owner or a platform caller.
-/// Write responses pass no scope, so they keep private fields from every caller.
+/// everyone, then its private fields for anyone but the owner or a platform caller,
+/// then its permission-gated fields redacted for a caller who does not hold the
+/// permission. Write responses pass no scope, so they keep private fields from every
+/// caller; `caller` redacts by the same grants the route layer checked.
 fn secure<E: backbone_orm::EntityRepoMeta>(
     value: serde_json::Value,
     scope: Option<&AccessScope>,
+    caller: Option<&backbone_auth::middleware::AuthContext>,
 ) -> serde_json::Value {
-    apply_field_security(
-        strip_secrets(value, E::secret_fields()),
-        scope,
-        E::private_fields(),
-        E::owner_field(),
+    redact_gated(
+        apply_field_security(
+            strip_secrets(value, E::secret_fields()),
+            scope,
+            E::private_fields(),
+            E::owner_field(),
+        ),
+        E::field_permissions(),
+        caller,
     )
 }
 
 /// A response body for a hand-written or generated route outside the generic handler (a
 /// state transition, a verb) that returns an entity's response DTO: the entity's secrets
-/// stripped, and its private fields kept from every caller, as the generic write responses do.
+/// stripped, its private fields kept from every caller (as the generic write responses do),
+/// and its permission-gated fields redacted — with no caller named, for every caller. Prefer
+/// [`without_secrets_for`] where the route holds the request's `AuthContext`.
 pub fn without_secrets<E: backbone_orm::EntityRepoMeta, R: Serialize>(response: R) -> serde_json::Value {
-    secure::<E>(to_response_value(response), None)
+    secure::<E>(to_response_value(response), None, None)
+}
+
+/// [`without_secrets`](Self::without_secrets) for a route that holds the caller's context: the
+/// permission-gated fields a caller holds the permission for stay, the rest are redacted.
+pub fn without_secrets_for<E: backbone_orm::EntityRepoMeta, R: Serialize>(
+    caller: &backbone_auth::middleware::AuthContext,
+    response: R,
+) -> serde_json::Value {
+    secure::<E>(to_response_value(response), None, Some(caller))
 }
 
 /// A related row an `?include=` expands, as the response carries it: camelCase keys,
-/// and the related model's secrets stripped. The row is read raw (`row_to_json`), so
-/// without this a session's `?include=user` would carry the user's password hash.
+/// the related model's secrets stripped, and its permission-gated fields redacted against
+/// `caller`. The row is read raw (`row_to_json`), so without this a session's `?include=user`
+/// would carry the user's password hash — and any caller holding the list's permission would
+/// read a gated field (a salary) it never held the permission for.
 fn related_row<E: backbone_orm::EntityRepoMeta>(
     relation: &str,
     table: &str,
     obj: serde_json::Value,
+    caller: Option<&backbone_auth::middleware::AuthContext>,
 ) -> serde_json::Value {
     let row = strip_secrets(camelize_keys(obj), E::relation_secret_fields(relation));
-    // A cross-module relation names only a table: strip what that table's entity registered.
-    strip_secrets(row, &backbone_orm::secret_registry::secret_fields_of(table))
+    // A cross-module relation names only a table: strip what that table's entity registered,
+    // and redact what the target registered as permission-gated (same registry idea).
+    let row = strip_secrets(row, &backbone_orm::secret_registry::secret_fields_of(table));
+    redact_gated(
+        row,
+        &backbone_orm::field_permission_registry::field_permissions_of(table),
+        caller,
+    )
 }
 
 fn apply_field_security(
@@ -923,7 +1090,8 @@ fn camelize_keys(v: serde_json::Value) -> serde_json::Value {
 /// object keyed by the relation name. Batched: one fetch per relation, keyed by
 /// the rows' foreign-key values. Only relations declared by the entity (via
 /// `EntityRepoMeta::relations()`) are honored; unknown names are ignored. Runs
-/// after field-security and before sparse projection.
+/// after field-security and before sparse projection. `caller` drives the
+/// permission-gated redaction of the expanded row (see [`related_row`]).
 ///
 /// v1 limitation: the expanded object is the raw related row (camelCased keys),
 /// NOT run through the target's response DTO or `@private` field-security — fine
@@ -932,6 +1100,7 @@ async fn expand_includes<S, E, C, U>(
     service: &S,
     rows: &mut [serde_json::Value],
     includes: &[String],
+    caller: Option<&backbone_auth::middleware::AuthContext>,
 ) where
     S: CrudService<E, C, U>,
     E: backbone_orm::EntityRepoMeta + Send + Sync + 'static,
@@ -958,7 +1127,7 @@ async fn expand_includes<S, E, C, U>(
         let mut by_id: HashMap<String, serde_json::Value> = HashMap::new();
         for obj in related {
             if let Some(id) = obj.get("id").and_then(|v| v.as_str()).map(str::to_string) {
-                by_id.insert(id, related_row::<E>(rel_name, table, obj));
+                by_id.insert(id, related_row::<E>(rel_name, table, obj, caller));
             }
         }
         for r in rows.iter_mut() {
@@ -1820,10 +1989,12 @@ where
         S: Clone,
     {
         use crate::permission::Gate;
-        // Building a generic surface for this entity records its secrets under its table, so
-        // a cross-module `?include=` of the table strips them (see `secret_registry`).
+        // Building a generic surface for this entity records its secrets and its permission-gated
+        // fields under its table, so a cross-module `?include=` of the table strips the one and
+        // redacts the other (see `secret_registry`, `field_permission_registry`).
         if let Some(table) = service.table_name() {
             backbone_orm::secret_registry::register(table, E::secret_fields());
+            backbone_orm::field_permission_registry::register(table, E::field_permissions());
         }
         use axum::{
             extract::Path,
@@ -1837,29 +2008,39 @@ where
             // GET /collection - List
             .route(base_path, Self::gate(&perms, Gate::Read, get({
                 let h = handler.clone();
-                move |query: ListQuery, access: Option<Extension<AccessScope>>| async move {
-                    Self::list_handler(h, query, access).await
+                move |query: ListQuery,
+                      access: Option<Extension<AccessScope>>,
+                      caller: Option<Extension<backbone_auth::middleware::AuthContext>>| async move {
+                    Self::list_handler(h, query, access, caller).await
                 }
             })))
             // GET /collection/trash - List deleted
             .route(&format!("{}/trash", base_path), Self::gate(&perms, Gate::Read, get({
                 let h = handler.clone();
-                move |query: ListQuery, access: Option<Extension<AccessScope>>| async move {
-                    Self::list_deleted_handler(h, query, access).await
+                move |query: ListQuery,
+                      access: Option<Extension<AccessScope>>,
+                      caller: Option<Extension<backbone_auth::middleware::AuthContext>>| async move {
+                    Self::list_deleted_handler(h, query, access, caller).await
                 }
             })))
             // GET /collection/:id - Get by ID
             .route(&format!("{}/:id", base_path), Self::gate(&perms, Gate::Read, get({
                 let h = handler.clone();
-                move |path: Path<String>, query: ListQuery, access: Option<Extension<AccessScope>>| async move {
-                    Self::get_handler(h, path, query, access).await
+                move |path: Path<String>,
+                      query: ListQuery,
+                      access: Option<Extension<AccessScope>>,
+                      caller: Option<Extension<backbone_auth::middleware::AuthContext>>| async move {
+                    Self::get_handler(h, path, query, access, caller).await
                 }
             })))
             // GET /collection/:id/deleted - Get deleted by ID
             .route(&format!("{}/:id/deleted", base_path), Self::gate(&perms, Gate::Read, get({
                 let h = handler.clone();
-                move |path: Path<String>, query: ListQuery, access: Option<Extension<AccessScope>>| async move {
-                    Self::get_deleted_handler(h, path, query, access).await
+                move |path: Path<String>,
+                      query: ListQuery,
+                      access: Option<Extension<AccessScope>>,
+                      caller: Option<Extension<backbone_auth::middleware::AuthContext>>| async move {
+                    Self::get_deleted_handler(h, path, query, access, caller).await
                 }
             })))
             // GET /collection/count - Count active entities
@@ -1868,21 +2049,24 @@ where
                 let h = handler.clone();
                 move |path: axum::extract::Path<String>,
                       query: ListQuery,
-                      provider: Option<axum::Extension<std::sync::Arc<dyn HistoryProvider>>>| async move {
-                    Self::history_handler(h, path, query, provider).await
+                      provider: Option<axum::Extension<std::sync::Arc<dyn HistoryProvider>>>,
+                      caller: Option<Extension<backbone_auth::middleware::AuthContext>>| async move {
+                    Self::history_handler(h, path, query, provider, caller).await
                 }
             })))
             // GET /collection/aggregate - Group and reduce
             .route(&format!("{}/aggregate", base_path), Self::gate(&perms, Gate::Read, get({
                 let h = handler.clone();
-                move |query: ListQuery| async move {
-                    Self::aggregate_handler(h, query).await
+                move |query: ListQuery,
+                      caller: Option<Extension<backbone_auth::middleware::AuthContext>>| async move {
+                    Self::aggregate_handler(h, query, caller).await
                 }
             })))
             .route(&format!("{}/count", base_path), Self::gate(&perms, Gate::Read, get({
                 let h = handler.clone();
-                move |query: ListQuery| async move {
-                    Self::count_active_handler(h, query).await
+                move |query: ListQuery,
+                      caller: Option<Extension<backbone_auth::middleware::AuthContext>>| async move {
+                    Self::count_active_handler(h, query, caller).await
                 }
             })))
             // GET /collection/trash/count - Count deleted entities
@@ -1941,15 +2125,17 @@ where
         S: Clone,
     {
         use crate::permission::Gate;
-        // Building a generic surface for this entity records its secrets under its table, so
-        // a cross-module `?include=` of the table strips them (see `secret_registry`).
+        // Building a generic surface for this entity records its secrets and its permission-gated
+        // fields under its table, so a cross-module `?include=` of the table strips the one and
+        // redacts the other (see `secret_registry`, `field_permission_registry`).
         if let Some(table) = service.table_name() {
             backbone_orm::secret_registry::register(table, E::secret_fields());
+            backbone_orm::field_permission_registry::register(table, E::field_permissions());
         }
         use axum::{
             extract::Path,
             routing::{delete, patch, post, put},
-            Router,
+            Extension, Router,
         };
 
         let handler = Arc::new(Self::new(service));
@@ -1958,22 +2144,25 @@ where
             // POST /collection - Create
             .route(base_path, Self::gate(&perms, Gate::Create, post({
                 let h = handler.clone();
-                move |body: StrictJsonOrForm<C>| async move {
-                    Self::create_handler(h, body).await
+                move |caller: Option<Extension<backbone_auth::middleware::AuthContext>>,
+                      body: crate::extractors::WriteBody<C>| async move {
+                    Self::create_handler(h, body, caller).await
                 }
             })))
             // POST /collection/bulk - Bulk create
             .route(&format!("{}/bulk", base_path), Self::gate(&perms, Gate::Create, post({
                 let h = handler.clone();
-                move |body: StrictJsonOrForm<Vec<C>>| async move {
-                    Self::bulk_create_handler(h, body).await
+                move |caller: Option<Extension<backbone_auth::middleware::AuthContext>>,
+                      body: crate::extractors::WriteBody<Vec<C>>| async move {
+                    Self::bulk_create_handler(h, body, caller).await
                 }
             })))
             // POST /collection/upsert - Upsert
             .route(&format!("{}/upsert", base_path), Self::gate(&perms, Gate::CreateUpdate, post({
                 let h = handler.clone();
-                move |body: StrictJsonOrForm<C>| async move {
-                    Self::upsert_handler(h, body).await
+                move |caller: Option<Extension<backbone_auth::middleware::AuthContext>>,
+                      body: crate::extractors::WriteBody<C>| async move {
+                    Self::upsert_handler(h, body, caller).await
                 }
             })))
             // POST /collection/delete/bulk - Bulk soft delete by ids
@@ -1986,8 +2175,9 @@ where
             // POST /collection/restore/bulk - Bulk restore by ids
             .route(&format!("{}/restore/bulk", base_path), Self::gate(&perms, Gate::Restore, post({
                 let h = handler.clone();
-                move |body: JsonOrForm<BatchIdsRequest>| async move {
-                    Self::bulk_restore_handler(h, body).await
+                move |caller: Option<Extension<backbone_auth::middleware::AuthContext>>,
+                      body: JsonOrForm<BatchIdsRequest>| async move {
+                    Self::bulk_restore_handler(h, body, caller).await
                 }
             })))
             // POST /collection/restore/all - Restore all soft-deleted
@@ -2008,22 +2198,25 @@ where
             // PUT /collection/bulk - Bulk full update
             .route(&format!("{}/bulk", base_path), Self::gate(&perms, Gate::Update, put({
                 let h = handler.clone();
-                move |body: JsonOrForm<Vec<serde_json::Map<String, serde_json::Value>>>| async move {
-                    Self::bulk_update_handler(h, body).await
+                move |caller: Option<Extension<backbone_auth::middleware::AuthContext>>,
+                      body: JsonOrForm<Vec<serde_json::Map<String, serde_json::Value>>>| async move {
+                    Self::bulk_update_handler(h, body, caller).await
                 }
             })))
             // PATCH /collection/bulk - Bulk partial update (shared or per-id)
             .route(&format!("{}/bulk", base_path), Self::gate(&perms, Gate::Update, patch({
                 let h = handler.clone();
-                move |body: JsonOrForm<BulkPatchRequest>| async move {
-                    Self::bulk_patch_handler(h, body).await
+                move |caller: Option<Extension<backbone_auth::middleware::AuthContext>>,
+                      body: JsonOrForm<BulkPatchRequest>| async move {
+                    Self::bulk_patch_handler(h, body, caller).await
                 }
             })))
             // POST /collection/bulk/preview - What the bulk partial update would do, nothing written
             .route(&format!("{}/bulk/preview", base_path), Self::gate(&perms, Gate::Update, post({
                 let h = handler.clone();
-                move |body: JsonOrForm<BulkPatchRequest>| async move {
-                    Self::bulk_patch_preview_handler(h, body).await
+                move |caller: Option<Extension<backbone_auth::middleware::AuthContext>>,
+                      body: JsonOrForm<BulkPatchRequest>| async move {
+                    Self::bulk_patch_preview_handler(h, body, caller).await
                 }
             })))
             // DELETE /collection/empty - Empty trash
@@ -2043,15 +2236,19 @@ where
             // PUT /collection/:id - Full update
             .route(&format!("{}/:id", base_path), Self::gate(&perms, Gate::Update, put({
                 let h = handler.clone();
-                move |path: Path<String>, body: StrictJsonOrForm<U>| async move {
-                    Self::update_handler(h, path, body).await
+                move |path: Path<String>,
+                      caller: Option<Extension<backbone_auth::middleware::AuthContext>>,
+                      body: crate::extractors::WriteBody<U>| async move {
+                    Self::update_handler(h, path, body, caller).await
                 }
             })))
             // PATCH /collection/:id - Partial update
             .route(&format!("{}/:id", base_path), Self::gate(&perms, Gate::Update, patch({
                 let h = handler.clone();
-                move |path: Path<String>, body: JsonOrForm<HashMap<String, serde_json::Value>>| async move {
-                    Self::partial_update_handler(h, path, body).await
+                move |path: Path<String>,
+                      caller: Option<Extension<backbone_auth::middleware::AuthContext>>,
+                      body: JsonOrForm<HashMap<String, serde_json::Value>>| async move {
+                    Self::partial_update_handler(h, path, body, caller).await
                 }
             })))
             // DELETE /collection/:id - Soft delete
@@ -2064,8 +2261,9 @@ where
             // POST /collection/:id/restore - Restore
             .route(&format!("{}/:id/restore", base_path), Self::gate(&perms, Gate::Restore, post({
                 let h = handler.clone();
-                move |path: Path<String>| async move {
-                    Self::restore_handler(h, path).await
+                move |path: Path<String>,
+                      caller: Option<Extension<backbone_auth::middleware::AuthContext>>| async move {
+                    Self::restore_handler(h, path, caller).await
                 }
             })))
             // Every write stages its events under the request's correlation id.
@@ -2150,11 +2348,13 @@ where
         handler: Arc<Self>,
         ListQuery(params): ListQuery,
         access: Option<axum::Extension<AccessScope>>,
+        caller: Option<axum::Extension<backbone_auth::middleware::AuthContext>>,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
 
+        let caller = caller.map(|axum::Extension(c)| c);
         let params = params.normalized();
-        let refused = query_refusals::<E>(&params, true);
+        let refused = query_refusals::<E>(&params, true, caller.as_ref());
         if !refused.is_empty() {
             return (StatusCode::BAD_REQUEST, Json(refused_list(refused)));
         }
@@ -2178,10 +2378,10 @@ where
                 let mut rows: Vec<serde_json::Value> = entities
                     .into_iter()
                     .map(|e| {
-                        secure::<E>(to_response_value(R::from(e)), scope.as_ref())
+                        secure::<E>(to_response_value(R::from(e)), scope.as_ref(), caller.as_ref())
                     })
                     .collect();
-                expand_includes::<S, E, C, U>(&*handler.service, &mut rows, &includes).await;
+                expand_includes::<S, E, C, U>(&*handler.service, &mut rows, &includes, caller.as_ref()).await;
                 let items: Vec<serde_json::Value> =
                     rows.into_iter().map(|r| project_sparse(r, &fields)).collect();
                 let response = PaginatedApiResponse::ok_with_info(items, &info);
@@ -2193,13 +2393,22 @@ where
 
     async fn create_handler(
         handler: Arc<Self>,
-        StrictJsonOrForm(dto): StrictJsonOrForm<C>,
+        crate::extractors::WriteBody(dto, keys): crate::extractors::WriteBody<C>,
+        caller: Option<axum::Extension<backbone_auth::middleware::AuthContext>>,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
 
+        let caller = caller.map(|axum::Extension(c)| c);
+        let refused = gated_write_refusals::<E>(keys.into_iter(), caller.as_ref());
+        if !refused.is_empty() {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ApiResponse::<serde_json::Value>::rejected(refusal_sentence(&refused), refused)),
+            );
+        }
         match handler.service.create(dto).await {
             Ok(entity) => {
-                let response = secure::<E>(to_response_value(R::from(entity)), None);
+                let response = secure::<E>(to_response_value(R::from(entity)), None, caller.as_ref());
                 (StatusCode::CREATED, Json(ApiResponse::ok(response)))
             }
             Err(e) => Self::failure(&e, StatusCode::BAD_REQUEST),
@@ -2211,9 +2420,11 @@ where
         axum::extract::Path(id): axum::extract::Path<String>,
         ListQuery(params): ListQuery,
         access: Option<axum::Extension<AccessScope>>,
+        caller: Option<axum::Extension<backbone_auth::middleware::AuthContext>>,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
 
+        let caller = caller.map(|axum::Extension(c)| c);
         if let Some(refused) = invalid_id::<serde_json::Value>(&id, "id") {
             return refused;
         }
@@ -2231,9 +2442,9 @@ where
 
         match handler.service.get_by_id(&id).await {
             Ok(Some(entity)) => {
-                let secured = secure::<E>(to_response_value(R::from(entity)), scope.as_ref());
+                let secured = secure::<E>(to_response_value(R::from(entity)), scope.as_ref(), caller.as_ref());
                 let mut rows = [secured];
-                expand_includes::<S, E, C, U>(&*handler.service, &mut rows, &includes).await;
+                expand_includes::<S, E, C, U>(&*handler.service, &mut rows, &includes, caller.as_ref()).await;
                 let [secured] = rows;
                 let value = project_sparse(secured, &fields);
                 (StatusCode::OK, Json(ApiResponse::ok(value)))
@@ -2250,17 +2461,26 @@ where
     async fn update_handler(
         handler: Arc<Self>,
         axum::extract::Path(id): axum::extract::Path<String>,
-        StrictJsonOrForm(dto): StrictJsonOrForm<U>,
+        crate::extractors::WriteBody(dto, keys): crate::extractors::WriteBody<U>,
+        caller: Option<axum::Extension<backbone_auth::middleware::AuthContext>>,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
 
+        let caller = caller.map(|axum::Extension(c)| c);
         if let Some(refused) = invalid_id::<serde_json::Value>(&id, "id") {
             return refused;
+        }
+        let refused = gated_write_refusals::<E>(keys.into_iter(), caller.as_ref());
+        if !refused.is_empty() {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ApiResponse::<serde_json::Value>::rejected(refusal_sentence(&refused), refused)),
+            );
         }
 
         match handler.service.update(&id, dto).await {
             Ok(Some(entity)) => {
-                let response = secure::<E>(to_response_value(R::from(entity)), None);
+                let response = secure::<E>(to_response_value(R::from(entity)), None, caller.as_ref());
                 (StatusCode::OK, Json(ApiResponse::ok(response)))
             }
             Ok(None) => {
@@ -2276,11 +2496,20 @@ where
         handler: Arc<Self>,
         axum::extract::Path(id): axum::extract::Path<String>,
         JsonOrForm(fields): JsonOrForm<HashMap<String, serde_json::Value>>,
+        caller: Option<axum::Extension<backbone_auth::middleware::AuthContext>>,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
 
+        let caller = caller.map(|axum::Extension(c)| c);
         if let Some(refused) = invalid_id::<serde_json::Value>(&id, "id") {
             return refused;
+        }
+        let refused = gated_write_refusals::<E>(fields.keys().cloned(), caller.as_ref());
+        if !refused.is_empty() {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ApiResponse::<serde_json::Value>::rejected(refusal_sentence(&refused), refused)),
+            );
         }
 
         // Normalize incoming JSON keys to snake_case before forwarding to the
@@ -2300,7 +2529,7 @@ where
 
         match handler.service.partial_update(&id, fields).await {
             Ok(Some(entity)) => {
-                let response = secure::<E>(to_response_value(R::from(entity)), None);
+                let response = secure::<E>(to_response_value(R::from(entity)), None, caller.as_ref());
                 (StatusCode::OK, Json(ApiResponse::ok(response)))
             }
             Ok(None) => {
@@ -2339,10 +2568,19 @@ where
 
     async fn bulk_create_handler(
         handler: Arc<Self>,
-        StrictJsonOrForm(items): StrictJsonOrForm<Vec<C>>,
+        crate::extractors::WriteBody(items, keys): crate::extractors::WriteBody<Vec<C>>,
+        caller: Option<axum::Extension<backbone_auth::middleware::AuthContext>>,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
 
+        let caller = caller.map(|axum::Extension(c)| c);
+        let refused = gated_write_refusals::<E>(keys.into_iter(), caller.as_ref());
+        if !refused.is_empty() {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ApiResponse::<BulkResponse<serde_json::Value>>::rejected(refusal_sentence(&refused), refused)),
+            );
+        }
         if let Some(err) = batch_size_error(items.len()) {
             return (StatusCode::BAD_REQUEST, Json(ApiResponse::<BulkResponse<serde_json::Value>>::error(err)));
         }
@@ -2350,7 +2588,7 @@ where
             Ok(entities) => {
                 let result_items: Vec<serde_json::Value> = entities
                     .into_iter()
-                    .map(|e| secure::<E>(to_response_value(R::from(e)), None))
+                    .map(|e| secure::<E>(to_response_value(R::from(e)), None, caller.as_ref()))
                     .collect();
                 let total = result_items.len();
                 let response = BulkResponse {
@@ -2393,9 +2631,11 @@ where
     async fn bulk_restore_handler(
         handler: Arc<Self>,
         JsonOrForm(req): JsonOrForm<BatchIdsRequest>,
+        caller: Option<axum::Extension<backbone_auth::middleware::AuthContext>>,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
 
+        let caller = caller.map(|axum::Extension(c)| c);
         if let Some(err) = batch_size_error(req.ids.len()) {
             return (StatusCode::BAD_REQUEST, Json(ApiResponse::<BulkResponse<serde_json::Value>>::error(err)));
         }
@@ -2406,7 +2646,7 @@ where
             Ok(entities) => {
                 let items: Vec<serde_json::Value> = entities
                     .into_iter()
-                    .map(|e| secure::<E>(to_response_value(R::from(e)), None))
+                    .map(|e| secure::<E>(to_response_value(R::from(e)), None, caller.as_ref()))
                     .collect();
                 let total = items.len();
                 (StatusCode::OK, Json(ApiResponse::ok(BulkResponse { items, total, failed: 0, errors: vec![] })))
@@ -2456,11 +2696,21 @@ where
     async fn bulk_update_handler(
         handler: Arc<Self>,
         JsonOrForm(raw): JsonOrForm<Vec<serde_json::Map<String, serde_json::Value>>>,
+        caller: Option<axum::Extension<backbone_auth::middleware::AuthContext>>,
     ) -> axum::response::Response {
         use axum::{http::StatusCode, response::IntoResponse, Json};
 
+        let caller = caller.map(|axum::Extension(c)| c);
         if let Some(err) = batch_size_error(raw.len()) {
             return (StatusCode::BAD_REQUEST, Json(ApiResponse::<BulkResponse<serde_json::Value>>::error(err)))
+                .into_response();
+        }
+        let refused = gated_write_refusals::<E>(raw.iter().flat_map(|m| m.keys().cloned()), caller.as_ref());
+        if !refused.is_empty() {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ApiResponse::<serde_json::Value>::rejected(refusal_sentence(&refused), refused)),
+            )
                 .into_response();
         }
         let mut items: Vec<(String, U)> = Vec::with_capacity(raw.len());
@@ -2496,7 +2746,7 @@ where
             Ok(entities) => {
                 let items: Vec<serde_json::Value> = entities
                     .into_iter()
-                    .map(|e| secure::<E>(to_response_value(R::from(e)), None))
+                    .map(|e| secure::<E>(to_response_value(R::from(e)), None, caller.as_ref()))
                     .collect();
                 let total = items.len();
                 (StatusCode::OK, Json(ApiResponse::ok(BulkResponse { items, total, failed: 0, errors: vec![] })))
@@ -2509,15 +2759,24 @@ where
     async fn bulk_patch_handler(
         handler: Arc<Self>,
         JsonOrForm(req): JsonOrForm<BulkPatchRequest>,
+        caller: Option<axum::Extension<backbone_auth::middleware::AuthContext>>,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
 
+        let caller = caller.map(|axum::Extension(c)| c);
         let items = req.into_items();
         if let Some(err) = batch_size_error(items.len()) {
             return (StatusCode::BAD_REQUEST, Json(ApiResponse::<BulkResponse<serde_json::Value>>::error(err)));
         }
         if let Some(refused) = invalid_ids::<BulkResponse<serde_json::Value>>(items.iter().map(|(id, _)| id.as_str()), |i| format!("{i}/id")) {
             return refused;
+        }
+        let refused = gated_write_refusals::<E>(items.iter().flat_map(|(_, f)| f.keys().cloned()), caller.as_ref());
+        if !refused.is_empty() {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ApiResponse::<BulkResponse<serde_json::Value>>::rejected(refusal_sentence(&refused), refused)),
+            );
         }
         // Normalize patch keys to snake_case (mirrors partial_update_handler).
         let items: Vec<(String, HashMap<String, serde_json::Value>)> = items
@@ -2534,7 +2793,7 @@ where
             Ok(entities) => {
                 let items: Vec<serde_json::Value> = entities
                     .into_iter()
-                    .map(|e| secure::<E>(to_response_value(R::from(e)), None))
+                    .map(|e| secure::<E>(to_response_value(R::from(e)), None, caller.as_ref()))
                     .collect();
                 let total = items.len();
                 (StatusCode::OK, Json(ApiResponse::ok(BulkResponse { items, total, failed: 0, errors: vec![] })))
@@ -2551,15 +2810,24 @@ where
     async fn bulk_patch_preview_handler(
         handler: Arc<Self>,
         JsonOrForm(req): JsonOrForm<BulkPatchRequest>,
+        caller: Option<axum::Extension<backbone_auth::middleware::AuthContext>>,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
 
+        let caller = caller.map(|axum::Extension(c)| c);
         let items = req.into_items();
         if let Some(err) = batch_size_error(items.len()) {
             return (StatusCode::BAD_REQUEST, Json(ApiResponse::<BulkPreview>::error(err)));
         }
         if let Some(refused) = invalid_ids::<BulkPreview>(items.iter().map(|(id, _)| id.as_str()), |i| format!("{i}/id")) {
             return refused;
+        }
+        let refused = gated_write_refusals::<E>(items.iter().flat_map(|(_, f)| f.keys().cloned()), caller.as_ref());
+        if !refused.is_empty() {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ApiResponse::<BulkPreview>::rejected(refusal_sentence(&refused), refused)),
+            );
         }
         let items: Vec<(String, HashMap<String, serde_json::Value>)> = items
             .into_iter()
@@ -2582,8 +2850,8 @@ where
                     .map(|row| {
                         let outcome = match row.outcome {
                             Ok((before, after)) => Ok((
-                                secure::<E>(to_response_value(R::from(before)), None),
-                                secure::<E>(to_response_value(R::from(after)), None),
+                                secure::<E>(to_response_value(R::from(before)), None, caller.as_ref()),
+                                secure::<E>(to_response_value(R::from(after)), None, caller.as_ref()),
                             )),
                             Err(e) => Err((
                                 S::violations_of(&e)
@@ -2607,10 +2875,19 @@ where
 
     async fn upsert_handler(
         handler: Arc<Self>,
-        StrictJsonOrForm(dto): StrictJsonOrForm<C>,
+        crate::extractors::WriteBody(dto, keys): crate::extractors::WriteBody<C>,
+        caller: Option<axum::Extension<backbone_auth::middleware::AuthContext>>,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
 
+        let caller = caller.map(|axum::Extension(c)| c);
+        let refused = gated_write_refusals::<E>(keys.into_iter(), caller.as_ref());
+        if !refused.is_empty() {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ApiResponse::<serde_json::Value>::rejected(refusal_sentence(&refused), refused)),
+            );
+        }
         // A create body names no record to match, so a service without a real upsert could
         // only create — a duplicate on every retry. Say so instead.
         if !S::supports_upsert() {
@@ -2621,7 +2898,7 @@ where
         }
         match handler.service.upsert(dto).await {
             Ok(entity) => {
-                let response = secure::<E>(to_response_value(R::from(entity)), None);
+                let response = secure::<E>(to_response_value(R::from(entity)), None, caller.as_ref());
                 (StatusCode::OK, Json(ApiResponse::ok(response)))
             }
             Err(e) => {
@@ -2634,11 +2911,13 @@ where
         handler: Arc<Self>,
         ListQuery(params): ListQuery,
         access: Option<axum::Extension<AccessScope>>,
+        caller: Option<axum::Extension<backbone_auth::middleware::AuthContext>>,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
 
+        let caller = caller.map(|axum::Extension(c)| c);
         let params = params.normalized();
-        let refused = query_refusals::<E>(&params, true);
+        let refused = query_refusals::<E>(&params, true, caller.as_ref());
         if !refused.is_empty() {
             return (StatusCode::BAD_REQUEST, Json(refused_list(refused)));
         }
@@ -2656,10 +2935,10 @@ where
                 let mut rows: Vec<serde_json::Value> = entities
                     .into_iter()
                     .map(|e| {
-                        secure::<E>(to_response_value(R::from(e)), scope.as_ref())
+                        secure::<E>(to_response_value(R::from(e)), scope.as_ref(), caller.as_ref())
                     })
                     .collect();
-                expand_includes::<S, E, C, U>(&*handler.service, &mut rows, &includes).await;
+                expand_includes::<S, E, C, U>(&*handler.service, &mut rows, &includes, caller.as_ref()).await;
                 let items: Vec<serde_json::Value> =
                     rows.into_iter().map(|r| project_sparse(r, &fields)).collect();
                 let response = PaginatedApiResponse::ok(items, total, params.page, params.limit);
@@ -2672,16 +2951,18 @@ where
     async fn restore_handler(
         handler: Arc<Self>,
         axum::extract::Path(id): axum::extract::Path<String>,
+        caller: Option<axum::Extension<backbone_auth::middleware::AuthContext>>,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
 
+        let caller = caller.map(|axum::Extension(c)| c);
         if let Some(refused) = invalid_id::<serde_json::Value>(&id, "id") {
             return refused;
         }
 
         match handler.service.restore(&id).await {
             Ok(Some(entity)) => {
-                let response = secure::<E>(to_response_value(R::from(entity)), None);
+                let response = secure::<E>(to_response_value(R::from(entity)), None, caller.as_ref());
                 (StatusCode::OK, Json(ApiResponse::success_with_message(response, "Entity restored successfully")))
             }
             Ok(None) => {
@@ -2717,9 +2998,11 @@ where
         axum::extract::Path(id): axum::extract::Path<String>,
         ListQuery(params): ListQuery,
         access: Option<axum::Extension<AccessScope>>,
+        caller: Option<axum::Extension<backbone_auth::middleware::AuthContext>>,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
 
+        let caller = caller.map(|axum::Extension(c)| c);
         if let Some(refused) = invalid_id::<serde_json::Value>(&id, "id") {
             return refused;
         }
@@ -2729,7 +3012,7 @@ where
 
         match handler.service.get_deleted_by_id(&id).await {
             Ok(Some(entity)) => {
-                let secured = secure::<E>(to_response_value(R::from(entity)), scope.as_ref());
+                let secured = secure::<E>(to_response_value(R::from(entity)), scope.as_ref(), caller.as_ref());
                 let value = project_sparse(secured, &fields);
                 (StatusCode::OK, Json(ApiResponse::ok(value)))
             }
@@ -2786,13 +3069,15 @@ where
     async fn count_active_handler(
         handler: Arc<Self>,
         ListQuery(params): ListQuery,
+        caller: Option<axum::Extension<backbone_auth::middleware::AuthContext>>,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
 
+        let caller = caller.map(|axum::Extension(c)| c);
         // An unfiltered request still answers the whole-table count, which is
         // what every existing caller expects; a filtered one now answers the
         // question it actually asked.
-        let refused = query_refusals::<E>(&params, false);
+        let refused = query_refusals::<E>(&params, false, caller.as_ref());
         if !refused.is_empty() {
             return (
                 StatusCode::BAD_REQUEST,
@@ -2816,10 +3101,12 @@ where
     async fn aggregate_handler(
         handler: Arc<Self>,
         ListQuery(params): ListQuery,
+        caller: Option<axum::Extension<backbone_auth::middleware::AuthContext>>,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
 
-        let refused = query_refusals::<E>(&params, false);
+        let caller = caller.map(|axum::Extension(c)| c);
+        let refused = query_refusals::<E>(&params, false, caller.as_ref());
         if !refused.is_empty() {
             return (
                 StatusCode::BAD_REQUEST,
@@ -2891,9 +3178,11 @@ where
         axum::extract::Path(id): axum::extract::Path<String>,
         ListQuery(params): ListQuery,
         provider: Option<axum::Extension<std::sync::Arc<dyn HistoryProvider>>>,
+        caller: Option<axum::Extension<backbone_auth::middleware::AuthContext>>,
     ) -> impl axum::response::IntoResponse {
         use axum::{http::StatusCode, Json};
 
+        let caller = caller.map(|axum::Extension(c)| c);
         if let Some(refused) = invalid_id::<serde_json::Value>(&id, "id") {
             return refused;
         }
@@ -2923,13 +3212,18 @@ where
         let offset = params.page.saturating_sub(1) * limit;
 
         match provider.history(&table, &id, limit, offset).await {
-            Ok(Some(entries)) => (
-                StatusCode::OK,
-                Json(ApiResponse::ok(serde_json::json!({
-                    "audited": true,
-                    "entries": entries,
-                }))),
-            ),
+            Ok(Some(entries)) => {
+                let mut body = serde_json::json!({ "audited": true, "entries": entries });
+                // The provider answers with the rows it recorded, in its own shape (before and
+                // after snapshots), so the gate walks the whole answer: a permission-gated field
+                // a caller does not hold is redacted wherever it appears, casing aside. A name
+                // that happens to match a gated field's is redacted too — the safe side.
+                let gated = E::field_permissions();
+                if !gated.is_empty() {
+                    redact_gated_deep(&mut body, gated, caller.as_ref());
+                }
+                (StatusCode::OK, Json(ApiResponse::ok(body)))
+            }
             Ok(None) => (
                 StatusCode::OK,
                 Json(ApiResponse::ok(serde_json::json!({
@@ -3352,11 +3646,11 @@ mod tests {
     #[test]
     fn a_secret_is_served_to_no_caller_not_even_platform_or_the_owner() {
         for scope in [None, Some(AccessScope::Platform), Some(AccessScope::Company(owner_a()))] {
-            let out = secure::<Secretive>(secret_row(), scope.as_ref());
+            let out = secure::<Secretive>(secret_row(), scope.as_ref(), None);
             assert!(out.get("tokenHash").is_none(), "{scope:?} was served the secret");
             assert!(out.get("name").is_some());
         }
-        let platform = secure::<Secretive>(secret_row(), Some(&AccessScope::Platform));
+        let platform = secure::<Secretive>(secret_row(), Some(&AccessScope::Platform), None);
         assert!(platform.get("hppPerUnit").is_some(), "private fields keep their owner/platform rule");
     }
 
@@ -3431,7 +3725,7 @@ mod tests {
     #[test]
     fn the_depth_secret_sort_order_and_shaping_refusals_each_name_their_parameter() {
         let at = |params: &ListQueryParams, paged: bool| {
-            query_refusals::<Secretive>(params, paged)
+            query_refusals::<Secretive>(params, paged, None)
                 .into_iter()
                 .map(|v| (v.path, v.params["reason"].as_str().unwrap_or("").to_string()))
                 .collect::<Vec<_>>()
@@ -3446,7 +3740,7 @@ mod tests {
         assert!(at(&p, true).is_empty());
         let mut p = ask(&[]);
         p.sort_by = Some("tokenHash".into());
-        let named = query_refusals::<Secretive>(&p, true);
+        let named = query_refusals::<Secretive>(&p, true, None);
         assert_eq!(named[0].path, "sort_by");
         assert!(named[0].message.contains("sort_by") && named[0].message.contains("secret"), "{}", named[0].message);
         assert_eq!(at(&ask(&[("token_hash[startwith]", "a")]), true)[0].0, "token_hash[startwith]");
@@ -3522,7 +3816,7 @@ mod tests {
 
     #[test]
     fn a_write_response_keeps_secrets_and_private_fields_from_every_caller() {
-        let out = secure::<Secretive>(secret_row(), None);
+        let out = secure::<Secretive>(secret_row(), None, None);
         assert!(out.get("tokenHash").is_none() && out.get("hppPerUnit").is_none());
     }
 
@@ -3536,13 +3830,111 @@ mod tests {
     #[test]
     fn an_included_row_loses_the_related_models_secrets() {
         let raw = serde_json::json!({ "id": "u1", "email": "a@b.c", "password_hash": "$argon2id$..." });
-        let out = related_row::<Secretive>("user", "users", raw.clone());
+        let out = related_row::<Secretive>("user", "users", raw.clone(), None);
         assert!(out.get("passwordHash").is_none(), "{out}");
         assert_eq!(out["email"], "a@b.c");
-        assert!(related_row::<Secretive>("other", "others", raw.clone()).get("passwordHash").is_some(), "only the named relation");
+        assert!(related_row::<Secretive>("other", "others", raw.clone(), None).get("passwordHash").is_some(), "only the named relation");
         // A cross-module relation: the table's entity registered its secrets.
         backbone_orm::secret_registry::register("employee_probe.staff", &["passwordHash"]);
-        assert!(related_row::<Secretive>("staff", "employee_probe.staff", raw).get("passwordHash").is_none(), "registered table");
+        assert!(related_row::<Secretive>("staff", "employee_probe.staff", raw, None).get("passwordHash").is_none(), "registered table");
+    }
+
+    // ── Field permissions (requires: on a field) ─────────────────────────────
+
+    /// An entity whose `name` field only a holder of `widget:see_name` may read, filter or set.
+    struct Gated;
+    impl backbone_orm::EntityRepoMeta for Gated {
+        fn column_types() -> HashMap<String, String> {
+            HashMap::new()
+        }
+        fn search_fields() -> &'static [&'static str] {
+            &[]
+        }
+        fn field_permissions() -> &'static [(&'static str, &'static str)] {
+            &[("name", "widget:see_name")]
+        }
+    }
+
+    fn gated_row() -> serde_json::Value {
+        serde_json::json!({ "id": "w1", "name": "Hush", "hppPerUnit": 3 })
+    }
+
+    fn caller_holding(perms: &[&str]) -> backbone_auth::middleware::AuthContext {
+        backbone_auth::middleware::AuthContext {
+            user_id: "u".into(),
+            roles: vec![],
+            permissions: perms.iter().map(|p| p.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn a_gated_field_is_redacted_to_null_for_a_non_holder_and_kept_for_a_holder() {
+        let none = secure::<Gated>(gated_row(), None, None);
+        assert_eq!(none.get("name"), Some(&serde_json::Value::Null), "redacted, not omitted: {none}");
+        assert_eq!(none.get("hppPerUnit"), Some(&serde_json::json!(3)), "only the gated field");
+
+        let holder = caller_holding(&["widget:see_name"]);
+        assert_eq!(secure::<Gated>(gated_row(), None, Some(&holder)).get("name"), Some(&serde_json::json!("Hush")));
+
+        let god = caller_holding(&["*:*"]);
+        assert_eq!(secure::<Gated>(gated_row(), None, Some(&god)).get("name"), Some(&serde_json::json!("Hush")), "*:* sees everything");
+
+        // A caller that exists but holds nothing is the same as no caller: fail closed.
+        assert_eq!(secure::<Gated>(gated_row(), None, Some(&caller_holding(&[]))).get("name"), Some(&serde_json::Value::Null));
+        // The caller-less seam generated verbs used before the grants-aware one redacts too.
+        assert_eq!(without_secrets::<Gated, _>(gated_row()).get("name"), Some(&serde_json::Value::Null));
+        assert_eq!(without_secrets_for::<Gated, _>(&holder, gated_row()).get("name"), Some(&serde_json::json!("Hush")));
+    }
+
+    #[test]
+    fn a_gated_field_may_not_be_a_column_of_a_non_holders_query() {
+        let holder = caller_holding(&["widget:see_name"]);
+        for (pairs, parameter) in [
+            (vec![("name", "Hush")], "name"),
+            (vec![("min", "name")], "min"),
+            (vec![("group_by", "name")], "group_by"),
+            (vec![("orderby", "name")], "orderby"),
+        ] {
+            let params = ListQueryParams {
+                filters: pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+                ..Default::default()
+            };
+            let refused = query_refusals::<Gated>(&params, false, None);
+            assert_eq!((refused[0].path.as_str(), refused[0].params["reason"].as_str()), (parameter, Some("field_permission")), "{pairs:?}");
+            assert_eq!(refused[0].params["permission"], "widget:see_name", "{pairs:?}");
+            assert_eq!(refused[0].params["field"], "name", "{pairs:?}");
+            assert!(query_refusals::<Gated>(&params, false, Some(&holder)).is_empty(), "a holder asks: {pairs:?}");
+        }
+        let mut p = ask(&[]);
+        p.sort_by = Some("name".into());
+        let refused = query_refusals::<Gated>(&p, true, None);
+        assert_eq!((refused[0].path.as_str(), refused[0].params["reason"].as_str()), ("sort_by", Some("field_permission")));
+    }
+
+    #[test]
+    fn a_write_that_names_a_gated_field_is_refused_for_a_non_holder_in_either_casing() {
+        let holder = caller_holding(&["widget:see_name"]);
+        for key in ["name", "Name", "NAME"] {
+            let refused = gated_write_refusals::<Gated>(std::iter::once(key.to_string()), None);
+            assert_eq!(refused.len(), 1, "{key}");
+            assert_eq!((refused[0].path.as_str(), refused[0].code.as_str()), (key, "field_permission_required"), "{key}");
+            assert_eq!(refused[0].params["permission"], "widget:see_name");
+            assert!(gated_write_refusals::<Gated>(std::iter::once(key.to_string()), Some(&holder)).is_empty(), "a holder sets it: {key}");
+        }
+        assert!(gated_write_refusals::<Gated>(std::iter::once("hppPerUnit".to_string()), None).is_empty(), "an ungated field is free to set");
+        assert!(gated_write_refusals::<Gated>(Vec::<String>::new().into_iter(), None).is_empty());
+    }
+
+    #[test]
+    fn an_included_row_redacts_the_gated_fields_the_target_registered() {
+        let raw = serde_json::json!({ "id": "u1", "name": "Hush", "email": "a@b.c" });
+        backbone_orm::field_permission_registry::register("gated_probe.widgets", &[("name", "widget:see_name")]);
+        let out = related_row::<Gated>("probe", "gated_probe.widgets", raw.clone(), None);
+        assert_eq!(out.get("name"), Some(&serde_json::Value::Null), "redacted by the table's own gate: {out}");
+        assert_eq!(out["email"], "a@b.c");
+        let holder = caller_holding(&["widget:see_name"]);
+        let kept = related_row::<Gated>("probe", "gated_probe.widgets", raw, Some(&holder));
+        assert_eq!(kept.get("name"), Some(&serde_json::json!("Hush")));
     }
 
     #[test]

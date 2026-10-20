@@ -88,6 +88,17 @@ pub trait EntityRepoMeta {
         &[]
     }
 
+    /// Fields (camelCase response keys) a caller may see and set only while holding a
+    /// permission, as `(field, permission)`. The serialization seam redacts the value to `null`
+    /// (the key stays, so response shapes are stable) for a caller whose resolved grants do not
+    /// hold the permission, list-shaped requests may not filter, sort, search or aggregate over
+    /// one without it, and a write that sets one is refused naming the permission. `*:*` (and
+    /// `field_resource:*` / `*:action` wildcards) hold everything, as any other permission.
+    /// Default: no field is gated. The schema generator fills it from `requires:` on fields.
+    fn field_permissions() -> &'static [(&'static str, &'static str)] {
+        &[]
+    }
+
     /// The response field (camelCase) holding the owner/company id (`@owner`),
     /// compared against the caller's access scope to decide private-field
     /// visibility. `None` = the entity has no owner concept.

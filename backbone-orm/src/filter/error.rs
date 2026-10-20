@@ -39,6 +39,11 @@ pub enum QueryParamReason {
     NotNumeric,
     /// An operator the named column's type does not support (`contain` on a number).
     UnsupportedOperator,
+    /// A permission-gated field (`requires:` on the field) the caller does not hold the
+    /// permission for, named as a filter, a sort, a search column or an aggregate. A holder may
+    /// ask these questions of the value; a non-holder may not, or a filter's yes/no answer and a
+    /// `min`/`max` would hand the value back one comparison at a time.
+    FieldPermission,
 }
 
 impl QueryParamReason {
@@ -55,6 +60,7 @@ impl QueryParamReason {
             QueryParamReason::UnknownRelation => "unknown_relation",
             QueryParamReason::NotNumeric => "not_numeric",
             QueryParamReason::UnsupportedOperator => "unsupported_operator",
+            QueryParamReason::FieldPermission => "field_permission",
         }
     }
 }

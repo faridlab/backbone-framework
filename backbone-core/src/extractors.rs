@@ -41,6 +41,12 @@ pub struct JsonOrForm<T>(pub T);
 /// lenient: a browser form posts its buttons and hidden inputs too.
 pub struct StrictJsonOrForm<T>(pub T);
 
+/// A write body decoded to `T` (strictly, as [`StrictJsonOrForm`]), with the top-level keys it
+/// names beside it — the keys a field permission may refuse a caller who cannot hold the field
+/// ([`crate::http`]'s `field_permissions` gate). JSON keys come from the parsed document; form
+/// bodies are flat, so their keys are the encoded pairs'.
+pub struct WriteBody<T>(pub T, pub Vec<String>);
+
 #[async_trait]
 impl<S, T> FromRequest<S> for JsonOrForm<T>
 where
@@ -64,6 +70,76 @@ where
 
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
         decode_body(req, state, true).await.map(Self)
+    }
+}
+
+#[async_trait]
+impl<S, T> FromRequest<S> for WriteBody<T>
+where
+    S: Send + Sync,
+    T: DeserializeOwned + 'static,
+{
+    type Rejection = Response;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        let is_form = req
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|ct| ct.starts_with("application/x-www-form-urlencoded"))
+            .unwrap_or(false);
+        if is_form {
+            // A form write is flat: the encoded pairs' names are the keys the body names, and
+            // the body decodes leniently as a form does.
+            let bytes = Bytes::from_request(req, state).await.map_err(|rejection| {
+                let status = rejection.status();
+                refusal(
+                    status,
+                    rejection.body_text(),
+                    Violation::new("", "unreadable_body", "The request body could not be read"),
+                )
+            })?;
+            let keys = serde_urlencoded::from_bytes::<Vec<(String, String)>>(&bytes)
+                .map(|pairs| pairs.into_iter().map(|(k, _)| k).collect())
+                .unwrap_or_default();
+            let value: T = serde_urlencoded::from_bytes(&bytes).map_err(|e| {
+                let message = e.to_string();
+                refusal(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    format!("invalid form body: {message}"),
+                    Violation::new("", "invalid_value", message),
+                )
+            })?;
+            return Ok(Self(value, keys));
+        }
+        let bytes = Bytes::from_request(req, state).await.map_err(|rejection| {
+            let status = rejection.status();
+            refusal(
+                status,
+                rejection.body_text(),
+                Violation::new("", "unreadable_body", "The request body could not be read"),
+            )
+        })?;
+        // Parse once for the keys (the strict unknown-key check below runs on the typed decode;
+        // a key serde drops would be a body the strict form already refuses).
+        let keys = serde_json::from_slice::<serde_json::Value>(&bytes)
+            .ok()
+            .and_then(|v| match v {
+                serde_json::Value::Object(m) => Some(m.keys().cloned().collect()),
+                serde_json::Value::Array(a) => Some(
+                    a.into_iter()
+                        .filter_map(|item| {
+                            item.as_object()
+                                .map(|m| m.keys().cloned().collect::<Vec<_>>())
+                        })
+                        .flatten()
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let value = decode_json(&bytes, true)?;
+        Ok(Self(value, keys))
     }
 }
 
