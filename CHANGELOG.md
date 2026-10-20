@@ -16,6 +16,8 @@ back to the `## [Unreleased]` section.
 
 ## [Unreleased]
 
+## [3.19.0] - 2026-10-20
+
 ### Added
 
 - **Field-level permissions** (ADR-0033, second amendment). An entity may declare fields a caller may see
