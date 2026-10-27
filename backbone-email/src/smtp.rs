@@ -189,11 +189,13 @@ impl SmtpEmailService {
 
             builder.build()
         } else {
-            // Plain connection (no TLS)
+            // Plain connection (no TLS). relay() would REQUIRE STARTTLS
+            // (lettre's relay builder enforces TLS), so a "none" server row
+            // still handshook and died on self-signed dev certificates;
+            // builder_dangerous + no tls() is the actual plaintext path.
             tracing::debug!("Building plain SMTP transport for {}:{}", config.host, config.port);
 
-            let mut builder = SmtpTransport::relay(&config.host)
-                .map_err(|e| EmailError::SmtpConnection(format!("Relay build failed: {}", e)))?
+            let mut builder = SmtpTransport::builder_dangerous(&config.host)
                 .port(config.port);
 
             if let (Some(username), Some(password)) = (&config.username, &config.password) {
